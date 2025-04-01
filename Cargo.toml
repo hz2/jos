@@ -1,0 +1,28 @@
+[package]
+name = "jos"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bootloader = "0.9"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+# [target.'cfg(target_os = "linux")']
+# rustflags = ["-C", "link-arg=-nostartfiles"]
+
+# [target.'cfg(target_os = "windows")']
+# rustflags = ["-C", "link-args=/ENTRY:_start /SUBSYSTEM:console"]
+
+# [target.'cfg(target_os = "macos")']
+# rustflags = ["-C", "link-args=-e __start -static -nostartfiles"]
+
+
+# While it’s possible to build a freestanding executable for Linux, Windows, and macOS, it’s probably not a good idea. 
+# The reason is that our executable still expects various things, for example that a stack is initialized when the 
+# _start function is called. Without the C runtime, some of these requirements might not be fulfilled, 
+# which might cause our program to fail, e.g. through a segmentation fault.

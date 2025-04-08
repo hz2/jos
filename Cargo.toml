@@ -1,7 +1,8 @@
 [package]
 name = "jos"
 version = "0.1.0"
-edition = "2021"
+authors = ["Jason Devers <dev.json@gmail.com>"]
+edition = "2024"
 
 [dependencies]
 bootloader = "0.9"

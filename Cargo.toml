@@ -1,35 +1,72 @@
+# [package]
+# name = "jos"
+# version = "0.1.0"
+# authors = ["Jason Devers <dev.json@gmail.com>"]
+# edition = "2024"
+
+# [[test]]
+# name = "should_panic"
+# harness = false
+
+# [dependencies]
+# bootloader = "0.9"
+# volatile = "0.2.6" # NOTE: newer versions are not compatible with the blog posts
+# spin = "0.5.2"
+
+# [dependencies.lazy_static]
+# version = "1.0"
+# features = ["spin_no_std"]
+
+# [profile.dev]
+# panic = "abort"
+
+# [profile.release]
+# panic = "abort"
+
+# # [target.'cfg(target_os = "linux")']
+# # rustflags = ["-C", "link-arg=-nostartfiles"]
+
+# # [target.'cfg(target_os = "windows")']
+# # rustflags = ["-C", "link-args=/ENTRY:_start /SUBSYSTEM:console"]
+
+# # [target.'cfg(target_os = "macos")']
+# # rustflags = ["-C", "link-args=-e __start -static -nostartfiles"]
+
+
+# # While it’s possible to build a freestanding executable for Linux, Windows, and macOS, it’s probably not a good idea. 
+# # The reason is that our executable still expects various things, for example that a stack is initialized when the 
+# # _start function is called. Without the C runtime, some of these requirements might not be fulfilled, 
+# # which might cause our program to fail, e.g. through a segmentation fault.
+
 [package]
 name = "jos"
 version = "0.1.0"
 authors = ["Jason Devers <dev.json@gmail.com>"]
 edition = "2024"
 
+[[test]]
+name = "should_panic"
+harness = false
+
 [dependencies]
 bootloader = "0.9"
-volatile = "0.2.6" # NOTE: newer versions are not compatible with the blog posts
+volatile = "0.2.6"
 spin = "0.5.2"
+x86_64 = "0.14.2"
+uart_16550 = "0.2.0"
 
 [dependencies.lazy_static]
 version = "1.0"
 features = ["spin_no_std"]
 
-[profile.dev]
-panic = "abort"
 
-[profile.release]
-panic = "abort"
-
-# [target.'cfg(target_os = "linux")']
-# rustflags = ["-C", "link-arg=-nostartfiles"]
-
-# [target.'cfg(target_os = "windows")']
-# rustflags = ["-C", "link-args=/ENTRY:_start /SUBSYSTEM:console"]
-
-# [target.'cfg(target_os = "macos")']
-# rustflags = ["-C", "link-args=-e __start -static -nostartfiles"]
-
-
-# While it’s possible to build a freestanding executable for Linux, Windows, and macOS, it’s probably not a good idea. 
-# The reason is that our executable still expects various things, for example that a stack is initialized when the 
-# _start function is called. Without the C runtime, some of these requirements might not be fulfilled, 
-# which might cause our program to fail, e.g. through a segmentation fault.
+[package.metadata.bootimage]
+test-args = [
+    "-device",
+    "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-serial",
+    "stdio",
+    "-display",
+    "none",
+]
+test-success-exit-code = 33 # (0x10 << 1) | 1

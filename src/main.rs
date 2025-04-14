@@ -5,8 +5,10 @@ use core::panic::PanicInfo;
 
 mod vga_buffer;
 
+/// This function is called on panic.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    println!("{}", info);
     loop {}
 }
 
@@ -14,5 +16,6 @@ fn panic(_info: &PanicInfo) -> ! {
 pub extern "C" fn _start() -> ! {
     // this is where the program starts executing
     vga_buffer::print_something();
+    println!("hello world{}", "!");
     loop {}
 }

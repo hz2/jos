@@ -10,7 +10,7 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) }, // memory mapped I/O address is 0xb8000
     });
 }
 
@@ -39,7 +39,7 @@ pub enum Color {
 
 /// A combination of a foreground and a background color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
+#[repr(transparent)] // ensures that ColorCode has the exact same data layout as u8
 struct ColorCode(u8);
 
 impl ColorCode {

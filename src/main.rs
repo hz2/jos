@@ -42,6 +42,12 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 #[cfg(test)]
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    jos::test_panic_handler(info);
+}
+
+#[cfg(test)]
 pub fn test_runner(tests: &[&dyn Fn()]) {
     println!("Running {} tests", tests.len());
     for test in tests {

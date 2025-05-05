@@ -18,21 +18,6 @@
 //    Failed = 0x11,
 //}
 //
-//pub fn exit_qemu(exit_code : QemuExitCode) {
-//    use x86_64::instructions::port::Port;
-//
-//    #[cfg(target_arch = "x86_64")]
-//    unsafe {
-//        let mut port = Port::new(0xf4);
-//        port.write(exit_code as u32);
-//    }
-//
-//    #[cfg(target_arch = "aarch64")]
-//    {
-//        // TODO: invoke PSCI
-//    }
-//}
-//
 //
 ///// This function is called on panic.
 //#[panic_handler]

@@ -6,6 +6,9 @@
 
 use core::panic::PanicInfo;
 
+#[cfg(target_arch = "aarch64")]
+mod pl011;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
@@ -28,12 +31,27 @@ where
     }
 }
 
-pub fn exit_qemu(exit_code: QemuExitCode) {
+//pub fn exit_qemu(exit_code: QemuExitCode) {
+//    use x86_64::instructions::port::Port;
+//
+//    unsafe {
+//        let mut port = Port::new(0xf4);
+//        port.write(exit_code as u32);
+//    }
+//}
+
+pub fn exit_qemu(exit_code : QemuExitCode) {
     use x86_64::instructions::port::Port;
 
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let mut port = Port::new(0xf4);
         port.write(exit_code as u32);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // TODO: invoke PSCI
     }
 }
 

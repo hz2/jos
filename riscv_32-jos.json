@@ -1,4 +1,9 @@
 {
     "arch": "riscv32", 
     "data-layout": "e-m:e-p:32:32-i64:64-n32-S128",
+    /*
+    TODO: refer to riscv isa  manual to make decisions on this
+    */
+    "cpu": "",
+    "atomic-cas": "", // atomic compare and swap 
 }

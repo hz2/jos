@@ -2,3 +2,4 @@
 
 - [ ] implement [APM](https://wiki.osdev.org/APM) or [ACPI](https://wiki.osdev.org/ACPI) for power management
 - [ ] uart_16550 = "0.2.0" # TODO: see if there isn't a better crate to use now
+- [ ] riscv

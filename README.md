@@ -1,5 +1,7 @@
 # Jason's Operating System (jos)
 
+Heavy reference to Philipp Oppermann's great tutorial[^1][^2].
+
 
 ## References
 

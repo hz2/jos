@@ -9,6 +9,12 @@ volatile = "0.2.6" # NOTE: newer versions are not compatible with the blog posts
 spin     = "0.5.2"
 uart_16550 = "0.2.0" # TODO: see if there isn't a better crate to use now
 lazy_static = { version = "1.0", features = ["spin_no_std"] }
+futures-util = { version = "0.3.4", default-features = false, features = ["alloc"] }
+crossbeam-queue = { version = "0.2.3", default-features = false, features = ["alloc"] }
+pc-keyboard = "0.5.0"
+conquer-once = { version = "0.2.0", default-features = false }
+linked_list_allocator = "0.9.0"
+pic8259 = "0.10.1"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 bootloader = "0.9"
@@ -16,6 +22,9 @@ x86_64     = "0.14.2"
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 cortex-a = "7.0.0"
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+riscv = "0.10.1"
 
 [profile.dev]
 # panic = "abort"

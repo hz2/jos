@@ -1,9 +1,21 @@
 {
+    "llvm-target": "riscv32-unknown-none-elf",
     "arch": "riscv32", 
     "data-layout": "e-m:e-p:32:32-i64:64-n32-S128",
-    /*
-    TODO: refer to riscv isa  manual to make decisions on this
-    */
-    "cpu": "",
-    "atomic-cas": "", // atomic compare and swap 
+    "linker-flavor": "ld.lld",
+    "linker": "rust-lld",
+    "cpu": "generic-rv32",
+    "max-atomic-width": 32,
+    "atomic-cas": true,
+    "features": "+m,+a,+c",
+    "executables": true,
+    "panic-strategy": "abort",
+    "relocation-model": "static",
+    "emit-debug-gdb-scripts": false,
+    "eh-frame-header": false,
+    "pre-link-args": {
+        "ld.lld": [
+            "--gc-sections"
+        ]
+    }
 }

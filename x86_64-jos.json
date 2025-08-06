@@ -12,5 +12,15 @@
     "panic-strategy": "abort",
     "disable-redzone": true,
     "features": "-mmx,-sse,+soft-float",
-    "rustc-abi": "x86-softfloat"
+    "rustc-abi": "x86-softfloat",
+    "supported-sanitizers": [],
+    "has-thread-local": false,
+    "unsupported-abi": [
+        "stdcall",
+        "fastcall",
+        "vectorcall",
+        "thiscall",
+        "win64",
+        "sysv64"
+    ]
 }

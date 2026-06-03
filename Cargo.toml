@@ -1,61 +1,29 @@
-[package]
-name = "jos"
-version = "0.1.0"
-authors = ["Jason Devers <dev.json@gmail.com>"]
+# jos workspace.
+#
+# layout rationale (see .claude/VISION.md and .claude/memory):
+#   kernel/    the bootable kernel binary. builds bare-metal via its own
+#              kernel/.cargo/config.toml (custom target + build-std). asm, MMIO.
+#   jos-core/  pure no_std logic with NO hardware deps (cap table, ring buffers,
+#              bitmaps, page-table math, scheduler algorithms). builds on the
+#              host so it can be exercised under `cargo test`, Miri, and Kani.
+#
+# the bare-metal target lives in kernel/.cargo/config.toml (NOT here) so that
+# jos-core and future host-testable crates compile for the host by default.
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "jos-core",
+]
+
+[workspace.package]
 edition = "2024"
+authors = ["Jason Devers <dev.json@gmail.com>"]
 
-# `should_panic` hand-writes its own `_start` and uses no test framework, so the default
-# libtest harness (which needs std) must be disabled for it. The library and `basic_boot`
-# use `custom_test_frameworks`, which replaces libtest while still needing the `--test`
-# flag to generate `test_main` — so they keep the default harness setting.
-[[test]]
-name = "should_panic"
-harness = false
-
-[dependencies]
-volatile = "0.2.6" # NOTE: newer versions are not compatible with the blog posts
-spin     = "0.5.2"
-uart_16550 = "0.2.0" # TODO: see if there isn't a better crate to use now
-lazy_static = { version = "1.0", features = ["spin_no_std"] }
-futures-util = { version = "0.3.4", default-features = false, features = ["alloc"] }
-crossbeam-queue = { version = "0.2.3", default-features = false, features = ["alloc"] }
-pc-keyboard = "0.5.0"
-conquer-once = { version = "0.2.0", default-features = false }
-linked_list_allocator = "0.9.0"
-pic8259 = "0.10.1"
-
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-x86_64     = "0.14.2"
-
-[target.'cfg(target_arch = "aarch64")'.dependencies]
-cortex-a = "7.0.0"
-
-[target.'cfg(target_arch = "riscv32")'.dependencies]
-riscv = "0.10.1"
-
+# overflow checks on in every profile: turns silent wrapping into a loud panic,
+# part of the stage 0 verification hygiene (see the roadmap).
 [profile.dev]
-# panic = "abort"
+overflow-checks = true
 
 [profile.release]
-# panic = "abort"
-
-[package.metadata.bootimage]
-# this allows an easy way to exit QEMU from the guest system and has a clean way to shut down the OS
-# TODO: what would be better would be implementing APM or ACPI
-test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
-test-success-exit-code = 33 # (0x10 << 1) | 1
-
-# [target.'cfg(target_os = "linux")']
-# rustflags = ["-C", "link-arg=-nostartfiles"]
-
-# [target.'cfg(target_os = "windows")']
-# rustflags = ["-C", "link-args=/ENTRY:_start /SUBSYSTEM:console"]
-
-# [target.'cfg(target_os = "macos")']
-# rustflags = ["-C", "link-args=-e __start -static -nostartfiles"]
-
-
-# While it’s possible to build a freestanding executable for Linux, Windows, and macOS, it’s probably not a good idea. 
-# The reason is that our executable still expects various things, for example that a stack is initialized when the 
-# _start function is called. Without the C runtime, some of these requirements might not be fulfilled, 
-# which might cause our program to fail, e.g. through a segmentation fault.
+overflow-checks = true

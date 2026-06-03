@@ -125,6 +125,7 @@ dependencies = [
  "cortex-a",
  "crossbeam-queue",
  "futures-util",
+ "jos-core",
  "lazy_static",
  "linked_list_allocator",
  "pc-keyboard",
@@ -135,6 +136,10 @@ dependencies = [
  "volatile 0.2.7",
  "x86_64",
 ]
+
+[[package]]
+name = "jos-core"
+version = "0.1.0"
 
 [[package]]
 name = "lazy_static"

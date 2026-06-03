@@ -1,0 +1,15 @@
+[package]
+name = "jos-core"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+# pure no_std logic with no hardware dependencies. it builds for the host (so
+# `cargo test`, Miri, and Kani can exercise it) and for the kernel's bare-metal
+# target alike, because it never touches asm, MMIO, or platform intrinsics.
+[dependencies]
+
+[features]
+default = []
+# enabled when compiled under `cargo kani` to gate proof harnesses.
+kani = []

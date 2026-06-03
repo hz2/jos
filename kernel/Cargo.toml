@@ -1,0 +1,35 @@
+[package]
+name = "jos"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+# `should_panic` hand-writes its own logic and uses no test framework, so the
+# default libtest harness (which needs std) must be disabled for it. the library
+# and `basic_boot` use custom_test_frameworks, which replaces libtest while still
+# needing the --test flag to generate test_main, so they keep the default.
+[[test]]
+name = "should_panic"
+harness = false
+
+[dependencies]
+jos-core = { path = "../jos-core" }
+volatile = "0.2.6" # note: newer versions are not compatible with the blog posts
+spin     = "0.5.2"
+uart_16550 = "0.2.0" # todo: see if there isn't a better crate to use now
+lazy_static = { version = "1.0", features = ["spin_no_std"] }
+futures-util = { version = "0.3.4", default-features = false, features = ["alloc"] }
+crossbeam-queue = { version = "0.2.3", default-features = false, features = ["alloc"] }
+pc-keyboard = "0.5.0"
+conquer-once = { version = "0.2.0", default-features = false }
+linked_list_allocator = "0.9.0"
+pic8259 = "0.10.1"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64     = "0.14.2"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+cortex-a = "7.0.0"
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+riscv = "0.10.1"

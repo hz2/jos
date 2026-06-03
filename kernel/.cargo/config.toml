@@ -1,9 +1,13 @@
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
-# Newer nightlies (>=2025) gate custom JSON target specs behind this flag.
+# newer nightlies (>=2025) gate custom json target specs behind this flag.
 json-target-spec = true
 
+# this config is discovered when cargo is invoked from within kernel/, so the
+# bare-metal target applies to the kernel build but NOT to the workspace root
+# (where jos-core builds for the host, for Miri/Kani). the target path is
+# relative to this config file's parent directory (kernel/).
 [build]
 target = "x86_64-jos.json"
 
@@ -11,8 +15,10 @@ target = "x86_64-jos.json"
 # qemu. qemu's built-in -kernel loader is multiboot1-only and rejects our elf64,
 # so grub does the loading. the script also maps the isa-debug-exit success code
 # back to shell exit 0 for `cargo test`. cargo appends the elf path as $1.
+# path is relative to kernel/ (the config's parent), so reach up to the
+# workspace-root scripts dir.
 [target.'cfg(target_os = "none")']
-runner = "scripts/run-qemu.sh"
+runner = "../scripts/run-qemu.sh"
 
 # cargo build --target aarch64-jos.json
 # cargo run --target aarch64-jos.json

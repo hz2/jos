@@ -27,12 +27,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c8214115b7bf84099f1309324e63141d4c5d7cc26862f97a0a857dbefe165bd"
 
 [[package]]
-name = "bootloader"
-version = "0.9.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "974e79cf1b0b737839f01330fb5393095daf1124d52693696494e32523ae9ef5"
-
-[[package]]
 name = "cfg-if"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -127,7 +121,6 @@ dependencies = [
 name = "jos"
 version = "0.1.0"
 dependencies = [
- "bootloader",
  "conquer-once",
  "cortex-a",
  "crossbeam-queue",

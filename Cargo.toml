@@ -4,6 +4,14 @@ version = "0.1.0"
 authors = ["Jason Devers <dev.json@gmail.com>"]
 edition = "2024"
 
+# `should_panic` hand-writes its own `_start` and uses no test framework, so the default
+# libtest harness (which needs std) must be disabled for it. The library and `basic_boot`
+# use `custom_test_frameworks`, which replaces libtest while still needing the `--test`
+# flag to generate `test_main` — so they keep the default harness setting.
+[[test]]
+name = "should_panic"
+harness = false
+
 [dependencies]
 volatile = "0.2.6" # NOTE: newer versions are not compatible with the blog posts
 spin     = "0.5.2"
@@ -17,7 +25,6 @@ linked_list_allocator = "0.9.0"
 pic8259 = "0.10.1"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-bootloader = "0.9"
 x86_64     = "0.14.2"
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]

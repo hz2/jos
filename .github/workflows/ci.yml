@@ -1,0 +1,36 @@
+name: ci
+
+# build, test, and run the stage 0 verification hygiene. everything runs inside
+# the pinned nix dev shell so CI matches local development exactly.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # jos-core: pure logic. host build, clippy pedantic, tests, and Miri for
+      # undefined behavior in unsafe code.
+      - name: clippy (jos-core, pedantic)
+        run: nix develop --command cargo clippy -p jos-core -- -D warnings
+
+      - name: test (jos-core, host)
+        run: nix develop --command cargo test -p jos-core
+
+      - name: miri (jos-core)
+        run: nix develop --command cargo miri test -p jos-core
+
+      # kernel: bare-metal build + boot the test suite under qemu (headless).
+      # invoked from kernel/ so its .cargo/config (custom target) applies.
+      - name: kernel build + boot tests (qemu)
+        run: nix develop --command bash -c 'cd kernel && cargo test'

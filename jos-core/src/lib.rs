@@ -13,6 +13,10 @@
 // deny implicit unsafe: every unsafe op must sit in an explicit unsafe block,
 // even inside an unsafe fn, so the audited surface is obvious.
 #![deny(unsafe_op_in_unsafe_fn)]
+// stage 0 hygiene: pedantic lints on the pure-logic crate. warn (not deny) so
+// new code is flagged without blocking local iteration; CI treats them as
+// errors via -D warnings.
+#![warn(clippy::pedantic)]
 
 // host-side test and proof crates pull in std/alloc as needed; the library
 // itself stays no_std so it is identical on the kernel target.

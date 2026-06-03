@@ -22,14 +22,5 @@
 // itself stays no_std so it is identical on the kernel target.
 
 pub mod bitmap;
+pub mod cap_table;
 pub mod ring_buffer;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn smoke() {
-        // placeholder so the crate has a host-runnable test from day one;
-        // real module tests replace this as logic lands.
-        assert_eq!(2 + 2, 4);
-    }
-}

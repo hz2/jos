@@ -13,3 +13,8 @@ authors.workspace = true
 default = []
 # enabled when compiled under `cargo kani` to gate proof harnesses.
 kani = []
+
+[lints.rust]
+# `cargo kani` injects --cfg=kani at the compiler level; declare it here so
+# rustc does not emit unexpected_cfgs warnings when the feature is absent.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

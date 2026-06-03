@@ -21,6 +21,9 @@
 // host-side test and proof crates pull in std/alloc as needed; the library
 // itself stays no_std so it is identical on the kernel target.
 
+pub mod bitmap;
+pub mod ring_buffer;
+
 #[cfg(test)]
 mod tests {
     #[test]

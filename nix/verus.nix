@@ -22,7 +22,7 @@ stdenv.mkDerivation rec {
 
   src = fetchzip {
     url = "https://github.com/verus-lang/verus/releases/download/release/${version}/verus-${version}-x86-linux.zip";
-    hash = "sha256-0jQSHjhxiGDgDtqt0oByePcg+XFfjWyQ4i9dYGvpLPE=";
+    hash = "sha256-WPwpWj9kZt6IueMVDNUsK6F8D77WTi22WhiJAKxv7iE=";
     stripRoot = false;
   };
 
@@ -31,6 +31,14 @@ stdenv.mkDerivation rec {
     zlib
     gcc-unwrapped.lib # libstdc++
     stdenv.cc.cc.lib
+  ];
+
+  # rust_verify links against librustc_driver/libstd from verus's own bundled
+  # rust toolchain, which sits alongside it in the release tree and is found at
+  # runtime via rpath, not by autoPatchelf. don't fail the build on these.
+  autoPatchelfIgnoreMissingDeps = [
+    "librustc_driver-*.so"
+    "libstd-*.so"
   ];
 
   # The archive layout is verus-x86-linux/{verus, rust_verify, z3, vstd.vir, ...}.

@@ -76,13 +76,16 @@
           packages = [
             rustToolchain
             pkgs.qemu
-            pkgs.cargo-bootimage
+            pkgs.grub2
+            pkgs.xorriso
             pkgs.cargo-binutils
             verus
             kani
           ];
           shellHook = commonShellHook + ''
             echo "jos verify shell — adds verus + kani on top of the default toolchain"
+            echo "  note: verus expects a rustup-managed toolchain 1.95.0; if missing, run:"
+            echo "        rustup install 1.95.0-x86_64-unknown-linux-gnu"
           '';
         };
 

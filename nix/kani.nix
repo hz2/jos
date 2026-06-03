@@ -29,16 +29,26 @@ stdenv.mkDerivation rec {
     stdenv.cc.cc.lib
   ];
 
+  # kani-compiler links against librustc_driver from kani's own bundled rust
+  # toolchain, which lives elsewhere in the release tree and is resolved at
+  # runtime, not by autoPatchelf. tell autoPatchelf not to fail on it.
+  autoPatchelfIgnoreMissingDeps = [
+    "librustc_driver-*.so"
+    "libstd-*.so"
+  ];
+
   installPhase = ''
     runHook preInstall
 
     mkdir -p $out/libexec/kani $out/bin
     cp -r ./* $out/libexec/kani/
 
+    # the kani release puts its driver binaries under bin/ inside the tree.
+    # wrap whichever of kani / cargo-kani exist there onto $out/bin.
     for b in kani cargo-kani; do
-      if [ -e "$out/libexec/kani/$b" ]; then
-        chmod +x "$out/libexec/kani/$b"
-        makeWrapper "$out/libexec/kani/$b" "$out/bin/$b"
+      if [ -e "$out/libexec/kani/bin/$b" ]; then
+        chmod +x "$out/libexec/kani/bin/$b"
+        makeWrapper "$out/libexec/kani/bin/$b" "$out/bin/$b"
       fi
     done
 

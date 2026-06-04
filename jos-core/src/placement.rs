@@ -105,17 +105,17 @@ mod tests {
     extern crate std;
     use std::boxed::Box;
 
-    // a stand-in object whose layout matches ObjectType::Endpoint (64/64).
+    // a stand-in object whose layout matches ObjectType::Endpoint (128/64).
     #[repr(C, align(64))]
     #[derive(Debug, PartialEq, Eq)]
     struct FakeEndpoint {
         tag: u64,
-        rest: [u8; 56],
+        rest: [u8; 120],
     }
 
     impl FakeEndpoint {
         fn new(tag: u64) -> Self {
-            Self { tag, rest: [0; 56] }
+            Self { tag, rest: [0; 120] }
         }
     }
 
@@ -136,7 +136,7 @@ mod tests {
         let (start, new_wm) =
             place(region, 0, ObjectType::Endpoint, FakeEndpoint::new(0xABCD)).unwrap();
         assert_eq!(start, 0);
-        assert_eq!(new_wm, 64);
+        assert_eq!(new_wm, 128);
         // read the placed tag back from the first 8 bytes. reading the raw
         // bytes (rather than casting the slice to a more-aligned pointer)
         // sidesteps the alignment-cast lint while still proving the write
@@ -147,22 +147,22 @@ mod tests {
 
     #[test]
     fn second_placement_respects_alignment_padding() {
-        let (mut buf, off) = aligned_buf(256, 64);
-        let region = &mut buf[off..off + 200];
-        // first endpoint at 0..64.
+        let (mut buf, off) = aligned_buf(384, 64);
+        let region = &mut buf[off..off + 300];
+        // first endpoint at 0..128.
         let (_, wm1) = place(region, 0, ObjectType::Endpoint, FakeEndpoint::new(1)).unwrap();
-        assert_eq!(wm1, 64);
-        // second endpoint: watermark 64 is already 64-aligned, lands at 64..128.
+        assert_eq!(wm1, 128);
+        // second endpoint: watermark 128 is already 64-aligned, lands at 128..256.
         let (start2, wm2) =
             place(region, wm1, ObjectType::Endpoint, FakeEndpoint::new(2)).unwrap();
-        assert_eq!(start2, 64);
-        assert_eq!(wm2, 128);
+        assert_eq!(start2, 128);
+        assert_eq!(wm2, 256);
     }
 
     #[test]
     fn does_not_fit_when_region_too_small() {
         let (mut buf, off) = aligned_buf(128, 64);
-        let region = &mut buf[off..off + 32]; // smaller than one 64-byte endpoint
+        let region = &mut buf[off..off + 32]; // smaller than one 128-byte endpoint
         assert_eq!(
             place(region, 0, ObjectType::Endpoint, FakeEndpoint::new(0)),
             Err(PlaceError::DoesNotFit)

@@ -25,14 +25,17 @@
 //!
 //! | Type | Size (bytes) | Alignment (bytes) |
 //! |------|-------------|-------------------|
-//! | `Endpoint` | 64 | 64 |
+//! | `Endpoint` | 128 | 64 |
 //! | `CNode { size_bits }` | `2^size_bits * 32` | `2^size_bits * 32` |
 //! | `Untyped { size_bits }` | `2^size_bits` | `2^size_bits` |
 //!
 //! `CNode` slot size of 32 bytes matches a two-word capability slot on a
 //! 64-bit platform (one word for the capability itself, one for bookkeeping).
-//! `Endpoint` at 64 bytes is naturally two cache lines, chosen to avoid false
-//! sharing between concurrent IPC operations.
+//! `Endpoint` is cache-line (64-byte) aligned to avoid false sharing, and 128
+//! bytes long so it has room for the rendezvous state plus the parked sender
+//! and receiver wakers the async IPC path stores in it. Note the size is a
+//! multiple of the alignment, not equal to it; placement only needs the start
+//! to be `align`-aligned, which a 64-aligned watermark gives.
 //!
 //! [`retype_fits`]: retype_fits
 
@@ -42,12 +45,18 @@
 
 /// Size of one `Endpoint` object in bytes.
 ///
-/// 64 bytes = two 32-byte cache lines. a natural size for an IPC endpoint
-/// that avoids false sharing between concurrent IPC operations on different
-/// endpoints.
-pub const ENDPOINT_SIZE: usize = 64;
+/// 128 bytes: enough for the rendezvous state machine plus a parked sender and
+/// receiver waker (the async IPC path stores its blocked peers in the endpoint,
+/// the seL4 model where an endpoint owns its wait queue). A multiple of
+/// [`ENDPOINT_ALIGN`], so a 64-aligned placement still satisfies the object's
+/// alignment.
+pub const ENDPOINT_SIZE: usize = 128;
 
 /// Alignment requirement of an `Endpoint` object in bytes.
+///
+/// One cache line, so concurrent IPC on distinct endpoints does not falsely
+/// share. Less than [`ENDPOINT_SIZE`]; the object spans two cache lines but
+/// only needs its start aligned.
 pub const ENDPOINT_ALIGN: usize = 64;
 
 /// Size of one `CNode` capability slot in bytes.
@@ -108,7 +117,8 @@ pub enum ObjectType {
 ///
 /// # Object sizes
 ///
-/// - `Endpoint`: `(64, 64)`.
+/// - `Endpoint`: `(128, 64)`. The only object whose alignment is smaller than
+///   its size; both are powers of two and align divides size.
 /// - `CNode { size_bits }`: size = `2^size_bits * SLOT_BYTES`; align = size.
 ///   Because `SLOT_BYTES` is a power of two and `2^size_bits` is a power of
 ///   two, the product is a power of two. The result saturates at
@@ -348,11 +358,13 @@ mod tests {
 
         let nw1 = retype_fits(region, 0, ObjectType::Endpoint)
             .expect("first endpoint must fit");
-        assert_eq!(nw1, ENDPOINT_SIZE); // placed at [0, 64)
+        assert_eq!(nw1, ENDPOINT_SIZE); // placed at [0, ENDPOINT_SIZE)
 
         let nw2 = retype_fits(region, nw1, ObjectType::Endpoint)
             .expect("second endpoint must fit");
-        assert_eq!(nw2, 2 * ENDPOINT_SIZE); // placed at [64, 128)
+        // the second is 64-aligned already (ENDPOINT_SIZE is a multiple of
+        // ENDPOINT_ALIGN), so it lands flush at [ENDPOINT_SIZE, 2*ENDPOINT_SIZE).
+        assert_eq!(nw2, 2 * ENDPOINT_SIZE);
 
         // watermark strictly advanced both times
         assert!(nw1 > 0);
@@ -365,7 +377,7 @@ mod tests {
 
         let nw1 = retype_fits(region, 0, ObjectType::Endpoint)
             .expect("endpoint must fit");
-        // endpoint: [0, 64)
+        // endpoint: [0, ENDPOINT_SIZE)
 
         let cnode_ty = ObjectType::CNode { size_bits: 4 }; // 16 slots * 32 = 512 bytes
         let (cnode_size, cnode_align) = object_layout(cnode_ty);
@@ -393,7 +405,7 @@ mod tests {
 
     #[test]
     fn object_does_not_fit_after_alignment_padding_pushes_past_end() {
-        // region=65, watermark=1: align_up(1,64)=64, 64+64=128 > 65 => None.
+        // region=65, watermark=1: align_up(1,64)=64, 64+ENDPOINT_SIZE > 65 => None.
         assert!(retype_fits(65, 1, ObjectType::Endpoint).is_none());
     }
 

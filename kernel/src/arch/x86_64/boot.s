@@ -138,5 +138,11 @@ mb_info:
     .skip 4
 .align 16
 stack_bottom:
-    .skip 16384                       /* 16 KiB boot stack */
+    /* 64 KiB boot stack. this is the kernel's only stack today, and it sits in
+       .bss with no guard page, so an overflow silently corrupts adjacent .bss
+       (it manifested as a smashed heap free-list and a fault on the NEXT alloc).
+       it was raised from 16 KiB once the async executor put multi-KiB by-value
+       objects (the task slab) on the stack in debug builds. a real guard-page'd
+       per-task stack arrives with the userspace thread model. */
+    .skip 65536
 stack_top:

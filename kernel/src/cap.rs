@@ -16,6 +16,10 @@
 //! untyped region is a static byte array, so all object pointers derive from a
 //! real Rust allocation with valid provenance.
 
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
+
 use jos_core::cap_rights::Rights;
 use jos_core::cap_space::CapSpace;
 use jos_core::cap_table::CapRef;
@@ -91,18 +95,31 @@ impl ObjectId {
 // --------------------------------------------------------------------------
 
 /// The mutable state of a synchronous IPC endpoint, behind the endpoint's lock.
+///
+/// An endpoint owns its blocked peers (the seL4 model: a thread blocked on IPC
+/// is queued on the endpoint, not spinning). jos has a single waiter slot per
+/// direction for now (capacity-1 rendezvous); a full wait queue arrives when
+/// userspace threads can contend an endpoint. A waiter is woken by storing the
+/// counterpart message / clearing the slot and calling its [`Waker`].
 #[derive(Debug)]
 pub struct EndpointInner {
     /// Current rendezvous state.
     pub state: EndpointState,
     /// The parked message when `state == SendBlocked`.
     pub message: Option<Message>,
+    /// Waker of a sender parked because the endpoint already held a message.
+    /// Woken when a receiver drains the endpoint and frees the slot.
+    send_waiter: Option<Waker>,
+    /// Waker of a receiver parked because the endpoint had no message. Woken
+    /// when a sender deposits a message.
+    recv_waiter: Option<Waker>,
 }
 
 /// Endpoint rendezvous state (seL4-style synchronous endpoint).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointState {
-    /// No sender or receiver is waiting.
+    /// No message is parked. A receiver may be blocked (see `recv_waiter`),
+    /// waiting for a sender.
     Idle,
     /// A sender has parked a message, waiting for a receiver.
     SendBlocked,
@@ -151,6 +168,8 @@ impl Endpoint {
             inner: Mutex::new(EndpointInner {
                 state: EndpointState::Idle,
                 message: None,
+                send_waiter: None,
+                recv_waiter: None,
             }),
             _pad: [0; Self::PAD],
         }
@@ -262,58 +281,225 @@ pub enum IpcError {
     EndpointEmpty,
 }
 
-/// Sends `message` over the endpoint named by `cap_ref` in `space`.
-///
-/// Requires the capability to carry [`Rights::WRITE`]. Parks the message on the
-/// endpoint (synchronous rendezvous; a real receiver hand-off / blocking comes
-/// with the async executor in a later slice).
-///
-/// # Errors
-///
-/// See [`IpcError`].
-pub fn cap_send(space: &KernelCapSpace, cap_ref: CapRef, message: Message) -> Result<(), IpcError> {
+// resolves a capability ref to the endpoint it names, enforcing that it is
+// live, carries `required`, and is actually an endpoint. shared by the send and
+// receive paths so the three checks (and their error precedence) stay identical.
+fn resolve_endpoint(
+    space: &KernelCapSpace,
+    cap_ref: CapRef,
+    required: Rights,
+) -> Result<&'static Endpoint, IpcError> {
     let cap = space.lookup(cap_ref).ok_or(IpcError::InvalidCap)?;
-    if !space.check(cap_ref, Rights::WRITE) {
+    if !space.check(cap_ref, required) {
         return Err(IpcError::InsufficientRights);
     }
     if cap.object.kind() != ObjectKind::Endpoint {
         return Err(IpcError::NotAnEndpoint);
     }
     // SAFETY: the capability is live (lookup succeeded) and names an endpoint
-    // (checked above); single-CPU, interrupts-disabled context, so no aliasing.
-    let endpoint = unsafe { cap.object.as_endpoint() };
-    let mut inner = endpoint.inner.lock();
-    if inner.state == EndpointState::SendBlocked {
-        return Err(IpcError::EndpointBusy);
+    // (checked above); single-CPU, interrupts-disabled context, so no aliasing
+    // live &mut exists. the object outlives the kernel (static untyped region).
+    Ok(unsafe { cap.object.as_endpoint() })
+}
+
+// the outcome of trying a non-blocking IPC op on a locked endpoint. on success
+// it carries the counterpart waker to wake (a deposit may free a parked
+// receiver; a take may free a parked sender) so the caller can wake AFTER
+// releasing the endpoint lock, keeping the wake off the locked path.
+enum SendOutcome {
+    // message deposited; wake this receiver if present.
+    Deposited(Option<Waker>),
+    // endpoint already held an undelivered message.
+    Full,
+}
+
+enum RecvOutcome {
+    // message taken; wake this sender if present.
+    Took(Message, Option<Waker>),
+    // endpoint had no message.
+    Empty,
+}
+
+impl EndpointInner {
+    // try to deposit a message without blocking. the single locked primitive
+    // both cap_send and the CapSend future build on, so the deposit/wake logic
+    // lives in exactly one place and the take-or-park stays race-free (it all
+    // happens under one lock acquisition by the caller).
+    fn try_deposit(&mut self, message: Message) -> SendOutcome {
+        if self.state == EndpointState::SendBlocked {
+            return SendOutcome::Full;
+        }
+        self.message = Some(message);
+        self.state = EndpointState::SendBlocked;
+        SendOutcome::Deposited(self.recv_waiter.take())
     }
-    inner.message = Some(message);
-    inner.state = EndpointState::SendBlocked;
+
+    // try to take the parked message without blocking.
+    fn try_take(&mut self) -> RecvOutcome {
+        match self.message.take() {
+            Some(message) => {
+                self.state = EndpointState::Idle;
+                RecvOutcome::Took(message, self.send_waiter.take())
+            }
+            None => RecvOutcome::Empty,
+        }
+    }
+}
+
+/// Tries to send `message` over the endpoint named by `cap_ref`, without
+/// blocking.
+///
+/// Requires the capability to carry [`Rights::WRITE`]. On success the message
+/// is parked on the endpoint and any receiver blocked on it is woken. Returns
+/// [`IpcError::EndpointBusy`] (rather than blocking) if the endpoint already
+/// holds an undelivered message; [`send`] is the blocking wrapper.
+///
+/// # Errors
+///
+/// See [`IpcError`].
+pub fn cap_send(space: &KernelCapSpace, cap_ref: CapRef, message: Message) -> Result<(), IpcError> {
+    let endpoint = resolve_endpoint(space, cap_ref, Rights::WRITE)?;
+    // do the deposit under the lock, then wake the receiver after releasing it.
+    let to_wake = match endpoint.inner.lock().try_deposit(message) {
+        SendOutcome::Deposited(waker) => waker,
+        SendOutcome::Full => return Err(IpcError::EndpointBusy),
+    };
+    if let Some(waker) = to_wake {
+        waker.wake();
+    }
     Ok(())
 }
 
-/// Receives a message from the endpoint named by `cap_ref` in `space`.
+/// Tries to receive a message from the endpoint named by `cap_ref`, without
+/// blocking.
 ///
-/// Requires the capability to carry [`Rights::READ`].
+/// Requires the capability to carry [`Rights::READ`]. On success the endpoint
+/// is drained and any sender blocked waiting for the slot to free is woken.
+/// Returns [`IpcError::EndpointEmpty`] (rather than blocking) if no message is
+/// parked; [`recv`] is the blocking wrapper.
 ///
 /// # Errors
 ///
 /// See [`IpcError`].
 pub fn cap_recv(space: &KernelCapSpace, cap_ref: CapRef) -> Result<Message, IpcError> {
-    let cap = space.lookup(cap_ref).ok_or(IpcError::InvalidCap)?;
-    if !space.check(cap_ref, Rights::READ) {
-        return Err(IpcError::InsufficientRights);
+    let endpoint = resolve_endpoint(space, cap_ref, Rights::READ)?;
+    let (message, to_wake) = match endpoint.inner.lock().try_take() {
+        RecvOutcome::Took(message, waker) => (message, waker),
+        RecvOutcome::Empty => return Err(IpcError::EndpointEmpty),
+    };
+    if let Some(waker) = to_wake {
+        waker.wake();
     }
-    if cap.object.kind() != ObjectKind::Endpoint {
-        return Err(IpcError::NotAnEndpoint);
-    }
-    // SAFETY: as in cap_send: live endpoint capability, single-CPU context.
-    let endpoint = unsafe { cap.object.as_endpoint() };
-    let mut inner = endpoint.inner.lock();
-    match inner.message.take() {
-        Some(message) => {
-            inner.state = EndpointState::Idle;
-            Ok(message)
+    Ok(message)
+}
+
+// --------------------------------------------------------------------------
+// Async IPC
+// --------------------------------------------------------------------------
+//
+// the blocking wrappers turn the non-blocking try-primitives into the
+// async-as-scheduler rendezvous: a send to a full endpoint, or a recv from an
+// empty one, parks the task's Waker in the endpoint and returns Poll::Pending
+// instead of spinning; the counterpart op wakes it. each poll does the
+// take-or-park under a SINGLE endpoint lock, so there is no window for a
+// counterpart to act between the try and the park (no lost wakeup). the
+// rights/liveness check runs on EVERY poll via resolve_endpoint, so revoking
+// the capability under a blocked task cancels its IPC with InvalidCap on the
+// next wake rather than hanging.
+
+/// Future that sends a message over an endpoint, blocking (parking) while the
+/// endpoint is busy. Created by [`send`].
+#[must_use = "futures do nothing unless awaited"]
+pub struct CapSend<'a> {
+    space: &'a KernelCapSpace,
+    cap_ref: CapRef,
+    message: Message,
+}
+
+impl Future for CapSend<'_> {
+    type Output = Result<(), IpcError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        let endpoint = match resolve_endpoint(self.space, self.cap_ref, Rights::WRITE) {
+            Ok(endpoint) => endpoint,
+            // bad cap / insufficient rights / wrong object: terminal, even if a
+            // prior poll parked us. covers revocation while blocked.
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        // take-or-park under one lock. the waker to wake (if any) is carried out
+        // of the locked scope so it is woken after the lock is released.
+        let to_wake = {
+            let mut inner = endpoint.inner.lock();
+            match inner.try_deposit(self.message) {
+                SendOutcome::Deposited(waker) => waker,
+                SendOutcome::Full => {
+                    // endpoint full: register our waker so a receiver draining
+                    // it wakes us, and yield. (lock drops at end of scope.)
+                    inner.send_waiter = Some(context.waker().clone());
+                    return Poll::Pending;
+                }
+            }
+        };
+        if let Some(waker) = to_wake {
+            waker.wake();
         }
-        None => Err(IpcError::EndpointEmpty),
+        Poll::Ready(Ok(()))
     }
+}
+
+/// Future that receives a message from an endpoint, blocking (parking) while
+/// the endpoint is empty. Created by [`recv`].
+#[must_use = "futures do nothing unless awaited"]
+pub struct CapRecv<'a> {
+    space: &'a KernelCapSpace,
+    cap_ref: CapRef,
+}
+
+impl Future for CapRecv<'_> {
+    type Output = Result<Message, IpcError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        let endpoint = match resolve_endpoint(self.space, self.cap_ref, Rights::READ) {
+            Ok(endpoint) => endpoint,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        let (message, to_wake) = {
+            let mut inner = endpoint.inner.lock();
+            match inner.try_take() {
+                RecvOutcome::Took(message, waker) => (message, waker),
+                RecvOutcome::Empty => {
+                    // endpoint empty: register our waker so a sender depositing
+                    // a message wakes us, and yield.
+                    inner.recv_waiter = Some(context.waker().clone());
+                    return Poll::Pending;
+                }
+            }
+        };
+        if let Some(waker) = to_wake {
+            waker.wake();
+        }
+        Poll::Ready(Ok(message))
+    }
+}
+
+/// Sends `message` over the endpoint named by `cap_ref`, awaiting a free slot.
+///
+/// The async counterpart of [`cap_send`]: instead of returning
+/// [`IpcError::EndpointBusy`], it parks until a receiver frees the endpoint.
+/// Other terminal errors (invalid cap, insufficient rights, not an endpoint)
+/// resolve the future immediately.
+pub fn send(space: &KernelCapSpace, cap_ref: CapRef, message: Message) -> CapSend<'_> {
+    CapSend {
+        space,
+        cap_ref,
+        message,
+    }
+}
+
+/// Receives a message from the endpoint named by `cap_ref`, awaiting one.
+///
+/// The async counterpart of [`cap_recv`]: instead of returning
+/// [`IpcError::EndpointEmpty`], it parks until a sender deposits a message.
+pub fn recv(space: &KernelCapSpace, cap_ref: CapRef) -> CapRecv<'_> {
+    CapRecv { space, cap_ref }
 }

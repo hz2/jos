@@ -12,6 +12,12 @@ authors.workspace = true
 name = "should_panic"
 harness = false
 
+# stack_overflow hand-writes its own entry + double-fault handler (it must exit
+# from inside the handler), so it uses no test framework either.
+[[test]]
+name = "stack_overflow"
+harness = false
+
 [dependencies]
 jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts

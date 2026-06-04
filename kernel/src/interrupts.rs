@@ -32,6 +32,12 @@ pub fn init_idt() {
     unsafe {
         let idt = &mut *core::ptr::addr_of_mut!(IDT);
         idt.breakpoint.set_handler_fn(breakpoint_handler);
+        // route the double-fault handler onto its own IST stack so a kernel
+        // stack overflow is handled instead of triple-faulting. the gdt module
+        // must have installed the TSS (init_gdt) before this runs.
+        idt.double_fault
+            .set_handler_fn(double_fault_handler)
+            .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
         idt.load();
     }
 }
@@ -44,6 +50,18 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     // pass stack_frame as an explicit arg: serial_println! expands through
     // concat!, which blocks inline {var} capture in the format string.
     serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+}
+
+// double fault (#DF) fires when handling one exception triggers another (the
+// classic case: a stack overflow whose page fault then faults again). it is not
+// recoverable, so the handler is diverging; the x86_64 crate types the error
+// code as u64 and requires a `-> !` return. running on the IST stack set up in
+// the gdt module is what keeps this handler from itself faulting.
+extern "x86-interrupt" fn double_fault_handler(
+    stack_frame: InterruptStackFrame,
+    _error_code: u64,
+) -> ! {
+    panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
 }
 
 #[cfg(test)]

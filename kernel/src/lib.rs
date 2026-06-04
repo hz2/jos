@@ -19,6 +19,8 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 #[cfg(target_arch = "x86_64")]
+pub mod gdt;
+#[cfg(target_arch = "x86_64")]
 pub mod interrupts;
 pub mod serial;
 pub mod vga_buffer;
@@ -29,6 +31,10 @@ pub mod vga_buffer;
 /// More init (GDT/TSS, PIC/APIC, paging) is added as the kernel grows.
 pub fn init() {
     serial::init_serial();
+    // gdt/tss before the idt: the idt's double-fault entry references the IST
+    // stack the gdt installs.
+    #[cfg(target_arch = "x86_64")]
+    gdt::init_gdt();
     #[cfg(target_arch = "x86_64")]
     interrupts::init_idt();
 }

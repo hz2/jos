@@ -239,7 +239,11 @@ impl<'a> Bitmap<'a> {
             .iter()
             .map(|w| w.count_ones() as usize)
             .sum();
-        let real_used = total_ones - self.tail_padding_count();
+        // saturating_sub: under the seal_tail invariant every padding bit is 1,
+        // so total_ones >= tail_padding_count and this never saturates. the
+        // saturating form makes count_free total (no underflow panic) even for a
+        // bitmap whose tail was not sealed, which is what kani proved we need.
+        let real_used = total_ones.saturating_sub(self.tail_padding_count());
         self.len_bits - real_used
     }
 

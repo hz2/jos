@@ -41,7 +41,26 @@
         # on NixOS — so they are autoPatchelf'd onto the Nix runtime. Kept in a separate
         # `verify` shell so the default shell stays minimal and rock-solid.
         verus = pkgs.callPackage ./nix/verus.nix { };
-        kani = pkgs.callPackage ./nix/kani.nix { };
+
+        # Kani 0.67.0 pins its own nightly (nightly-2025-11-21, rustc 1.93). It
+        # execs ./toolchain/bin/cargo and its kani-compiler links that toolchain's
+        # librustc_driver. Build exactly that toolchain via fenix (cargo + rustc +
+        # rust-src for build-std + rustc-dev for librustc_driver + std), and hand it
+        # to the kani derivation, replacing what `cargo kani setup` would fetch.
+        kaniToolchainOf = fenix.packages.${system}.toolchainOf {
+          channel = "nightly";
+          date = "2025-11-21";
+          sha256 = "sha256-P39FCgpfDT04989+ZTNEdM/k/AE869JKSB4qjatYTSs=";
+        };
+        kaniToolchain = fenix.packages.${system}.combine [
+          kaniToolchainOf.cargo
+          kaniToolchainOf.rustc
+          kaniToolchainOf.rust-src
+          kaniToolchainOf.rustc-dev
+          kaniToolchainOf.rust-std
+          kaniToolchainOf.clippy
+        ];
+        kani = pkgs.callPackage ./nix/kani.nix { inherit kaniToolchain; };
 
         # Common runtime libs the patched verifier binaries link against.
         commonShellHook = ''

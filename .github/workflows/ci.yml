@@ -30,6 +30,11 @@ jobs:
       - name: miri (jos-core)
         run: nix develop --command cargo miri test -p jos-core
 
+      # kani bounded proofs of the jos-core invariants. uses the verify shell
+      # (adds kani + its pinned toolchain). slower than the other gates.
+      - name: kani (jos-core)
+        run: nix develop .#verify --command cargo kani -p jos-core
+
       # kernel: clippy (incl. the safety-comment lints) then a bare-metal build
       # + boot of the test suite under qemu (headless). invoked from kernel/ so
       # its .cargo/config (custom target) applies.

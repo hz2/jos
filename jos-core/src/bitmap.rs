@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn alloc_until_full() {
         const N: usize = 130;
-        let mut storage = make_words((N + 63) / 64);
+        let mut storage = make_words(N.div_ceil(64));
         let mut bm = Bitmap::new(&mut storage, N);
 
         for expected in 0..N {
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn conservation_after_op_sequence() {
         const N: usize = 200;
-        let mut storage = make_words((N + 63) / 64);
+        let mut storage = make_words(N.div_ceil(64));
         let mut bm = Bitmap::new(&mut storage, N);
 
         let check = |bm: &Bitmap| {
@@ -522,7 +522,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    #[should_panic]
+    #[should_panic = "double-free"]
     fn double_free_panics_in_debug() {
         let mut storage = make_words(1);
         let mut bm = Bitmap::new(&mut storage, 64);
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "get: idx out of bounds"]
     fn get_out_of_bounds_panics() {
         let mut storage = make_words(1);
         let bm = Bitmap::new(&mut storage, 8);
@@ -542,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "set: idx out of bounds"]
     fn set_out_of_bounds_panics() {
         let mut storage = make_words(1);
         let mut bm = Bitmap::new(&mut storage, 8);
@@ -550,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "clear: idx out of bounds"]
     fn clear_out_of_bounds_panics() {
         let mut storage = make_words(1);
         let mut bm = Bitmap::new(&mut storage, 8);

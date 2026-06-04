@@ -241,9 +241,10 @@ mod tests {
         const CAP: usize = 4;
         let mut buf: RingBuffer<u32, CAP> = RingBuffer::new();
         // run 5 * CAP push/pop pairs so head and tail wrap multiple times.
-        for round in 0..(5 * CAP as u32) {
-            assert!(buf.push(round).is_ok());
-            assert_eq!(buf.pop(), Some(round));
+        for round in 0..(5 * CAP) {
+            let value = u32::try_from(round).unwrap();
+            assert!(buf.push(value).is_ok());
+            assert_eq!(buf.pop(), Some(value));
         }
         assert!(buf.is_empty());
     }

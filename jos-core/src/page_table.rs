@@ -337,11 +337,11 @@ mod tests {
         let max_pdpt: u64 = (0x1FF_u64) << 30;
         assert_eq!(pdpt_index(max_pdpt), 0x1FF);
 
-        let max_pd: u64 = (0x1FF_u64) << 21;
-        assert_eq!(pd_index(max_pd), 0x1FF);
+        let max_dir: u64 = (0x1FF_u64) << 21;
+        assert_eq!(pd_index(max_dir), 0x1FF);
 
-        let max_pt: u64 = (0x1FF_u64) << 12;
-        assert_eq!(pt_index(max_pt), 0x1FF);
+        let max_table: u64 = (0x1FF_u64) << 12;
+        assert_eq!(pt_index(max_table), 0x1FF);
 
         // separately verify that the canonical address with all four fields
         // set to 0x1FF is indeed canonical and each field extracts correctly.

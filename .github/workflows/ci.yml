@@ -22,7 +22,7 @@ jobs:
       # jos-core: pure logic. host build, clippy pedantic, tests, and Miri for
       # undefined behavior in unsafe code.
       - name: clippy (jos-core, pedantic)
-        run: nix develop --command cargo clippy -p jos-core -- -D warnings
+        run: nix develop --command cargo clippy -p jos-core --all-targets -- -D warnings
 
       - name: test (jos-core, host)
         run: nix develop --command cargo test -p jos-core
@@ -39,7 +39,7 @@ jobs:
       # + boot of the test suite under qemu (headless). invoked from kernel/ so
       # its .cargo/config (custom target) applies.
       - name: clippy (kernel)
-        run: nix develop --command bash -c 'cd kernel && cargo clippy -- -D warnings'
+        run: nix develop --command bash -c 'cd kernel && cargo clippy --all-targets -- -D warnings'
 
       - name: kernel build + boot tests (qemu)
         run: nix develop --command bash -c 'cd kernel && cargo test'

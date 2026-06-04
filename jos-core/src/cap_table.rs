@@ -202,6 +202,42 @@ impl<T, const N: usize> CapTable<T, N> {
     pub fn contains(&self, cap_ref: CapRef) -> bool {
         self.is_valid(cap_ref)
     }
+
+    /// Returns the [`CapRef`] for `slot` if it is occupied, else `None`.
+    ///
+    /// The returned ref carries the slot's current generation, so it is valid
+    /// until the slot is removed. Slot indices are stable, so this is how a
+    /// caller enumerates live capabilities (for example, to find the children
+    /// of a capability during revocation) without being handed a forgeable ref.
+    #[must_use]
+    pub fn ref_at(&self, slot: usize) -> Option<CapRef> {
+        if slot < N && self.slots[slot].entry.is_some() {
+            Some(CapRef {
+                slot,
+                generation: self.slots[slot].generation,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Calls `f` with the [`CapRef`] and a shared reference to every live
+    /// capability in the table, in ascending slot order.
+    ///
+    /// Useful for scans like "find all capabilities derived from this one".
+    /// The closure cannot mutate the table; collect the refs it wants and act
+    /// on them afterward (the borrow checker enforces this).
+    pub fn for_each(&self, mut f: impl FnMut(CapRef, &T)) {
+        for slot in 0..N {
+            if let Some(entry) = self.slots[slot].entry.as_ref() {
+                let cap_ref = CapRef {
+                    slot,
+                    generation: self.slots[slot].generation,
+                };
+                f(cap_ref, entry);
+            }
+        }
+    }
 }
 
 impl<T, const N: usize> Default for CapTable<T, N> {
@@ -213,6 +249,9 @@ impl<T, const N: usize> Default for CapTable<T, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // the test harness links std, so we can use std::vec here even though the
+    // library itself is no_std.
+    extern crate std;
 
     #[test]
     fn new_table_is_empty() {
@@ -349,6 +388,42 @@ mod tests {
             assert!(t.insert(0).is_ok());
         }
         assert!(t.is_full());
+    }
+
+    #[test]
+    fn ref_at_matches_insert_and_tracks_generation() {
+        let mut t: CapTable<u32, 4> = CapTable::new();
+        let r = t.insert(7).unwrap();
+        // ref_at on the occupied slot reproduces the insert ref.
+        assert_eq!(t.ref_at(r.slot()), Some(r));
+        // empty slots and out-of-range yield None.
+        assert_eq!(t.ref_at(1), None);
+        assert_eq!(t.ref_at(99), None);
+        // after remove + reinsert the slot's generation has advanced, so the
+        // new ref_at differs from the old ref (the stale one no longer matches).
+        t.remove(r);
+        let r2 = t.insert(8).unwrap();
+        assert_eq!(r2.slot(), r.slot());
+        assert_eq!(t.ref_at(r.slot()), Some(r2));
+        assert_ne!(t.ref_at(r.slot()), Some(r));
+    }
+
+    #[test]
+    fn for_each_visits_every_live_entry() {
+        let mut t: CapTable<u32, 8> = CapTable::new();
+        let a = t.insert(10).unwrap();
+        let b = t.insert(20).unwrap();
+        let c = t.insert(30).unwrap();
+        t.remove(b); // leave a hole in the middle.
+
+        let mut seen = std::vec::Vec::new();
+        t.for_each(|r, &v| seen.push((r, v)));
+        // visits exactly the two live entries, each ref valid, in slot order.
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], (a, 10));
+        assert_eq!(seen[1], (c, 30));
+        assert!(t.contains(seen[0].0));
+        assert!(t.contains(seen[1].0));
     }
 }
 

@@ -34,6 +34,8 @@ pub mod keyboard;
 pub mod memory;
 pub mod serial;
 #[cfg(target_arch = "x86_64")]
+pub mod syscall;
+#[cfg(target_arch = "x86_64")]
 pub mod usermode;
 pub mod vga_buffer;
 

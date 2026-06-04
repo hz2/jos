@@ -24,6 +24,12 @@ harness = false
 name = "usermode"
 harness = false
 
+# syscall drops to ring 3 and exits qemu from inside the user program (via the
+# SYS_EXIT syscall), so it likewise runs without the test framework.
+[[test]]
+name = "syscall"
+harness = false
+
 [dependencies]
 jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts

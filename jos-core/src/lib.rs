@@ -28,7 +28,9 @@
 // itself stays no_std so it is identical on the kernel target.
 
 pub mod bitmap;
+pub mod cap_rights;
 pub mod cap_table;
 pub mod frame_allocator;
 pub mod page_table;
 pub mod ring_buffer;
+pub mod untyped;

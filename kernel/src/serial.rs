@@ -4,6 +4,9 @@ use uart_16550::SerialPort;
 
 lazy_static! {
     pub static ref SERIAL1: Mutex<SerialPort> = {
+        // SAFETY: 0x3F8 is the standard COM1 i/o port base on x86; qemu always
+        // emulates a 16550 uart there. this is the sole constructor for the
+        // port, so no aliasing SerialPort exists for the same base.
         let mut serial_port = unsafe { SerialPort::new(0x3F8) };
         serial_port.init();
         Mutex::new(serial_port)

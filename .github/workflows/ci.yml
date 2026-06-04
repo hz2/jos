@@ -30,7 +30,11 @@ jobs:
       - name: miri (jos-core)
         run: nix develop --command cargo miri test -p jos-core
 
-      # kernel: bare-metal build + boot the test suite under qemu (headless).
-      # invoked from kernel/ so its .cargo/config (custom target) applies.
+      # kernel: clippy (incl. the safety-comment lints) then a bare-metal build
+      # + boot of the test suite under qemu (headless). invoked from kernel/ so
+      # its .cargo/config (custom target) applies.
+      - name: clippy (kernel)
+        run: nix develop --command bash -c 'cd kernel && cargo clippy -- -D warnings'
+
       - name: kernel build + boot tests (qemu)
         run: nix develop --command bash -c 'cd kernel && cargo test'

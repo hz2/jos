@@ -10,7 +10,10 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) }, // memory mapped I/O address is 0xb8000
+        // SAFETY: 0xb8000 is the fixed physical address of the vga text buffer,
+        // identity-mapped and live at boot under the multiboot/grub bios path.
+        // this is the only mutable reference taken to it, behind the WRITER mutex.
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     });
 }
 

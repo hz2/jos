@@ -43,9 +43,10 @@ impl<T, const N: usize> RingBuffer<T, N> {
     /// a const fn and the index fields are plain integers.
     #[must_use]
     pub const fn new() -> Self {
-        // safety: an array of MaybeUninit is always valid to zero-initialize
-        // this way; we never read any element until it has been written by
-        // push(), so uninitialized bytes are never observed as a T.
+        // building an array of uninit MaybeUninit is safe (no unsafe needed):
+        // MaybeUninit makes the uninitialized state explicit in the type. we
+        // never read a slot until push() has written it, so uninitialized
+        // bytes are never observed as a T.
         let storage = [const { MaybeUninit::uninit() }; N];
         Self {
             storage,
@@ -114,7 +115,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
         if self.is_empty() {
             return None;
         }
-        // safety: tail is always in [0, N) by construction; because len > 0
+        // SAFETY: tail is always in [0, N) by construction; because len > 0
         // the invariant guarantees the slot at tail holds a live, initialized
         // T that we now take ownership of. after this read the slot becomes
         // uninitialized and tail advances past it so it will not be read again
@@ -133,7 +134,7 @@ impl<T, const N: usize> Drop for RingBuffer<T, N> {
         // can elide the move when T is large; correctness is identical.
         for i in 0..self.len {
             let idx = (self.tail + i) % N;
-            // safety: the loop visits exactly the live indices once each.
+            // SAFETY: the loop visits exactly the live indices once each.
             // tail through tail+len-1 (mod N) are the only initialized slots
             // per the module invariant, so every assume_init_drop call here
             // targets a distinct, initialized element.

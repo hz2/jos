@@ -16,10 +16,13 @@ pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
     // 0xb8000 vga text mode is live at entry, so println! works immediately.
     println!("Hello World{}", "!");
 
+    // load the idt so cpu exceptions are handled instead of triple-faulting.
+    jos::init();
+
     #[cfg(test)]
     test_main();
 
-    loop {}
+    jos::hlt_loop()
 }
 
 // panic handler for normal (non-test) builds.
@@ -27,7 +30,7 @@ pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("{info}");
-    loop {}
+    jos::hlt_loop()
 }
 
 // panic handler for test builds routes through the serial test reporter.

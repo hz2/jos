@@ -17,6 +17,12 @@
 // new code is flagged without blocking local iteration; CI treats them as
 // errors via -D warnings.
 #![warn(clippy::pedantic)]
+// machine-check the safety discipline itself: every unsafe block must carry a
+// justification comment, and such comments may not sit on safe code. this makes
+// the presence and placement of safety justifications compiler-enforced, the
+// first rung of verifying the safety reasoning before deeper proof tools.
+#![warn(clippy::undocumented_unsafe_blocks)]
+#![warn(clippy::unnecessary_safety_comment)]
 
 // host-side test and proof crates pull in std/alloc as needed; the library
 // itself stays no_std so it is identical on the kernel target.

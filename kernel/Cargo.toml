@@ -36,6 +36,12 @@ harness = false
 name = "vspace"
 harness = false
 
+# cap_ipc drops to ring 3 and exits qemu from inside the user program (after
+# capability-mediated IPC syscalls), so it likewise runs without the framework.
+[[test]]
+name = "cap_ipc"
+harness = false
+
 [dependencies]
 jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts

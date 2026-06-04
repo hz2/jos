@@ -116,6 +116,20 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         self.table.get(cap_ref)
     }
 
+    /// Returns a live, generation-checked [`CapRef`] for capability `slot`, or
+    /// `None` if the slot is out of range or empty.
+    ///
+    /// This is how an external addressing scheme (a syscall that names a
+    /// capability by a plain slot index) resolves to an unforgeable ref: the
+    /// caller supplies only the index, and the space reconstructs the ref with
+    /// the slot's current generation. A revoked-and-reused slot yields a ref
+    /// for the new occupant (or `None` if now empty), never a stale one, so the
+    /// resolution is safe to do afresh on every syscall.
+    #[must_use]
+    pub fn ref_at(&self, slot: usize) -> Option<CapRef> {
+        self.table.ref_at(slot)
+    }
+
     /// Returns `true` if `cap_ref` currently names a live capability AND that
     /// capability carries every right in `required`.
     ///

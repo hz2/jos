@@ -45,19 +45,20 @@
 //! `KernelGsBase`/`swapgs` on entry) arrives with the retypeable `Tcb` object
 //! in slice 3c.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 
+use crate::cap::{cap_recv, cap_send, IpcError, KernelCapSpace, Message};
 use crate::gdt;
 
-/// The system calls jos understands in slice 3b.
+/// The system calls jos understands.
 ///
-/// Deliberately tiny: just enough to prove the boundary works end to end. The
-/// capability operations (retype, invoke, IPC send/recv) become syscalls in
-/// later sub-slices.
+/// Started tiny in slice 3b (`Add`/`Exit`); slice 3d adds the capability-
+/// mediated IPC calls, which is what makes this a real capability syscall
+/// surface rather than a probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
 pub enum Syscall {
@@ -67,6 +68,17 @@ pub enum Syscall {
     /// `exit(code)`: write `code` to the qemu isa-debug-exit port. Lets a
     /// ring-3 program end the test with a pass/fail verdict. Does not return.
     Exit = 1,
+    /// `ipc_send(cap_slot, word) -> 0 | errno`. Sends a one-word message
+    /// through the capability in slot `cap_slot` of the current task's
+    /// `CSpace`. Returns 0 on success or an [`IpcSyscallError`] code. Requires
+    /// the capability to carry `WRITE`; the kernel enforces this per call.
+    IpcSend = 2,
+    /// `ipc_recv(cap_slot) -> word | (errno | ERR_FLAG)`. Receives a one-word
+    /// message through the capability in slot `cap_slot`. On success returns
+    /// the message's first data word; on failure returns an error code with
+    /// [`IPC_ERR_FLAG`] set (so a valid word is distinguishable from an error).
+    /// Requires `READ`.
+    IpcRecv = 3,
 }
 
 impl Syscall {
@@ -75,6 +87,8 @@ impl Syscall {
         match n {
             0 => Some(Self::Add),
             1 => Some(Self::Exit),
+            2 => Some(Self::IpcSend),
+            3 => Some(Self::IpcRecv),
             _ => None,
         }
     }
@@ -82,6 +96,29 @@ impl Syscall {
 
 /// Sentinel returned in `rax` when the syscall number is not recognized.
 pub const ENOSYS: u64 = u64::MAX;
+
+/// Error codes returned by [`Syscall::IpcSend`] (in `rax`, 0 meaning success).
+///
+/// Distinct small non-zero values so a userspace program can tell *why* an IPC
+/// call failed: a stale capability, a missing right, the wrong object type, or
+/// a full/empty endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum IpcSyscallError {
+    /// The slot index is out of range or names no live capability.
+    BadCap = 1,
+    /// The capability lacks the right this operation needs (`WRITE`/`READ`).
+    Denied = 2,
+    /// The capability does not name an endpoint.
+    NotEndpoint = 3,
+    /// `send` to a full endpoint, or `recv` from an empty one (non-blocking).
+    WouldBlock = 4,
+}
+
+/// Bit OR-ed into an [`Syscall::IpcRecv`] return value to mark it an error
+/// rather than a received data word. The high bit, so any real message word
+/// below `1 << 63` is unambiguous.
+pub const IPC_ERR_FLAG: u64 = 1 << 63;
 
 /// The kernel stack pointer the syscall entry stub switches to on entry.
 ///
@@ -96,6 +133,31 @@ static KERNEL_RSP: AtomicU64 = AtomicU64::new(0);
 /// enter_user_mode`]. The value is read by the assembly entry stub.
 pub fn set_kernel_stack(rsp: VirtAddr) {
     KERNEL_RSP.store(rsp.as_u64(), Ordering::SeqCst);
+}
+
+/// The current task's capability space, resolved per IPC syscall.
+///
+/// The IPC syscalls take a capability *slot index* from userspace and resolve
+/// it against this `CSpace` on every call (via `ref_at`, which reconstructs the
+/// generation-checked `CapRef`), rather than borrowing a Rust reference once.
+/// That per-call resolution is exactly what lets a revoked capability be
+/// rejected on the next syscall, the property the slice-2b borrow-based API
+/// could not provide.
+///
+/// A single slot holds the one userspace task's `CSpace` for now; the per-`Tcb`
+/// `CSpace` root (a retypeable `CNode`) is deferred. Stored as a raw pointer to
+/// a kernel-owned `CapSpace`; the kernel is single-threaded across syscalls.
+static CURRENT_CSPACE: AtomicPtr<KernelCapSpace> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Installs `cspace` as the current task's capability space for IPC syscalls.
+///
+/// # Safety
+///
+/// `cspace` must point to a `KernelCapSpace` that outlives every syscall made
+/// while it is installed (in practice a `'static` kernel object), and must not
+/// be mutated concurrently (jos is single-threaded across the syscall path).
+pub unsafe fn set_current_cspace(cspace: *mut KernelCapSpace) {
+    CURRENT_CSPACE.store(cspace, Ordering::SeqCst);
 }
 
 /// Programs the syscall MSRs so `syscall`/`sysret` work. Call once during
@@ -161,7 +223,86 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, _arg2: u64) -> u64
             // never fall back into user mode with a bogus result.
             crate::hlt_loop();
         }
+        // ipc_send(cap_slot = arg0, word = arg1) -> 0 | errno.
+        Some(Syscall::IpcSend) => sys_ipc_send(arg0, arg1),
+        // ipc_recv(cap_slot = arg0) -> word | (errno | IPC_ERR_FLAG).
+        Some(Syscall::IpcRecv) => sys_ipc_recv(arg0),
         None => ENOSYS,
+    }
+}
+
+// resolves the current task's CSpace, the one IPC syscalls address capabilities
+// in. returns None if no CSpace is installed (a kernel setup bug).
+//
+// SAFETY note: the returned reference borrows the kernel-owned CapSpace behind
+// CURRENT_CSPACE; the caller (an IPC syscall handler) uses it only within the
+// single-threaded syscall path, where set_current_cspace's contract guarantees
+// the pointer is live and unaliased.
+fn current_cspace() -> Option<&'static KernelCapSpace> {
+    let ptr = CURRENT_CSPACE.load(Ordering::SeqCst);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: ptr was installed via set_current_cspace, whose contract requires
+    // it to point at a live, 'static, non-concurrently-mutated KernelCapSpace.
+    // jos is single-threaded across syscalls, so no aliasing &mut exists.
+    Some(unsafe { &*ptr })
+}
+
+// maps an IpcError from the cap layer to the userspace-visible errno. the cap
+// layer distinguishes more cases than userspace needs, so several collapse.
+fn ipc_errno(e: IpcError) -> u64 {
+    let code = match e {
+        IpcError::InvalidCap => IpcSyscallError::BadCap,
+        IpcError::InsufficientRights => IpcSyscallError::Denied,
+        IpcError::NotAnEndpoint => IpcSyscallError::NotEndpoint,
+        IpcError::EndpointBusy | IpcError::EndpointEmpty => IpcSyscallError::WouldBlock,
+    };
+    code as u64
+}
+
+// ipc_send: resolve cap_slot in the current CSpace per call, then send a
+// one-word message. the per-call resolution (ref_at reconstructs the
+// generation-checked CapRef) is what makes a revoked capability fail here
+// rather than the borrow being held across the block.
+fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
+    let Some(space) = current_cspace() else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    let Ok(slot) = usize::try_from(cap_slot) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    // resolve the slot index to a live, generation-checked CapRef in OUR table.
+    // an out-of-range or empty slot yields None -> BadCap.
+    let Some(cap_ref) = space.ref_at(slot) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    let message = Message {
+        label: 0,
+        words: [word, 0, 0, 0],
+    };
+    match cap_send(space, cap_ref, message) {
+        Ok(()) => 0,
+        Err(e) => ipc_errno(e),
+    }
+}
+
+// ipc_recv: resolve cap_slot per call, then receive a one-word message. returns
+// the message's first word on success, or (errno | IPC_ERR_FLAG) on failure so
+// userspace can distinguish a real word from an error.
+fn sys_ipc_recv(cap_slot: u64) -> u64 {
+    let Some(space) = current_cspace() else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    let Ok(slot) = usize::try_from(cap_slot) else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    let Some(cap_ref) = space.ref_at(slot) else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    match cap_recv(space, cap_ref) {
+        Ok(message) => message.words[0],
+        Err(e) => ipc_errno(e) | IPC_ERR_FLAG,
     }
 }
 

@@ -21,6 +21,7 @@ use core::panic::PanicInfo;
 #[cfg(target_arch = "x86_64")]
 pub mod allocator;
 pub mod arch;
+pub mod cap;
 #[cfg(target_arch = "x86_64")]
 pub mod gdt;
 #[cfg(target_arch = "x86_64")]

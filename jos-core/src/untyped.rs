@@ -28,6 +28,8 @@
 //! | `Endpoint` | 128 | 64 |
 //! | `CNode { size_bits }` | `2^size_bits * 32` | `2^size_bits * 32` |
 //! | `Untyped { size_bits }` | `2^size_bits` | `2^size_bits` |
+//! | `PageTable` | 4096 | 4096 |
+//! | `Tcb` | 512 | 64 |
 //!
 //! `CNode` slot size of 32 bytes matches a two-word capability slot on a
 //! 64-bit platform (one word for the capability itself, one for bookkeeping).
@@ -36,6 +38,13 @@
 //! and receiver wakers the async IPC path stores in it. Note the size is a
 //! multiple of the alignment, not equal to it; placement only needs the start
 //! to be `align`-aligned, which a 64-aligned watermark gives.
+//!
+//! `PageTable` is one 4 KiB page (512 eight-byte entries), naturally aligned so
+//! the hardware can use it as any level of an `x86_64` 4-level page table (the
+//! `PML4` root of a `VSpace`, or an intermediate `PDPT`/`PD`/`PT`). `Tcb` is a
+//! thread control block: a saved register context plus its `CSpace`/`VSpace`
+//! roots and run state, cache-line aligned at 512 bytes (align divides size,
+//! like `Endpoint`).
 //!
 //! [`retype_fits`]: retype_fits
 
@@ -58,6 +67,23 @@ pub const ENDPOINT_SIZE: usize = 128;
 /// share. Less than [`ENDPOINT_SIZE`]; the object spans two cache lines but
 /// only needs its start aligned.
 pub const ENDPOINT_ALIGN: usize = 64;
+
+/// Size and alignment of a `PageTable` object in bytes.
+///
+/// One 4 KiB page: 512 eight-byte entries, the `x86_64` page-table unit. Both
+/// the size and the alignment are 4096, so a placed page table is a valid
+/// hardware page-table frame (which must be page-aligned) at any level.
+pub const PAGE_TABLE_SIZE: usize = 4096;
+
+/// Size of one `Tcb` (thread control block) object in bytes.
+///
+/// 512 bytes: room for the saved register context plus the `CSpace`/`VSpace`
+/// roots and scheduling state, with headroom for fields later sub-slices add.
+/// A multiple of [`TCB_ALIGN`], like [`ENDPOINT_SIZE`].
+pub const TCB_SIZE: usize = 512;
+
+/// Alignment requirement of a `Tcb` object in bytes (one cache line).
+pub const TCB_ALIGN: usize = 64;
 
 /// Size of one `CNode` capability slot in bytes.
 ///
@@ -103,6 +129,19 @@ pub enum ObjectType {
         /// Log2 of the byte size of this untyped sub-region.
         size_bits: u8,
     },
+
+    /// An `x86_64` page table: one 4 KiB page of 512 entries.
+    ///
+    /// Fixed size: [`PAGE_TABLE_SIZE`] bytes, page-aligned. Used for the
+    /// `PML4` root of a `VSpace` and for every intermediate table carved when
+    /// mapping a page.
+    PageTable,
+
+    /// A thread control block.
+    ///
+    /// Fixed size: [`TCB_SIZE`] bytes, [`TCB_ALIGN`]-byte aligned. Holds a
+    /// saved register context plus the thread's `CSpace`/`VSpace` roots.
+    Tcb,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +188,8 @@ pub const fn object_layout(ty: ObjectType) -> (usize, usize) {
             };
             (size, size)
         }
+        ObjectType::PageTable => (PAGE_TABLE_SIZE, PAGE_TABLE_SIZE),
+        ObjectType::Tcb => (TCB_SIZE, TCB_ALIGN),
     }
 }
 
@@ -306,6 +347,39 @@ mod tests {
                 "Untyped size must be a power of two for size_bits={bits}"
             );
         }
+    }
+
+    #[test]
+    fn page_table_layout_is_one_page() {
+        let (size, align) = object_layout(ObjectType::PageTable);
+        assert_eq!(size, super::PAGE_TABLE_SIZE);
+        assert_eq!(align, super::PAGE_TABLE_SIZE);
+        assert_eq!(size, 4096);
+        // a page table must be page-aligned to serve as a hardware table frame.
+        assert_eq!(align, 4096);
+    }
+
+    #[test]
+    fn tcb_layout_matches_constants() {
+        let (size, align) = object_layout(ObjectType::Tcb);
+        assert_eq!(size, super::TCB_SIZE);
+        assert_eq!(align, super::TCB_ALIGN);
+        // align divides size (like Endpoint), so a TCB_ALIGN-aligned placement
+        // satisfies the object.
+        assert_eq!(size % align, 0);
+    }
+
+    #[test]
+    fn page_table_and_tcb_fit_and_advance() {
+        // both new object types place and advance the watermark like the others.
+        let region = 8192;
+        let pt = retype_fits(region, 0, ObjectType::PageTable).expect("page table fits");
+        assert_eq!(pt, super::PAGE_TABLE_SIZE);
+        let tcb = retype_fits(region, pt, ObjectType::Tcb).expect("tcb fits after page table");
+        assert!(tcb > pt, "watermark must advance");
+        // the tcb placement start is TCB_ALIGN-aligned.
+        let (size, align) = object_layout(ObjectType::Tcb);
+        assert_eq!((tcb - size) % align, 0);
     }
 
     // ---- cnode size scales with size_bits ---------------------------------
@@ -522,10 +596,12 @@ mod kani_proofs {
         let size_bits: u8 = kani::any();
         // keep size_bits small: 2^12 = 4096 bytes max, well inside MAX_REGION.
         kani::assume(size_bits <= 12);
-        match tag % 3 {
+        match tag % 5 {
             0 => ObjectType::Endpoint,
             1 => ObjectType::CNode { size_bits },
-            _ => ObjectType::Untyped { size_bits },
+            2 => ObjectType::Untyped { size_bits },
+            3 => ObjectType::PageTable,
+            _ => ObjectType::Tcb,
         }
     }
 

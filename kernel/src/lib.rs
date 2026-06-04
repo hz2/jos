@@ -38,6 +38,8 @@ pub mod syscall;
 #[cfg(target_arch = "x86_64")]
 pub mod usermode;
 pub mod vga_buffer;
+#[cfg(target_arch = "x86_64")]
+pub mod vspace;
 
 /// Runs the architecture-specific early kernel initialization.
 ///

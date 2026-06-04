@@ -24,7 +24,9 @@ use jos_core::cap_rights::Rights;
 use jos_core::cap_space::CapSpace;
 use jos_core::cap_table::CapRef;
 use jos_core::placement::{place, PlaceError};
-use jos_core::untyped::{ObjectType, ENDPOINT_ALIGN, ENDPOINT_SIZE};
+use jos_core::untyped::{
+    ObjectType, ENDPOINT_ALIGN, ENDPOINT_SIZE, PAGE_TABLE_SIZE, TCB_ALIGN, TCB_SIZE,
+};
 use spin::Mutex;
 
 /// Number of capability slots in a task's capability space (single-level for now).
@@ -43,6 +45,11 @@ pub type KernelCapSpace = CapSpace<ObjectId, CSPACE_SLOTS>;
 pub enum ObjectKind {
     /// A synchronous IPC endpoint.
     Endpoint,
+    /// An `x86_64` page table (one 4 KiB page of 512 entries). Serves as the
+    /// `PML4` root of a [`crate::vspace::VSpace`] or an intermediate table.
+    PageTable,
+    /// A thread control block (saved context + `CSpace`/`VSpace` roots).
+    Tcb,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -87,6 +94,53 @@ impl ObjectId {
         // untyped region is never freed). Per this function's contract the
         // caller guarantees no aliasing live &mut, and the kind is Endpoint.
         unsafe { &*ptr }
+    }
+
+    /// Returns the physical address of the object this handle names.
+    ///
+    /// jos identity-maps the regions objects are carved from, so the captured
+    /// address is both the virtual and the physical address. The `VSpace`
+    /// mapper needs the physical address of a page-table object to install it
+    /// in a parent table entry.
+    #[must_use]
+    pub fn phys_addr(self) -> u64 {
+        self.addr as u64
+    }
+
+    /// Returns an exclusive reference to the [`PageTable`] this handle names.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure (1) `self.kind == ObjectKind::PageTable`, (2) the
+    /// untyped region that owns the table is still live, and (3) no other live
+    /// reference (shared or exclusive) to this table exists. Unlike an endpoint
+    /// (whose state is behind a `Mutex`), a page table has no interior
+    /// mutability, so mutation requires a genuinely exclusive `&mut`.
+    pub(crate) unsafe fn as_page_table_mut(self) -> &'static mut PageTable {
+        debug_assert_eq!(self.kind, ObjectKind::PageTable);
+        let ptr = core::ptr::with_exposed_provenance_mut::<PageTable>(self.addr);
+        // SAFETY: the address was captured in retype (kind PageTable) from a
+        // pointer derived from the region base where a PageTable was placed; it
+        // is live for the kernel's lifetime. The caller guarantees exclusivity
+        // and the correct kind per this function's contract.
+        unsafe { &mut *ptr }
+    }
+
+    /// Returns an exclusive reference to the [`Tcb`] this handle names.
+    ///
+    /// # Safety
+    ///
+    /// As [`as_page_table_mut`](Self::as_page_table_mut), but for a `Tcb`: the
+    /// kind must be `Tcb`, the owning region live, and no aliasing reference
+    /// may exist.
+    pub unsafe fn as_tcb_mut(self) -> &'static mut Tcb {
+        debug_assert_eq!(self.kind, ObjectKind::Tcb);
+        let ptr = core::ptr::with_exposed_provenance_mut::<Tcb>(self.addr);
+        // SAFETY: the address was captured in retype (kind Tcb) from a pointer
+        // derived from the region base where a Tcb was placed; it is live for
+        // the kernel's lifetime. The caller guarantees exclusivity and the
+        // correct kind per this function's contract.
+        unsafe { &mut *ptr }
     }
 }
 
@@ -188,6 +242,154 @@ const _: () = assert!(core::mem::size_of::<Endpoint>() == ENDPOINT_SIZE);
 const _: () = assert!(core::mem::align_of::<Endpoint>() == ENDPOINT_ALIGN);
 
 // --------------------------------------------------------------------------
+// PageTable object
+// --------------------------------------------------------------------------
+
+/// An `x86_64` page table: one 4 KiB page of 512 eight-byte entries, sized and
+/// aligned to match [`ObjectType::PageTable`] so it can be placed in untyped
+/// memory and used directly by the cpu as a table frame.
+///
+/// The entries are raw `u64`s; the verified [`jos_core::pte`] module encodes
+/// and decodes them. A page table serves as the `PML4` root of a
+/// [`crate::vspace::VSpace`] or as any intermediate level the mapper carves.
+#[repr(C, align(4096))]
+pub struct PageTable {
+    /// The 512 raw page-table entries.
+    pub entries: [u64; 512],
+}
+
+impl PageTable {
+    /// A page table with every entry zero (all not-present).
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { entries: [0; 512] }
+    }
+}
+
+impl Default for PageTable {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<PageTable>() == PAGE_TABLE_SIZE);
+const _: () = assert!(core::mem::align_of::<PageTable>() == PAGE_TABLE_SIZE);
+
+// --------------------------------------------------------------------------
+// Tcb object
+// --------------------------------------------------------------------------
+
+/// A thread's saved register context: enough to resume it where it left off.
+///
+/// Holds the general-purpose registers plus the architectural state an
+/// `iretq` restores (`rip`, `rsp`, `rflags`, `cs`, `ss`). In slice 3c this is
+/// the *initial* context the kernel sets before first entering the thread;
+/// saving a running thread's context on a trap (for preemptive switching) is a
+/// later slice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct SavedContext {
+    /// General-purpose registers.
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    /// Instruction pointer to resume at.
+    pub rip: u64,
+    /// Stack pointer to resume with.
+    pub rsp: u64,
+    /// Flags register.
+    pub rflags: u64,
+    /// Code segment selector (ring 3 for a user thread).
+    pub cs: u64,
+    /// Stack segment selector.
+    pub ss: u64,
+}
+
+/// Run state of a [`Tcb`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TcbState {
+    /// Created but never run.
+    Inactive,
+    /// Runnable / running.
+    Running,
+}
+
+/// A thread control block: a thread's saved context plus the roots of its
+/// authority (its `CSpace`) and address space (its `VSpace`).
+///
+/// This is the retypeable "Task" object, carved from untyped like an
+/// [`Endpoint`]. It completes jos's five seL4 object types (Untyped, page
+/// table, `CNode`/`CSpace`, `Tcb`, `Endpoint`).
+///
+/// The `CSpace` root is stored as an [`ObjectId`] placeholder for now: a
+/// `CNode` is not yet a retypeable kernel object (the kernel currently holds a
+/// `CapSpace` directly), so a freshly carved `Tcb` records `None` and the
+/// capability syscalls in slice 3d resolve the active `CSpace` explicitly.
+#[repr(C, align(64))]
+pub struct Tcb {
+    /// The thread's saved register context.
+    pub context: SavedContext,
+    /// Physical address of the thread's `VSpace` `PML4` (its address space
+    /// root). Zero means "no address space assigned yet".
+    pub vspace_root: u64,
+    /// The thread's `CSpace` root capability, once `CNode`s are retypeable
+    /// objects (deferred); `None` for now.
+    pub cspace_root: Option<ObjectId>,
+    /// The thread's run state.
+    pub state: TcbState,
+    // pad to the full TCB_SIZE so the layout matches ObjectType::Tcb exactly.
+    _pad: [u8; Tcb::PAD],
+}
+
+impl Tcb {
+    // bytes of padding so size_of::<Tcb>() == TCB_SIZE. computed from the sum of
+    // the real fields' sizes; if a field is added this const fails to compile
+    // until updated, which is the intended tripwire.
+    const USED: usize = core::mem::size_of::<SavedContext>()
+        + core::mem::size_of::<u64>()
+        + core::mem::size_of::<Option<ObjectId>>()
+        + core::mem::size_of::<TcbState>();
+    const PAD: usize = TCB_SIZE - Self::USED;
+
+    /// Creates an inactive `Tcb` with a zeroed context and no roots.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            context: SavedContext {
+                rax: 0, rbx: 0, rcx: 0, rdx: 0, rsi: 0, rdi: 0, rbp: 0,
+                r8: 0, r9: 0, r10: 0, r11: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+                rip: 0, rsp: 0, rflags: 0, cs: 0, ss: 0,
+            },
+            vspace_root: 0,
+            cspace_root: None,
+            state: TcbState::Inactive,
+            _pad: [0; Self::PAD],
+        }
+    }
+}
+
+impl Default for Tcb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<Tcb>() == TCB_SIZE);
+const _: () = assert!(core::mem::align_of::<Tcb>() == TCB_ALIGN);
+
+// --------------------------------------------------------------------------
 // Untyped region
 // --------------------------------------------------------------------------
 
@@ -232,31 +434,45 @@ impl UntypedRegion {
     /// then captures its address as an [`ObjectId`]. Returns `None` if the
     /// region has no room for another endpoint.
     pub fn retype_endpoint(&mut self) -> Option<ObjectId> {
-        match place(
-            self.bytes,
-            self.watermark,
-            ObjectType::Endpoint,
-            Endpoint::new(),
-        ) {
+        self.retype(ObjectType::Endpoint, Endpoint::new(), ObjectKind::Endpoint)
+    }
+
+    /// Carves a fresh zeroed [`PageTable`] out of this region and returns its
+    /// handle. Returns `None` if the region cannot fit a 4 KiB page table at
+    /// the (aligned) watermark.
+    ///
+    /// Page tables are 4096-aligned, so this only succeeds when the region's
+    /// base is itself page-aligned (a page table cannot be placed in a region
+    /// whose base is merely 64-aligned). Callers that retype page tables must
+    /// provide a page-aligned untyped region.
+    pub fn retype_page_table(&mut self) -> Option<ObjectId> {
+        self.retype(ObjectType::PageTable, PageTable::empty(), ObjectKind::PageTable)
+    }
+
+    /// Carves a fresh inactive [`Tcb`] out of this region and returns its
+    /// handle. Returns `None` if the region has no room for another `Tcb`.
+    pub fn retype_tcb(&mut self) -> Option<ObjectId> {
+        self.retype(ObjectType::Tcb, Tcb::new(), ObjectKind::Tcb)
+    }
+
+    // shared carving primitive: place `value` (whose layout must match `ty`)
+    // into the region at the watermark, advance the watermark, and return an
+    // ObjectId tagged `kind` whose address is the placement site. factors out
+    // the body retype_endpoint had so every object type carves identically.
+    fn retype<T>(&mut self, ty: ObjectType, value: T, kind: ObjectKind) -> Option<ObjectId> {
+        match place(self.bytes, self.watermark, ty, value) {
             Ok((start, new_watermark)) => {
                 self.watermark = new_watermark;
                 self.has_children = true;
-                // re-derive the object pointer from the region base (preserving
-                // provenance) and expose its address for the Copy handle.
-                // SAFETY: `start` is in bounds and `start + ENDPOINT_SIZE ==
-                // new_watermark <= bytes.len()` (place returned it), so the add
-                // stays within the region's provenance.
+                // SAFETY: `start <= new_watermark - size` and `new_watermark <=
+                // bytes.len()` (place returned them), so the offset is in bounds
+                // and `add` stays within the region's provenance.
                 let obj_ptr = unsafe { self.bytes.as_ptr().add(start) };
                 let addr = obj_ptr.expose_provenance();
-                Some(ObjectId {
-                    addr,
-                    kind: ObjectKind::Endpoint,
-                })
+                Some(ObjectId { addr, kind })
             }
-            // a full region is the only expected error; the others are
-            // programming bugs (wrong layout / misaligned base) caught in tests.
             Err(PlaceError::DoesNotFit) => None,
-            Err(e) => panic!("retype_endpoint: unexpected placement error: {e:?}"),
+            Err(e) => panic!("retype: unexpected placement error for {kind:?}: {e:?}"),
         }
     }
 }

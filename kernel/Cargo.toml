@@ -30,6 +30,12 @@ harness = false
 name = "syscall"
 harness = false
 
+# vspace switches CR3 to a carved address space and exits qemu from inside the
+# user program, so it likewise runs without the test framework.
+[[test]]
+name = "vspace"
+harness = false
+
 [dependencies]
 jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts

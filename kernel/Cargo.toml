@@ -18,6 +18,12 @@ harness = false
 name = "stack_overflow"
 harness = false
 
+# usermode drops to ring 3 and exits qemu from inside the breakpoint handler
+# (after the privilege switch), so it also runs without the test framework.
+[[test]]
+name = "usermode"
+harness = false
+
 [dependencies]
 jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts

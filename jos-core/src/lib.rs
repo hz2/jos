@@ -34,6 +34,7 @@ pub mod cap_table;
 pub mod frame_allocator;
 pub mod page_table;
 pub mod placement;
+pub mod pte;
 pub mod ring_buffer;
 pub mod run_queue;
 pub mod untyped;

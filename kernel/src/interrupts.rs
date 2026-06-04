@@ -1,18 +1,65 @@
-//! Interrupt Descriptor Table and CPU exception handlers.
+//! Interrupt Descriptor Table, CPU exception handlers, and the 8259 PIC.
 //!
-//! this is blog_os post 05: we install an IDT with the x86-interrupt calling
-//! convention and a handler for the breakpoint exception (#BP / int3). the IDT
-//! is the dispatch table the cpu consults when an exception or interrupt fires;
-//! it is the foundation for hardware interrupts (timer, keyboard) and, later,
-//! the syscall/IPC trap path of the capability kernel.
+//! post 05 installed an IDT with the x86-interrupt calling convention and a
+//! breakpoint handler. post 06 added the double-fault handler on an IST stack.
+//! post 07 (here) adds the legacy 8259 PIC and hardware interrupt handlers for
+//! the timer (IRQ0) and keyboard (IRQ1).
 //!
-//! the double-fault handler needs a separate known-good stack (an IST entry in
-//! the TSS) to survive a kernel stack overflow; that arrives with the GDT in
-//! post 06. for now a breakpoint handler is enough to prove the IDT works.
+//! we start with the 8259 PIC rather than the APIC: qemu's q35 emulates it, it
+//! needs no ACPI/MADT parsing, and single-core does not need the APIC yet. the
+//! APIC is a later upgrade (alongside SMP).
+//!
+//! the IDT is also the future syscall/IPC trap path of the capability kernel.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use pic8259::ChainedPics;
+use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 use crate::serial_println;
+
+/// First vector the primary PIC is remapped to. Vectors 0x00..0x20 are CPU
+/// exceptions, so the 16 PIC IRQs are mapped to 0x20..0x30.
+pub const PIC_1_OFFSET: u8 = 32;
+/// First vector the secondary PIC is remapped to (`PIC_1_OFFSET` + 8).
+pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
+
+/// The chained 8259 PICs. `ChainedPics::new` is a const fn, so this is a
+/// compile-time static (no `lazy_static`); the mutex gives the interior
+/// mutability needed for `initialize` and `notify_end_of_interrupt`.
+pub static PICS: Mutex<ChainedPics> =
+    // SAFETY: PIC_1_OFFSET / PIC_2_OFFSET (32 / 40) sit above the 32 CPU
+    // exception vectors and below any vectors we assign later. this is the
+    // canonical remapping; constructing the PICs has no effect until initialize.
+    Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+
+/// Monotonic timer tick counter, incremented by the timer interrupt handler.
+/// Relaxed ordering suffices: readers only need a lower bound (did the timer
+/// fire), not ordering against other memory operations.
+pub static TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// IDT vector indices for the hardware interrupt lines we handle.
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum InterruptIndex {
+    /// PIT timer on IRQ0, remapped to vector 32.
+    Timer = PIC_1_OFFSET,
+    /// PS/2 keyboard on IRQ1, remapped to vector 33.
+    Keyboard,
+}
+
+impl InterruptIndex {
+    #[must_use]
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub fn as_usize(self) -> usize {
+        usize::from(self.as_u8())
+    }
+}
 
 // the idt must outlive the call to load() (the cpu keeps a pointer to it after
 // lidt), so it is a static. we use a mutable static guarded by a one-time init
@@ -38,7 +85,22 @@ pub fn init_idt() {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+        // hardware interrupt handlers (post 07).
+        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt.load();
+    }
+}
+
+/// Initializes the 8259 PIC (remaps the IRQs to vectors 32..48). Call once
+/// during kernel init, after `init_idt` so the timer/keyboard vectors already
+/// have handlers before the first IRQ can arrive.
+pub fn init_pics() {
+    // SAFETY: called once during single-threaded init; the offsets do not
+    // overlap the CPU exception vectors, and the IDT entries for the remapped
+    // vectors are installed by the time interrupts are enabled.
+    unsafe {
+        PICS.lock().initialize();
     }
 }
 
@@ -62,6 +124,60 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
+}
+
+// timer (IRQ0, vector 32). the PIT fires continuously (~18.2 Hz) once the PIC
+// is initialized. we bump the tick counter and MUST send EOI, or the PIC will
+// never deliver another timer interrupt.
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: Timer is the correct vector for IRQ0; signaling EOI for the wrong
+    // line could leave an unrelated interrupt masked.
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+}
+
+// keyboard (IRQ1, vector 33). read the scancode from the PS/2 data port, decode
+// it, and print any resulting character. we keep the decoder behind a lazily
+// initialized Option because pc-keyboard 0.5's `Keyboard::new` is not a const
+// fn; this is safe because the handler runs with interrupts disabled (the cpu
+// clears IF on entry), so it is never re-entered. (a later async rework will
+// move decoding out of the handler into a scancode-queue task.)
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
+    use x86_64::instructions::port::Port;
+
+    static KEYBOARD: Mutex<Option<Keyboard<layouts::Us104Key, ScancodeSet1>>> = Mutex::new(None);
+
+    let mut guard = KEYBOARD.lock();
+    let keyboard = guard.get_or_insert_with(|| {
+        // pc-keyboard 0.5 arg order is (layout, scancode_set, handle_control).
+        Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore)
+    });
+
+    // always drain the PS/2 data register (port 0x60), or the controller will
+    // not raise further keyboard interrupts.
+    let mut port: Port<u8> = Port::new(0x60);
+    // SAFETY: 0x60 is the PS/2 data port; reading it is the defined way to
+    // consume the scancode that caused this IRQ.
+    let scancode: u8 = unsafe { port.read() };
+
+    if let Ok(Some(event)) = keyboard.add_byte(scancode)
+        && let Some(key) = keyboard.process_keyevent(event)
+    {
+        match key {
+            DecodedKey::Unicode(c) => crate::print!("{c}"),
+            DecodedKey::RawKey(k) => crate::print!("{k:?}"),
+        }
+    }
+
+    // SAFETY: Keyboard is the correct vector for IRQ1.
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
 }
 
 #[cfg(test)]

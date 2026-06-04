@@ -12,7 +12,7 @@ pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
     should_fail();
     serial_println!("[test did not panic]");
     exit_qemu(QemuExitCode::Failed);
-    loop {}
+    jos::hlt_loop()
 }
 
 fn should_fail() {
@@ -24,5 +24,5 @@ fn should_fail() {
 fn panic(_info: &PanicInfo) -> ! {
     serial_println!("[ok]");
     exit_qemu(QemuExitCode::Success);
-    loop {}
+    jos::hlt_loop()
 }

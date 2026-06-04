@@ -34,9 +34,15 @@ pub fn init() {
     // gdt/tss before the idt: the idt's double-fault entry references the IST
     // stack the gdt installs.
     #[cfg(target_arch = "x86_64")]
-    gdt::init_gdt();
-    #[cfg(target_arch = "x86_64")]
-    interrupts::init_idt();
+    {
+        gdt::init_gdt();
+        interrupts::init_idt();
+        // remap + init the PIC after the idt has timer/keyboard handlers, then
+        // enable interrupts. order matters: an IRQ arriving before its idt
+        // entry exists would fault.
+        interrupts::init_pics();
+        x86_64::instructions::interrupts::enable();
+    }
 }
 
 // the multiboot2 header + 32->64 bit long-mode trampoline. it lives in the

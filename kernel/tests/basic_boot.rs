@@ -14,7 +14,7 @@ use core::panic::PanicInfo;
 pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
     test_main();
 
-    loop {}
+    jos::hlt_loop()
 }
 
 #[panic_handler]

@@ -20,10 +20,18 @@ pub fn init_serial() {
 #[doc(hidden)]
 pub fn _print(args: ::core::fmt::Arguments) {
     use core::fmt::Write;
-    SERIAL1
-        .lock()
-        .write_fmt(args)
-        .expect("Printing to serial failed");
+    use x86_64::instructions::interrupts;
+    // hold the serial lock with interrupts disabled. otherwise a timer or
+    // keyboard interrupt firing mid-print would try to lock SERIAL1 again and
+    // spin-deadlock forever (spin::Mutex is not reentrant, and single-core
+    // means the held lock never releases). without_interrupts saves/restores
+    // the interrupt flag, so it is a no-op before interrupts are enabled.
+    interrupts::without_interrupts(|| {
+        SERIAL1
+            .lock()
+            .write_fmt(args)
+            .expect("Printing to serial failed");
+    });
 }
 
 /// Prints to the host through the serial interface.

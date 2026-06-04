@@ -85,6 +85,7 @@ pub fn init_idt() {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+        idt.page_fault.set_handler_fn(page_fault_handler);
         // hardware interrupt handlers (post 07).
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
@@ -124,6 +125,22 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
+}
+
+// page fault (#PF). cr2 holds the faulting address and the error code says why
+// (present/write/user bits). we report and halt rather than recover; this is a
+// diagnostic so paging bugs show the faulting address instead of escalating to
+// an opaque double fault.
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: x86_64::structures::idt::PageFaultErrorCode,
+) {
+    let addr = x86_64::registers::control::Cr2::read();
+    serial_println!("EXCEPTION: PAGE FAULT");
+    serial_println!("  accessed address: {:?}", addr);
+    serial_println!("  error code: {:?}", error_code);
+    serial_println!("{:#?}", stack_frame);
+    crate::hlt_loop();
 }
 
 // timer (IRQ0, vector 32). the PIT fires continuously (~18.2 Hz) once the PIC

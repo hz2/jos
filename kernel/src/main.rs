@@ -4,6 +4,9 @@
 #![test_runner(jos::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 use jos::println;
 
@@ -12,12 +15,22 @@ use jos::println;
 // magic should be 0x36d76289 (the multiboot2 loader magic); info_ptr points at
 // the multiboot2 info struct.
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
+pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     // 0xb8000 vga text mode is live at entry, so println! works immediately.
     println!("Hello World{}", "!");
 
-    // load the idt so cpu exceptions are handled instead of triple-faulting.
+    // load gdt/idt, init the pic, enable interrupts.
     jos::init();
+
+    // set up paging + the heap so alloc works.
+    // SAFETY: boot.s identity-maps the first 1 GiB, and we call these once.
+    let mut mapper = unsafe { jos::memory::init_mapper() };
+    let mut frame_allocator = unsafe { jos::memory::BootstrapFrameAllocator::new(info_ptr) };
+    jos::allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap init failed");
+
+    // prove the heap works.
+    let v: Vec<u32> = (0..16).collect();
+    println!("heap ok: sum(0..16) = {}", v.iter().sum::<u32>());
 
     #[cfg(test)]
     test_main();

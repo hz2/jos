@@ -19,9 +19,14 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 #[cfg(target_arch = "x86_64")]
+pub mod allocator;
+pub mod arch;
+#[cfg(target_arch = "x86_64")]
 pub mod gdt;
 #[cfg(target_arch = "x86_64")]
 pub mod interrupts;
+#[cfg(target_arch = "x86_64")]
+pub mod memory;
 pub mod serial;
 pub mod vga_buffer;
 
@@ -45,13 +50,8 @@ pub fn init() {
     }
 }
 
-// the multiboot2 header + 32->64 bit long-mode trampoline. it lives in the
-// library so every binary that links jos (the kernel and each test binary)
-// gets a valid boot entry. the linker script's ENTRY(_start32) pulls this
-// object in and keeps the .multiboot_header section. the trampoline ends by
-// calling kernel_main(magic, info_ptr), which each binary defines for itself.
-#[cfg(target_arch = "x86_64")]
-core::arch::global_asm!(include_str!("arch/x86_64/boot.s"), options(att_syntax));
+// note: the multiboot2 header + long-mode trampoline now live in
+// arch::x86_64 (it includes boot.s via global_asm).
 
 // a global allocator is required now that alloc is pulled into the build (the
 // async executor deps reference it). the heap starts empty; a real heap region

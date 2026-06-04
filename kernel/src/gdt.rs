@@ -54,28 +54,37 @@ pub fn init_gdt() {
             stack_start + STACK_SIZE as u64
         };
 
+        // gdt layout: null (auto), kernel code, kernel data, then the TSS
+        // (a 16-byte system descriptor occupying two slots). including a real
+        // data segment lets us give ss/ds/es a valid non-null selector, which
+        // the production rust kernels (redox, theseus) do, rather than relying
+        // on null ss (whose iretq behavior across privilege levels is
+        // implementation-defined and would bite once we add userspace).
         let gdt = &mut *core::ptr::addr_of_mut!(GDT);
         let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
+        let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
         let tss_selector = gdt.add_entry(Descriptor::tss_segment(&*core::ptr::addr_of!(TSS)));
         gdt.load();
 
         // gdt.load() sets GDTR but does NOT touch the segment registers; the
         // cpu keeps using each register's cached descriptor until the register
         // is reloaded. our trampoline left ss/ds/es/fs/gs = 0x10 (its data
-        // segment), but in this gdt 0x10 is the TSS (a system descriptor). the
-        // next iretq would pop ss=0x10, re-validate it against this gdt, find a
-        // system descriptor, and #GP -> double fault -> triple fault. so we
-        // must reload every segment register we are now responsible for.
+        // segment), but in this gdt 0x10 is now the data segment too, then the
+        // TSS follows. without reloading, the first iretq would re-validate the
+        // stale selector against this gdt and could #GP. so reload every
+        // segment register we are now responsible for.
 
         // reload cs with our 64-bit code selector (via retfq).
         CS::set_reg(code_selector);
 
-        // null out the data/stack segment registers. at cpl0 in long mode a
-        // null selector is valid for ss/ds/es/fs/gs (flat addressing ignores
-        // their base/limit), and it leaves no stale 0x10 to fault on iretq.
-        SS::set_reg(SegmentSelector::NULL);
-        DS::set_reg(SegmentSelector::NULL);
-        ES::set_reg(SegmentSelector::NULL);
+        // give ss/ds/es a valid kernel data selector. ss in particular must be
+        // a writable data segment for iretq to restore it cleanly when we later
+        // return from a privilege transition.
+        SS::set_reg(data_selector);
+        DS::set_reg(data_selector);
+        ES::set_reg(data_selector);
+        // fs/gs are null for now; their bases are programmed via MSR (gs holds
+        // per-cpu data later), so the selector itself does not need a descriptor.
         FS::set_reg(SegmentSelector::NULL);
         GS::set_reg(SegmentSelector::NULL);
 

@@ -1,21 +1,16 @@
 use core::fmt;
-use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
 
-lazy_static! {
-    /// A global `Writer` instance that can be used for printing to the VGA text buffer.
-    ///
-    /// Used by the `print!` and `println!` macros.
-    pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
-        column_position: 0,
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
-        // SAFETY: 0xb8000 is the fixed physical address of the vga text buffer,
-        // identity-mapped and live at boot under the multiboot/grub bios path.
-        // this is the only mutable reference taken to it, behind the WRITER mutex.
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
-    });
-}
+/// A global `Writer` instance that can be used for printing to the VGA text buffer.
+///
+/// Used by the `print!` and `println!` macros.
+///
+/// Constructed at compile time via `Writer::new` (no `lazy_static`): the buffer
+/// is held as a raw pointer to the fixed 0xb8000 address, dereferenced only
+/// inside `&mut self` methods behind this mutex. A first-access lazy init path
+/// hung the boot sequence elsewhere, so the const static is the safer choice.
+pub static WRITER: Mutex<Writer> = Mutex::new(Writer::new());
 
 /// The standard color palette in VGA text mode.
 #[allow(dead_code)]
@@ -47,7 +42,7 @@ struct ColorCode(u8);
 
 impl ColorCode {
     /// Create a new `ColorCode` with the given foreground and background colors.
-    fn new(foreground: Color, background: Color) -> ColorCode {
+    const fn new(foreground: Color, background: Color) -> ColorCode {
         ColorCode((background as u8) << 4 | (foreground as u8))
     }
 }
@@ -78,10 +73,35 @@ struct Buffer {
 pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
-    buffer: &'static mut Buffer,
+    // raw pointer to the fixed vga buffer rather than &'static mut, so Writer
+    // is const-constructible. it is only dereferenced inside &mut self methods
+    // (behind the WRITER mutex), so no aliasing &mut ever exists.
+    buffer: *mut Buffer,
 }
 
+// SAFETY: the buffer pointer targets the fixed mmio address 0xb8000, which is
+// not thread-local and is always valid on this platform. all access goes
+// through the WRITER mutex, so Writer can be shared across cores safely.
+unsafe impl Send for Writer {}
+
 impl Writer {
+    /// Creates a writer for the VGA text buffer at its fixed address.
+    const fn new() -> Writer {
+        Writer {
+            column_position: 0,
+            color_code: ColorCode::new(Color::Yellow, Color::Black),
+            buffer: 0xb8000 as *mut Buffer,
+        }
+    }
+
+    // borrows the vga buffer mutably for the duration of a write.
+    fn buffer(&mut self) -> &mut Buffer {
+        // SAFETY: buffer points at the fixed, identity-mapped vga mmio region,
+        // live under the multiboot/grub bios path. &mut self plus the WRITER
+        // mutex guarantee this is the only live reference to it.
+        unsafe { &mut *self.buffer }
+    }
+
     /// Writes an ASCII byte to the buffer.
     ///
     /// Wraps lines at `BUFFER_WIDTH`. Supports the `\n` newline character.
@@ -97,7 +117,7 @@ impl Writer {
                 let col = self.column_position;
 
                 let color_code = self.color_code;
-                self.buffer.chars[row][col].write(ScreenChar {
+                self.buffer().chars[row][col].write(ScreenChar {
                     ascii_character: byte,
                     color_code,
                 });
@@ -126,8 +146,8 @@ impl Writer {
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
-                let character = self.buffer.chars[row][col].read();
-                self.buffer.chars[row - 1][col].write(character);
+                let character = self.buffer().chars[row][col].read();
+                self.buffer().chars[row - 1][col].write(character);
             }
         }
         self.clear_row(BUFFER_HEIGHT - 1);
@@ -141,7 +161,7 @@ impl Writer {
             color_code: self.color_code,
         };
         for col in 0..BUFFER_WIDTH {
-            self.buffer.chars[row][col].write(blank);
+            self.buffer().chars[row][col].write(blank);
         }
     }
 }
@@ -207,7 +227,7 @@ fn test_println_output() {
     let s = "Some test string that fits on a single line";
     println!("{}", s);
     for (i, c) in s.chars().enumerate() {
-        let screen_char = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 2][i].read();
+        let screen_char = WRITER.lock().buffer().chars[BUFFER_HEIGHT - 2][i].read();
         assert_eq!(char::from(screen_char.ascii_character), c);
     }
 }

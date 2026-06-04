@@ -25,9 +25,10 @@ pub mod vga_buffer;
 
 /// Runs the architecture-specific early kernel initialization.
 ///
-/// Currently this loads the IDT so cpu exceptions are handled. More init
-/// (GDT/TSS, PIC/APIC, paging) is added as the kernel grows.
+/// Initializes the serial port and loads the IDT so cpu exceptions are handled.
+/// More init (GDT/TSS, PIC/APIC, paging) is added as the kernel grows.
 pub fn init() {
+    serial::init_serial();
     #[cfg(target_arch = "x86_64")]
     interrupts::init_idt();
 }

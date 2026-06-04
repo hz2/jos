@@ -17,7 +17,6 @@ jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts
 spin     = "0.5.2"
 uart_16550 = "0.2.0" # todo: see if there isn't a better crate to use now
-lazy_static = { version = "1.0", features = ["spin_no_std"] }
 futures-util = { version = "0.3.4", default-features = false, features = ["alloc"] }
 crossbeam-queue = { version = "0.2.3", default-features = false, features = ["alloc"] }
 pc-keyboard = "0.5.0"

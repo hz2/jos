@@ -29,5 +29,6 @@
 
 pub mod bitmap;
 pub mod cap_table;
+pub mod frame_allocator;
 pub mod page_table;
 pub mod ring_buffer;

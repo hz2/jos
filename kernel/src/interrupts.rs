@@ -156,23 +156,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
-// keyboard (IRQ1, vector 33). read the scancode from the PS/2 data port, decode
-// it, and print any resulting character. we keep the decoder behind a lazily
-// initialized Option because pc-keyboard 0.5's `Keyboard::new` is not a const
-// fn; this is safe because the handler runs with interrupts disabled (the cpu
-// clears IF on entry), so it is never re-entered. (a later async rework will
-// move decoding out of the handler into a scancode-queue task.)
+// keyboard (IRQ1, vector 33). the handler does the minimum bounded work:
+// consume the scancode from the PS/2 data port and hand it to the keyboard
+// module, which pushes it onto a lock-free queue and wakes the decoder task. the
+// pc-keyboard decode + printing happens later on the executor (the async
+// ScancodeStream pattern), not in interrupt context. the handler runs with
+// interrupts disabled (the cpu clears IF on entry), so add_scancode's queue push
+// is uncontended here.
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
     use x86_64::instructions::port::Port;
-
-    static KEYBOARD: Mutex<Option<Keyboard<layouts::Us104Key, ScancodeSet1>>> = Mutex::new(None);
-
-    let mut guard = KEYBOARD.lock();
-    let keyboard = guard.get_or_insert_with(|| {
-        // pc-keyboard 0.5 arg order is (layout, scancode_set, handle_control).
-        Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore)
-    });
 
     // always drain the PS/2 data register (port 0x60), or the controller will
     // not raise further keyboard interrupts.
@@ -181,14 +173,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // consume the scancode that caused this IRQ.
     let scancode: u8 = unsafe { port.read() };
 
-    if let Ok(Some(event)) = keyboard.add_byte(scancode)
-        && let Some(key) = keyboard.process_keyevent(event)
-    {
-        match key {
-            DecodedKey::Unicode(c) => crate::print!("{c}"),
-            DecodedKey::RawKey(k) => crate::print!("{k:?}"),
-        }
-    }
+    // enqueue + wake; no decoding here.
+    crate::keyboard::add_scancode(scancode);
 
     // SAFETY: Keyboard is the correct vector for IRQ1.
     unsafe {

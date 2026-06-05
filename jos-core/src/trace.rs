@@ -189,6 +189,53 @@ impl TraceEvent {
 }
 
 // ---------------------------------------------------------------------------
+// SyscallEvent
+// ---------------------------------------------------------------------------
+
+/// A record of one system call crossing the kernel's syscall boundary.
+///
+/// Where [`TraceEvent`] is the host-side, model-level record the DST harness
+/// produces, this is the record the *kernel itself* emits: one event per
+/// invocation of the syscall dispatcher, the mandatory chokepoint every
+/// capability operation from userspace passes through. A per-CPU ring buffer of
+/// these is jos's structured trace, and an ordered sequence of them is the
+/// record half of record/replay on real hardware.
+///
+/// The fields are the raw ABI values rather than decoded enums, deliberately:
+/// the kernel logs exactly what crossed the boundary (the syscall number and
+/// its register arguments, plus the value returned in `rax`), so the trace is a
+/// faithful, replayable record independent of how the kernel happens to
+/// interpret those bits today. A consumer that wants the decoded form maps
+/// `syscall` through the kernel's `Syscall` enum. All fields are `u64` (no
+/// platform-width or pointer types), so the event is fixed-size and shaped for
+/// wire or snapshot serialization, like the rest of this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyscallEvent {
+    /// Monotone per-buffer sequence number; gives total order within one trace.
+    pub seq: u64,
+    /// The raw syscall number presented in `rax` (maps to the kernel's
+    /// `Syscall` enum; an unknown number is recorded verbatim, not dropped).
+    pub syscall: u64,
+    /// The three register arguments (`rdi`, `rsi`, `rdx`) as presented.
+    pub args: [u64; 3],
+    /// The value returned to userspace in `rax`.
+    pub result: u64,
+}
+
+impl SyscallEvent {
+    /// Builds a syscall event from its parts.
+    #[must_use]
+    pub const fn new(seq: u64, syscall: u64, args: [u64; 3], result: u64) -> Self {
+        Self {
+            seq,
+            syscall,
+            args,
+            result,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // unit tests
 // ---------------------------------------------------------------------------
 
@@ -256,5 +303,19 @@ mod tests {
         assert_eq!(ObjectToken(5), ObjectToken(5));
         assert_ne!(ObjectToken(5), ObjectToken(6));
         assert!(ObjectToken(1) < ObjectToken(2));
+    }
+
+    #[test]
+    fn syscall_event_carries_raw_abi_values() {
+        use super::SyscallEvent;
+        // a syscall event records the raw boundary values verbatim, so a replay
+        // can re-present the identical (number, args) and expect the same result.
+        let ev = SyscallEvent::new(3, 7, [0xAA, 0xBB, 0xCC], 0xD00D);
+        let copy = ev; // Copy, like the rest of the trace vocabulary.
+        assert_eq!(ev, copy);
+        assert_eq!(ev.seq, 3);
+        assert_eq!(ev.syscall, 7);
+        assert_eq!(ev.args, [0xAA, 0xBB, 0xCC]);
+        assert_eq!(ev.result, 0xD00D);
     }
 }

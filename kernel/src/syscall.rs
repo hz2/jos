@@ -51,8 +51,13 @@ use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 
-use crate::cap::{cap_recv, cap_send, IpcError, KernelCapSpace, Message};
+use crate::cap::{
+    cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectKind, RetypeError,
+};
 use crate::gdt;
+use jos_core::cap_rights::Rights;
+use jos_core::cap_space::InsertAtError;
+use jos_core::untyped::ObjectType;
 
 /// The system calls jos understands.
 ///
@@ -79,6 +84,19 @@ pub enum Syscall {
     /// [`IPC_ERR_FLAG`] set (so a valid word is distinguishable from an error).
     /// Requires `READ`.
     IpcRecv = 3,
+    /// `retype(untyped_slot, type_word, dest_slot) -> 0 | errno`. Carves a typed
+    /// kernel object from the untyped capability in `untyped_slot` and installs
+    /// a full-rights capability to it at `dest_slot` of the current `CSpace`.
+    /// `type_word` packs the object type (see [`decode_object_type`]). Returns 0
+    /// or a [`RetypeSyscallError`]. This is the seL4 `Retype`: userspace, not
+    /// the kernel, decides when objects come into being.
+    Retype = 4,
+    /// `invoke(cap_slot, method, arg0) -> result | (errno | ERR_FLAG)`. Invokes
+    /// a method on the object named by `cap_slot`, routed by the object's kind.
+    /// The generic capability-invocation syscall; today it covers Endpoint
+    /// send/recv (the same primitives [`Syscall::IpcSend`]/[`Syscall::IpcRecv`]
+    /// expose directly). Errors carry [`IPC_ERR_FLAG`].
+    Invoke = 5,
 }
 
 impl Syscall {
@@ -89,6 +107,8 @@ impl Syscall {
             1 => Some(Self::Exit),
             2 => Some(Self::IpcSend),
             3 => Some(Self::IpcRecv),
+            4 => Some(Self::Retype),
+            5 => Some(Self::Invoke),
             _ => None,
         }
     }
@@ -119,6 +139,79 @@ pub enum IpcSyscallError {
 /// rather than a received data word. The high bit, so any real message word
 /// below `1 << 63` is unambiguous.
 pub const IPC_ERR_FLAG: u64 = 1 << 63;
+
+/// Error codes returned by [`Syscall::Retype`] (in `rax`, 0 meaning success).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum RetypeSyscallError {
+    /// The untyped slot is out of range or names no live capability.
+    BadCap = 1,
+    /// The named capability is live but is not an untyped region.
+    NotUntyped = 2,
+    /// `type_word` had an unknown discriminant or malformed reserved bits.
+    BadArgs = 3,
+    /// The untyped region has no room for the requested object.
+    NoRoom = 4,
+    /// The destination slot already holds a live capability.
+    DestOccupied = 5,
+    /// The destination slot is out of range (`>= CSPACE_SLOTS`).
+    DestOutOfRange = 6,
+    /// The region is too misaligned for the requested object.
+    BadAlign = 7,
+    /// The requested object type cannot be carved via the syscall.
+    BadType = 8,
+}
+
+/// Error codes returned by [`Syscall::Invoke`] (OR-ed with [`IPC_ERR_FLAG`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum InvokeError {
+    /// The cap slot is out of range or names no live capability.
+    BadCap = 1,
+    /// The capability lacks the right the method needs.
+    Denied = 2,
+    /// The method label is not defined for this object kind.
+    BadMethod = 3,
+    /// A would-block condition (endpoint full on send / empty on recv).
+    WouldBlock = 4,
+}
+
+/// Userspace-visible [`ObjectType`] discriminants for the `type_word` of a
+/// [`Syscall::Retype`]. Stable across the boundary (the Rust `ObjectType`
+/// discriminants are compiler-assigned and must not leak to userspace).
+pub mod object_type_id {
+    /// A synchronous IPC endpoint.
+    pub const ENDPOINT: u8 = 0;
+    /// A capability node (capability space).
+    pub const CNODE: u8 = 1;
+    /// An untyped sub-region.
+    pub const UNTYPED: u8 = 2;
+    /// A page table.
+    pub const PAGE_TABLE: u8 = 3;
+    /// A thread control block.
+    pub const TCB: u8 = 4;
+}
+
+// decodes a retype `type_word` into an ObjectType. bits [7:0] are the type
+// discriminant (object_type_id), bits [15:8] are size_bits (for CNode/Untyped;
+// must be 0 for fixed-size types), bits [63:16] must be zero. returns None for
+// an unknown discriminant or malformed reserved/size bits.
+fn decode_object_type(type_word: u64) -> Option<ObjectType> {
+    if type_word >> 16 != 0 {
+        return None; // reserved bits must be zero
+    }
+    let discriminant = (type_word & 0xFF) as u8;
+    let size_bits = ((type_word >> 8) & 0xFF) as u8;
+    match discriminant {
+        object_type_id::ENDPOINT if size_bits == 0 => Some(ObjectType::Endpoint),
+        object_type_id::PAGE_TABLE if size_bits == 0 => Some(ObjectType::PageTable),
+        object_type_id::TCB if size_bits == 0 => Some(ObjectType::Tcb),
+        object_type_id::CNODE => Some(ObjectType::CNode { size_bits }),
+        object_type_id::UNTYPED => Some(ObjectType::Untyped { size_bits }),
+        // unknown discriminant, or a fixed-size type given a non-zero size_bits.
+        _ => None,
+    }
+}
 
 /// The kernel stack pointer the syscall entry stub switches to on entry.
 ///
@@ -209,7 +302,7 @@ pub fn init_syscall() {
 ///
 /// `extern "C"` so the assembly stub can call it with the standard argument
 /// registers (`rdi`, `rsi`, `rdx`, `rcx`) holding (nr, arg0, arg1, arg2).
-extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, _arg2: u64) -> u64 {
+extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     match Syscall::from_u64(nr) {
         Some(Syscall::Add) => arg0.wrapping_add(arg1),
         Some(Syscall::Exit) => {
@@ -227,8 +320,29 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, _arg2: u64) -> u64
         Some(Syscall::IpcSend) => sys_ipc_send(arg0, arg1),
         // ipc_recv(cap_slot = arg0) -> word | (errno | IPC_ERR_FLAG).
         Some(Syscall::IpcRecv) => sys_ipc_recv(arg0),
+        // retype(untyped_slot = arg0, type_word = arg1, dest_slot = arg2).
+        Some(Syscall::Retype) => sys_retype(arg0, arg1, arg2),
+        // invoke(cap_slot = arg0, method = arg1, arg0_word = arg2).
+        Some(Syscall::Invoke) => sys_invoke(arg0, arg1, arg2),
         None => ENOSYS,
     }
+}
+
+// resolves the current task's CSpace for MUTATION (retype installs a capability
+// via insert_at). same pointer as current_cspace, but exclusive.
+//
+// SAFETY note: returns an exclusive reference to the kernel-owned CapSpace
+// behind CURRENT_CSPACE; sound on the single-threaded syscall path where
+// set_current_cspace's contract guarantees the pointer is live and unaliased,
+// and no other reference is taken for the duration of the call.
+fn current_cspace_mut() -> Option<&'static mut KernelCapSpace> {
+    let ptr = CURRENT_CSPACE.load(Ordering::SeqCst);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: as current_cspace, but exclusive; single-threaded syscall path, no
+    // aliasing reference is live across this call.
+    Some(unsafe { &mut *ptr })
 }
 
 // resolves the current task's CSpace, the one IPC syscalls address capabilities
@@ -304,6 +418,121 @@ fn sys_ipc_recv(cap_slot: u64) -> u64 {
         Ok(message) => message.words[0],
         Err(e) => ipc_errno(e) | IPC_ERR_FLAG,
     }
+}
+
+// retype: carve a typed object from the untyped cap in `untyped_slot` and
+// install a full-rights capability to it at `dest_slot`. the seL4 Retype, with
+// the source untyped and the destination both named by CSpace slots (resolved
+// per call), so userspace can only create objects from untyped it was handed.
+fn sys_retype(untyped_slot: u64, type_word: u64, dest_slot: u64) -> u64 {
+    use crate::cap::CSPACE_SLOTS;
+    let err = |e: RetypeSyscallError| e as u64;
+
+    // decode the requested object type before touching the CSpace.
+    let Some(ty) = decode_object_type(type_word) else {
+        return err(RetypeSyscallError::BadArgs);
+    };
+    let (Ok(uslot), Ok(dslot)) = (usize::try_from(untyped_slot), usize::try_from(dest_slot)) else {
+        return err(RetypeSyscallError::BadCap);
+    };
+    if dslot >= CSPACE_SLOTS {
+        return err(RetypeSyscallError::DestOutOfRange);
+    }
+
+    let Some(space) = current_cspace_mut() else {
+        return err(RetypeSyscallError::BadCap);
+    };
+    // resolve the untyped source: must be a live cap naming an untyped region.
+    let Some(usource) = space.ref_at(uslot) else {
+        return err(RetypeSyscallError::BadCap);
+    };
+    let untyped_obj = match space.lookup(usource) {
+        Some(cap) if cap.object.kind() == ObjectKind::Untyped => cap.object,
+        Some(_) => return err(RetypeSyscallError::NotUntyped),
+        None => return err(RetypeSyscallError::BadCap),
+    };
+    // the destination must be free BEFORE we carve, so a failure leaves the
+    // untyped watermark untouched (no half-done carve into an occupied slot).
+    if space.ref_at(dslot).is_some() {
+        return err(RetypeSyscallError::DestOccupied);
+    }
+
+    // carve the object from the untyped region.
+    // SAFETY: untyped_obj is a live cap of kind Untyped (checked); the region is
+    // a 'static kernel object; single-threaded syscall path, so no aliasing &mut
+    // to it exists. retype_object mutates only the region's own watermark.
+    let region = unsafe { untyped_obj.as_untyped_mut() };
+    let new_obj = match region.retype_object(ty) {
+        Ok(id) => id,
+        Err(RetypeError::NoRoom) => return err(RetypeSyscallError::NoRoom),
+        Err(RetypeError::BadAlign) => return err(RetypeSyscallError::BadAlign),
+        Err(RetypeError::BadType) => return err(RetypeSyscallError::BadType),
+    };
+
+    // install a full-rights capability to the new object at the dest slot.
+    match space.insert_at(dslot, new_obj, Rights::all()) {
+        Ok(_) => 0,
+        // the dest was free a moment ago and nothing else runs concurrently, so
+        // these are not expected; map them faithfully rather than unwrap.
+        Err(InsertAtError::Occupied) => err(RetypeSyscallError::DestOccupied),
+        Err(InsertAtError::OutOfRange) => err(RetypeSyscallError::DestOutOfRange),
+    }
+}
+
+// invoke: a generic capability invocation routed by the named object's kind.
+// today only Endpoint methods (Send/Recv) are defined; they reuse the IPC
+// primitives, so SYS_INVOKE(Endpoint, Send/Recv) is equivalent to the dedicated
+// IPC syscalls, proving the generic dispatch path.
+fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
+    // endpoint method labels.
+    const ENDPOINT_SEND: u64 = 0;
+    const ENDPOINT_RECV: u64 = 1;
+    let err = |e: InvokeError| e as u64 | IPC_ERR_FLAG;
+
+    let Some(space) = current_cspace() else {
+        return err(InvokeError::BadCap);
+    };
+    let Ok(slot) = usize::try_from(cap_slot) else {
+        return err(InvokeError::BadCap);
+    };
+    let Some(cap_ref) = space.ref_at(slot) else {
+        return err(InvokeError::BadCap);
+    };
+    let Some(cap) = space.lookup(cap_ref) else {
+        return err(InvokeError::BadCap);
+    };
+    match cap.object.kind() {
+        ObjectKind::Endpoint => match method {
+            ENDPOINT_SEND => {
+                let message = Message {
+                    label: 0,
+                    words: [arg0, 0, 0, 0],
+                };
+                match cap_send(space, cap_ref, message) {
+                    Ok(()) => 0,
+                    Err(e) => invoke_errno(e),
+                }
+            }
+            ENDPOINT_RECV => match cap_recv(space, cap_ref) {
+                Ok(message) => message.words[0],
+                Err(e) => invoke_errno(e),
+            },
+            _ => err(InvokeError::BadMethod),
+        },
+        // no methods defined for the other object kinds yet.
+        _ => err(InvokeError::BadMethod),
+    }
+}
+
+// maps an IpcError to an Invoke return value (errno OR'd with IPC_ERR_FLAG).
+fn invoke_errno(e: IpcError) -> u64 {
+    let code = match e {
+        IpcError::InvalidCap => InvokeError::BadCap,
+        IpcError::InsufficientRights => InvokeError::Denied,
+        IpcError::NotAnEndpoint => InvokeError::BadMethod,
+        IpcError::EndpointBusy | IpcError::EndpointEmpty => InvokeError::WouldBlock,
+    };
+    code as u64 | IPC_ERR_FLAG
 }
 
 // the raw syscall entry point installed in LSTAR. it runs in ring 0 with the

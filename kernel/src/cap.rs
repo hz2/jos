@@ -53,6 +53,10 @@ pub enum ObjectKind {
     Tcb,
     /// A capability node: a capability space carved from untyped memory.
     CNode,
+    /// An untyped memory region, from which typed objects are carved. The
+    /// handle's address is the address of the [`UntypedRegion`] struct itself
+    /// (kernel memory), not the bytes it manages.
+    Untyped,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -167,6 +171,24 @@ impl ObjectId {
         // derived from the region base where a KernelCNode was placed (space at
         // offset 0); it is live for the kernel's lifetime. The caller guarantees
         // exclusivity and the correct kind per this function's contract.
+        unsafe { &mut *ptr }
+    }
+
+    /// Returns an exclusive reference to the [`UntypedRegion`] this handle
+    /// names.
+    ///
+    /// # Safety
+    ///
+    /// (1) `self.kind == ObjectKind::Untyped`, (2) the named `UntypedRegion`
+    /// struct is still live (it is a kernel object, typically `'static`), and
+    /// (3) no other live reference to it exists. Carving from an untyped region
+    /// mutates its watermark, so a genuine exclusive `&mut` is required.
+    pub unsafe fn as_untyped_mut(self) -> &'static mut UntypedRegion {
+        debug_assert_eq!(self.kind, ObjectKind::Untyped);
+        let ptr = core::ptr::with_exposed_provenance_mut::<UntypedRegion>(self.addr);
+        // SAFETY: the address was captured in UntypedRegion::as_object_id from a
+        // pointer to a live UntypedRegion; the caller guarantees the kind is
+        // Untyped, the region is live, and there is no aliasing reference.
         unsafe { &mut *ptr }
     }
 }
@@ -509,6 +531,64 @@ impl UntypedRegion {
         self.watermark
     }
 
+    /// Returns an [`ObjectId`] (kind [`ObjectKind::Untyped`]) naming this
+    /// region, so it can be installed as a capability and named by a syscall.
+    ///
+    /// The handle's address is the address of `self` (the `UntypedRegion`
+    /// struct), exposed for provenance so [`ObjectId::as_untyped_mut`] can
+    /// re-derive a pointer to it. The region must outlive every capability
+    /// minted from this handle (in practice it is a `'static` kernel object).
+    pub fn as_object_id(&mut self) -> ObjectId {
+        let addr = core::ptr::from_mut::<UntypedRegion>(self).expose_provenance();
+        ObjectId {
+            addr,
+            kind: ObjectKind::Untyped,
+        }
+    }
+
+    /// Carves an object of `ty` into this region and returns its handle, or a
+    /// [`RetypeError`] describing why it could not (full region, or a base too
+    /// misaligned for the object). The fallible, syscall-facing counterpart of
+    /// the `retype_*` helpers, which carve a fixed kind and treat misalignment
+    /// as a programming-error panic.
+    ///
+    /// Only the object kinds with a concrete kernel type are supported here
+    /// (`Endpoint`, `PageTable`, `Tcb`, `CNode`); a sub-`Untyped` carve is not
+    /// yet a typed object, so it is rejected as [`RetypeError::BadType`].
+    pub fn retype_object(&mut self, ty: ObjectType) -> Result<ObjectId, RetypeError> {
+        // dispatch to the per-type carve helpers (each constructs exactly ONE
+        // object in its own frame). do NOT inline the construction of all object
+        // types into this match: a PageTable / KernelCNode is 4096 bytes by
+        // value, and a match holding every arm's temporary at once (plus place's
+        // by-value copy) overflows the syscall kernel stack in debug builds, the
+        // same class of bug as the boot stack overflow. routing through the
+        // existing single-object helpers keeps the stack profile to one object.
+        //
+        // these helpers return Option (full region -> None); the syscall path
+        // also needs to distinguish a misalignment, so check alignment up front
+        // and map None to NoRoom.
+        let (_, align) = jos_core::untyped::object_layout(ty);
+        if !(self.bytes.as_ptr() as usize).is_multiple_of(align) {
+            // the region base is too misaligned for this object (for example a
+            // PageTable / CNode in a merely 64-aligned region).
+            return Err(RetypeError::BadAlign);
+        }
+        let carved = match ty {
+            ObjectType::Endpoint => self.retype_endpoint(),
+            ObjectType::PageTable => self.retype_page_table(),
+            ObjectType::Tcb => self.retype_tcb(),
+            ObjectType::CNode { size_bits } if size_bits == KERNEL_CNODE_SIZE_BITS => {
+                self.retype_cnode()
+            }
+            // a CNode of a non-kernel size, or a sub-Untyped, has no concrete
+            // Rust object type to place: not supported via the syscall yet.
+            ObjectType::CNode { .. } | ObjectType::Untyped { .. } => {
+                return Err(RetypeError::BadType)
+            }
+        };
+        carved.ok_or(RetypeError::NoRoom)
+    }
+
     /// Carves a fresh [`Endpoint`] out of this region and returns its handle.
     ///
     /// Uses the Miri-checked `jos_core::placement::place` to write the object,
@@ -594,6 +674,20 @@ pub enum IpcError {
     EndpointBusy,
     /// `recv` from an endpoint with no parked message.
     EndpointEmpty,
+}
+
+/// Errors from [`UntypedRegion::retype_object`] (the fallible, syscall-facing
+/// carve).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetypeError {
+    /// The untyped region has no room left for the requested object.
+    NoRoom,
+    /// The region's base is too misaligned for the requested object (for
+    /// example, a `PageTable`/`CNode` needs page alignment).
+    BadAlign,
+    /// The requested object type cannot be carved via this path (a `CNode` of a
+    /// non-kernel size, or a sub-`Untyped`, which have no concrete kernel type).
+    BadType,
 }
 
 // resolves a capability ref to the endpoint it names, enforcing that it is

@@ -42,6 +42,12 @@ harness = false
 name = "cap_ipc"
 harness = false
 
+# retype_invoke drops to ring 3 and exits qemu from inside the user program
+# (after retype/invoke syscalls), so it likewise runs without the framework.
+[[test]]
+name = "retype_invoke"
+harness = false
+
 [dependencies]
 jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts

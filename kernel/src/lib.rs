@@ -63,7 +63,7 @@ pub fn init() {
     }
 }
 
-// note: the multiboot2 header + long-mode trampoline now live in
+// NOTE: the multiboot2 header + long-mode trampoline now live in
 // arch::x86_64 (it includes boot.s via global_asm).
 
 // a global allocator is required now that alloc is pulled into the build (the
@@ -110,7 +110,7 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // todo: invoke psci to power off under aarch64.
+        // TODO: invoke psci to power off under aarch64.
     }
 }
 

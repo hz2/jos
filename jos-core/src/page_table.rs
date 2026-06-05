@@ -327,7 +327,7 @@ mod tests {
         // nine bits in that position are set. each address has exactly one
         // field at its maximum; the other fields are zero.
         //
-        // note: these addresses are not necessarily canonical (setting only
+        // NOTE: these addresses are not necessarily canonical (setting only
         // the pml4 field to 0x1FF places bit 47 high with bits 63..48 = 0,
         // violating canonical form). that is fine: the extraction functions
         // do not require canonical input; the bound proofs hold for all u64.

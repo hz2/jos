@@ -1,14 +1,14 @@
 //! Physical memory management: page-table access and frame allocation.
 //!
-//! this is blog_os posts 08-09, adapted to jos's setup. the big divergence:
+//! This is blog_os posts 08-09, adapted to jos's setup. The big divergence:
 //! blog_os gets a complete physical-memory map at a `physical_memory_offset`
-//! from the bootloader crate. our trampoline instead identity-maps the first
+//! from the bootloader crate. Our trampoline instead identity-maps the first
 //! 1 GiB (phys == virt there), so we use an `OffsetPageTable` with offset 0,
 //! which is exactly an identity-mapped page-table walker.
 //!
-//! frame allocation is bootstrapped by `BootstrapFrameAllocator`, a stateless
+//! Frame allocation is bootstrapped by `BootstrapFrameAllocator`, a stateless
 //! iterator over the multiboot2 usable regions (no backing storage needed,
-//! which solves the chicken-and-egg with the heap). once the heap is live the
+//! which solves the chicken-and-egg with the heap). Once the heap is live the
 //! verified `jos_core` bitmap allocator can take over.
 
 use x86_64::structures::paging::{

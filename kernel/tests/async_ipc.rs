@@ -12,7 +12,7 @@
 // verified run queue landed in slice 2a. this wires them together: cap-mediated
 // IPC that blocks and wakes via the scheduler, headless under QEMU.
 //
-// note on borrowing: send()/recv() take `&KernelCapSpace` and the returned
+// NOTE on borrowing: send()/recv() take `&KernelCapSpace` and the returned
 // future holds that borrow across await points, so the space cannot be mutated
 // (revoked) while an IPC future is in flight. revoking *under a parked waiter*
 // and having it observe the cancellation needs the space resolved fresh on each

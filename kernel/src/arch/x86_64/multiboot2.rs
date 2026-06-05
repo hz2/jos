@@ -1,14 +1,14 @@
 //! Minimal multiboot2 boot-information parser.
 //!
-//! grub passes a pointer to the multiboot2 info structure in the second arg of
-//! `kernel_main`. that structure is an 8-byte header (total_size, reserved)
+//! Grub passes a pointer to the multiboot2 info structure in the second arg of
+//! `kernel_main`. That structure is an 8-byte header (total_size, reserved)
 //! followed by a sequence of 8-byte-aligned tags (type, size, payload),
-//! terminated by an end tag (type 0). we only need the memory map tag (type 6)
+//! terminated by an end tag (type 0). We only need the memory map tag (type 6)
 //! to discover usable RAM for the frame allocator.
 //!
-//! we hand-roll this rather than pull in the `multiboot2` crate: the format is
+//! We hand-roll this rather than pull in the `multiboot2` crate: the format is
 //! small and stable, and avoiding the dependency keeps the build closed over
-//! exactly what we control (no crate-version churn). the info structure lives
+//! exactly what we control (no crate-version churn). The info structure lives
 //! in low memory, which our trampoline identity-maps, so the pointer is valid
 //! to read directly.
 

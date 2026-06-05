@@ -214,7 +214,7 @@ pub const fn object_layout(ty: ObjectType) -> (usize, usize) {
 
 /// Rounds `value` up to the next multiple of `align`.
 ///
-/// `align` must be a power of two. uses a saturating addition internally so
+/// `align` must be a power of two. Uses a saturating addition internally so
 /// the function is total (no panic) even when `value` is close to
 /// `usize::MAX`.
 ///

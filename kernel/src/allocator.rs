@@ -1,13 +1,13 @@
 //! Kernel heap initialization (blog_os post 10).
 //!
-//! maps a fixed virtual range to fresh physical frames and hands it to the
+//! Maps a fixed virtual range to fresh physical frames and hands it to the
 //! global `linked_list_allocator`, after which `alloc` types (Box, Vec, ...)
 //! work.
 //!
-//! jos divergence: the heap lives at an UPPER-HALF virtual address, not in the
-//! identity-mapped low 1 GiB. that region is mapped with 2 MiB huge pages by
+//! Jos divergence: the heap lives at an UPPER-HALF virtual address, not in the
+//! identity-mapped low 1 GiB. That region is mapped with 2 MiB huge pages by
 //! the trampoline, so a 4 KiB `map_to` there fails with ParentEntryHugePage.
-//! an upper-half address has no existing mapping, so `map_to` builds a fresh
+//! An upper-half address has no existing mapping, so `map_to` builds a fresh
 //! 4 KiB page-table hierarchy for it.
 
 use x86_64::structures::paging::mapper::MapToError;
@@ -15,7 +15,7 @@ use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, S
 use x86_64::VirtAddr;
 
 /// Heap start: a canonical upper-half virtual address, clear of the identity
-/// map. recognizable in debug output.
+/// map. Recognizable in debug output.
 pub const HEAP_START: usize = 0xFFFF_8000_0000_0000;
 /// Heap size: 1 MiB to start.
 pub const HEAP_SIZE: usize = 1024 * 1024;

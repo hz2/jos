@@ -1,23 +1,23 @@
 //! Global Descriptor Table and Task State Segment.
 //!
-//! this started as blog_os post 06: give the double-fault handler a known-good
+//! This started as blog_os post 06: give the double-fault handler a known-good
 //! stack via the Interrupt Stack Table (IST), so a kernel stack overflow is
 //! caught cleanly instead of escalating to a triple fault that resets the
 //! machine.
 //!
-//! when a stack overflow occurs, the cpu tries to push the exception stack
-//! frame onto the (already exhausted) stack, which faults again. without an IST
+//! When a stack overflow occurs, the cpu tries to push the exception stack
+//! frame onto the (already exhausted) stack, which faults again. Without an IST
 //! the double-fault handler would itself fault on the bad stack, triple-fault,
-//! and reset. the IST mechanism makes the cpu switch to a separate, valid stack
+//! and reset. The IST mechanism makes the cpu switch to a separate, valid stack
 //! before running the handler.
 //!
-//! slice 3 (userspace) extends this in two ways:
+//! Slice 3 (userspace) extends this in two ways:
 //!
 //! - user code and data segments (DPL 3) so the cpu can run ring-3 code and so
 //!   `iretq` / `sysretq` have valid user selectors to restore.
 //! - the TSS privilege-stack-table entry `rsp0`: the stack the cpu switches to
 //!   on a ring-3 -> ring-0 transition (an interrupt or a stack-switching
-//!   syscall path). without it a ring-3 interrupt would keep using the user
+//!   syscall path). Without it a ring-3 interrupt would keep using the user
 //!   stack in kernel mode.
 //!
 //! ## Segment order is load-bearing
@@ -29,7 +29,7 @@
 //! sysret base) and user-code at `base + 0x10`. Fixing the order now means the
 //! syscall slice does not have to renumber selectors.
 //!
-//! the trampoline in boot.s already loaded a minimal GDT to enter long mode;
+//! The trampoline in boot.s already loaded a minimal GDT to enter long mode;
 //! here we install the fuller GDT, load the task register, and reload the
 //! segment registers so the cpu uses this GDT's descriptors.
 

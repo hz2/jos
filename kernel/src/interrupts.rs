@@ -1,15 +1,15 @@
 //! Interrupt Descriptor Table, CPU exception handlers, and the 8259 PIC.
 //!
-//! post 05 installed an IDT with the x86-interrupt calling convention and a
-//! breakpoint handler. post 06 added the double-fault handler on an IST stack.
-//! post 07 (here) adds the legacy 8259 PIC and hardware interrupt handlers for
+//! Post 05 installed an IDT with the x86-interrupt calling convention and a
+//! breakpoint handler. Post 06 added the double-fault handler on an IST stack.
+//! Post 07 (here) adds the legacy 8259 PIC and hardware interrupt handlers for
 //! the timer (IRQ0) and keyboard (IRQ1).
 //!
-//! we start with the 8259 PIC rather than the APIC: qemu's q35 emulates it, it
-//! needs no ACPI/MADT parsing, and single-core does not need the APIC yet. the
+//! We start with the 8259 PIC rather than the APIC: qemu's q35 emulates it, it
+//! needs no ACPI/MADT parsing, and single-core does not need the APIC yet. The
 //! APIC is a later upgrade (alongside SMP).
 //!
-//! the IDT is also the future syscall/IPC trap path of the capability kernel.
+//! The IDT is also the future syscall/IPC trap path of the capability kernel.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 

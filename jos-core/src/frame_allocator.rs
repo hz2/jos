@@ -95,11 +95,11 @@ pub const fn frame_index(base: u64, addr: u64) -> usize {
 /// (via `Bitmap`). A real kernel provides this slice from a static pool carved
 /// out during early boot.
 pub struct FrameAllocator<'a> {
-    /// the bitmap that tracks free/used status of each frame.
+    /// The bitmap that tracks free/used status of each frame.
     bitmap: Bitmap<'a>,
-    /// physical address of frame 0; must be FRAME_SIZE-aligned.
+    /// Physical address of frame 0; must be FRAME_SIZE-aligned.
     base: u64,
-    /// total number of frames managed.
+    /// Total number of frames managed.
     frame_count: usize,
 }
 

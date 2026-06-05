@@ -26,6 +26,7 @@
 
 use crate::cap_rights::Rights;
 use crate::cap_table::{CapRef, CapTable};
+pub use crate::cap_table::InsertAtError;
 
 /// A typed, rights-bearing capability: the entry stored in a [`CapSpace`] slot.
 ///
@@ -108,6 +109,26 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
     /// Returns the rejected capability when the space is full.
     pub fn insert(&mut self, object: O, rights: Rights) -> Result<CapRef, Capability<O>> {
         self.table.insert(Capability::new(object, rights))
+    }
+
+    /// Installs an original capability (no parent) for `object` with `rights`
+    /// at the caller-chosen slot `slot`, returning its `CapRef`.
+    ///
+    /// The slot-addressed counterpart of [`insert`](Self::insert), for when a
+    /// deterministic destination matters (a `Retype` syscall names the slot the
+    /// new capability must land in).
+    ///
+    /// # Errors
+    ///
+    /// [`InsertAtError::OutOfRange`] if `slot >= N`; [`InsertAtError::Occupied`]
+    /// if the slot already holds a live capability.
+    pub fn insert_at(
+        &mut self,
+        slot: usize,
+        object: O,
+        rights: Rights,
+    ) -> Result<CapRef, InsertAtError> {
+        self.table.insert_at(slot, Capability::new(object, rights))
     }
 
     /// Returns the capability named by `cap_ref`, or `None` if it is stale.

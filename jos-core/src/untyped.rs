@@ -26,13 +26,15 @@
 //! | Type | Size (bytes) | Alignment (bytes) |
 //! |------|-------------|-------------------|
 //! | `Endpoint` | 128 | 64 |
-//! | `CNode { size_bits }` | `2^size_bits * 32` | `2^size_bits * 32` |
+//! | `CNode { size_bits }` | `2^size_bits` | `2^size_bits` |
 //! | `Untyped { size_bits }` | `2^size_bits` | `2^size_bits` |
 //! | `PageTable` | 4096 | 4096 |
 //! | `Tcb` | 512 | 64 |
 //!
-//! `CNode` slot size of 32 bytes matches a two-word capability slot on a
-//! 64-bit platform (one word for the capability itself, one for bookkeeping).
+//! `CNode { size_bits }` uses byte-size semantics (`size = 2^size_bits` bytes),
+//! like `Untyped`: `size_bits` is the log2 of the byte size, not a slot count.
+//! How many capability slots that holds is a kernel concern (it depends on the
+//! kernel's slot type), so it lives in the kernel, not this pure-logic module.
 //! `Endpoint` is cache-line (64-byte) aligned to avoid false sharing, and 128
 //! bytes long so it has room for the rendezvous state plus the parked sender
 //! and receiver wakers the async IPC path stores in it. Note the size is a
@@ -85,11 +87,26 @@ pub const TCB_SIZE: usize = 512;
 /// Alignment requirement of a `Tcb` object in bytes (one cache line).
 pub const TCB_ALIGN: usize = 64;
 
-/// Size of one `CNode` capability slot in bytes.
+/// Size and alignment of the kernel's `CNode` (capability-node) object in
+/// bytes.
 ///
-/// 32 bytes = one two-word slot on a 64-bit platform (capability word +
-/// bookkeeping word). `CNode` total size = `2^size_bits * SLOT_BYTES`.
-pub const SLOT_BYTES: usize = 32;
+/// 4096 bytes = 2^12, naturally aligned (so a placed `CNode` is page-aligned,
+/// like a [`PAGE_TABLE_SIZE`] table). Sized to contain the kernel's
+/// `CapSpace<ObjectId, 64>` (measured at 3592 bytes) with room to spare; the
+/// kernel asserts the exact fit with a compile-time `size_of` check, which will
+/// fail the build (prompting a bump to 8192) if the capability space ever
+/// outgrows a page.
+///
+/// `CNode { size_bits }` uses **byte-size** semantics (`size = 2^size_bits`
+/// bytes), matching [`ObjectType::Untyped`] and the seL4 convention, not a
+/// slot-count. The kernel's `CNode` is therefore `size_bits = 12`. An earlier
+/// `SLOT_BYTES`-based formula (`2^size_bits * 32`) modeled a fictional 32-byte
+/// slot and produced a size roughly half the real `CapSpace`, which would have
+/// failed placement with a layout mismatch.
+pub const CNODE_SIZE: usize = 4096;
+
+/// Alignment of a `CNode` object in bytes (equals its size).
+pub const CNODE_ALIGN: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // ObjectType
@@ -106,15 +123,16 @@ pub enum ObjectType {
     /// Fixed size: [`ENDPOINT_SIZE`] bytes, [`ENDPOINT_ALIGN`]-byte aligned.
     Endpoint,
 
-    /// A capability-node table with `2^size_bits` capability slots.
+    /// A capability-node table of `2^size_bits` **bytes**.
     ///
-    /// Total size = `2^size_bits * SLOT_BYTES` bytes, naturally aligned (the
-    /// alignment equals the total size, which is always a power of two because
-    /// `size_bits >= 0` and `SLOT_BYTES` is a power of two).
-    ///
-    /// `size_bits` is the log2 of the slot count, not the byte size.
+    /// Size = `2^size_bits` bytes, aligned to `2^size_bits` bytes (a naturally
+    /// aligned power-of-two region, the seL4 invariant). `size_bits` is the
+    /// log2 of the byte size, NOT the slot count: the number of slots a `CNode`
+    /// holds depends on the kernel's capability-slot size, which the kernel
+    /// (not this pure-logic module) knows. The kernel's `CNode` is
+    /// `size_bits = 12` ([`CNODE_SIZE`] = 4096 bytes).
     CNode {
-        /// Log2 of the number of capability slots in this `CNode`.
+        /// Log2 of the byte size of this `CNode`.
         size_bits: u8,
     },
 
@@ -158,10 +176,9 @@ pub enum ObjectType {
 ///
 /// - `Endpoint`: `(128, 64)`. The only object whose alignment is smaller than
 ///   its size; both are powers of two and align divides size.
-/// - `CNode { size_bits }`: size = `2^size_bits * SLOT_BYTES`; align = size.
-///   Because `SLOT_BYTES` is a power of two and `2^size_bits` is a power of
-///   two, the product is a power of two. The result saturates at
-///   `usize::MAX` for very large `size_bits` (Kani proves no panic).
+/// - `CNode { size_bits }`: size = `2^size_bits`; align = size. A naturally
+///   aligned power of two (byte-size semantics, like `Untyped`). Saturates at
+///   `usize::MAX` for `size_bits >= usize::BITS as u8` (Kani proves no panic).
 /// - `Untyped { size_bits }`: size = `2^size_bits`; align = size. Saturates
 ///   at `usize::MAX` for `size_bits >= usize::BITS as u8`.
 #[inline]
@@ -170,16 +187,14 @@ pub const fn object_layout(ty: ObjectType) -> (usize, usize) {
     match ty {
         ObjectType::Endpoint => (ENDPOINT_SIZE, ENDPOINT_ALIGN),
         ObjectType::CNode { size_bits } => {
-            // slots = 2^size_bits; total = slots * SLOT_BYTES.
-            // both are powers of two so the product is a power of two.
+            // byte-size semantics: size = 2^size_bits bytes, naturally aligned.
             // checked_shl returns None when the shift would overflow; in that
             // case saturate to usize::MAX so the function stays total.
-            let slots = match (1_usize).checked_shl(size_bits as u32) {
+            let size = match (1_usize).checked_shl(size_bits as u32) {
                 Some(s) => s,
                 None => usize::MAX,
             };
-            let total = slots.saturating_mul(SLOT_BYTES);
-            (total, total)
+            (size, size)
         }
         ObjectType::Untyped { size_bits } => {
             let size = match (1_usize).checked_shl(size_bits as u32) {
@@ -270,8 +285,8 @@ pub const fn retype_fits(
 
     let (size, align) = object_layout(ty);
 
-    // zero-size objects (can only occur if SLOT_BYTES were zero, which cannot
-    // happen, but defend explicitly so the invariant nw > watermark holds).
+    // zero-size objects (can only occur for CNode/Untyped { size_bits: 0 }
+    // giving 1 byte, never actually 0; defend explicitly so nw > watermark).
     if size == 0 {
         return None;
     }
@@ -300,8 +315,8 @@ pub const fn retype_fits(
 #[cfg(test)]
 mod tests {
     use super::{
-        ENDPOINT_ALIGN, ENDPOINT_SIZE, SLOT_BYTES, ObjectType, align_up, object_layout,
-        retype_fits,
+        CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, ObjectType, align_up,
+        object_layout, retype_fits,
     };
 
     extern crate std;
@@ -319,9 +334,10 @@ mod tests {
 
     #[test]
     fn cnode_layout_power_of_two() {
-        for bits in 0_u8..=8 {
+        // byte-size semantics: size = 2^size_bits bytes, align = size.
+        for bits in 0_u8..=14 {
             let (size, align) = object_layout(ObjectType::CNode { size_bits: bits });
-            let expected = (1_usize << bits) * SLOT_BYTES;
+            let expected = 1_usize << bits;
             assert_eq!(size, expected, "CNode size_bits={bits}");
             assert_eq!(align, expected, "CNode align size_bits={bits}");
             assert!(
@@ -333,6 +349,15 @@ mod tests {
                 "CNode align must be a power of two for size_bits={bits}"
             );
         }
+    }
+
+    #[test]
+    fn cnode_layout_matches_constants() {
+        // the kernel's CNode is size_bits = 12 = one page.
+        let (size, align) = object_layout(ObjectType::CNode { size_bits: 12 });
+        assert_eq!(size, CNODE_SIZE);
+        assert_eq!(align, CNODE_ALIGN);
+        assert_eq!(size, 4096);
     }
 
     #[test]
@@ -386,12 +411,13 @@ mod tests {
 
     #[test]
     fn cnode_size_scales_with_size_bits() {
+        // byte-size semantics: size = 2^size_bits bytes.
         let (size0, _) = object_layout(ObjectType::CNode { size_bits: 0 });
         let (size4, _) = object_layout(ObjectType::CNode { size_bits: 4 });
-        let (size8, _) = object_layout(ObjectType::CNode { size_bits: 8 });
-        assert_eq!(size0, SLOT_BYTES); // 2^0 = 1 slot
-        assert_eq!(size4, 16 * SLOT_BYTES); // 2^4 = 16 slots
-        assert_eq!(size8, 256 * SLOT_BYTES); // 2^8 = 256 slots
+        let (size12, _) = object_layout(ObjectType::CNode { size_bits: 12 });
+        assert_eq!(size0, 1); // 2^0 = 1 byte
+        assert_eq!(size4, 16); // 2^4 = 16 bytes
+        assert_eq!(size12, 4096); // 2^12 = one page (the kernel CNode)
     }
 
     // ---- retype_fits places Endpoint at aligned offset --------------------
@@ -453,7 +479,7 @@ mod tests {
             .expect("endpoint must fit");
         // endpoint: [0, ENDPOINT_SIZE)
 
-        let cnode_ty = ObjectType::CNode { size_bits: 4 }; // 16 slots * 32 = 512 bytes
+        let cnode_ty = ObjectType::CNode { size_bits: 4 }; // 2^4 = 16 bytes
         let (cnode_size, cnode_align) = object_layout(cnode_ty);
         let nw2 = retype_fits(region, nw1, cnode_ty).expect("cnode must fit");
 

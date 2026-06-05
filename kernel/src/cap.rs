@@ -25,7 +25,8 @@ use jos_core::cap_space::CapSpace;
 use jos_core::cap_table::CapRef;
 use jos_core::placement::{place, PlaceError};
 use jos_core::untyped::{
-    ObjectType, ENDPOINT_ALIGN, ENDPOINT_SIZE, PAGE_TABLE_SIZE, TCB_ALIGN, TCB_SIZE,
+    ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, PAGE_TABLE_SIZE,
+    TCB_ALIGN, TCB_SIZE,
 };
 use spin::Mutex;
 
@@ -50,6 +51,8 @@ pub enum ObjectKind {
     PageTable,
     /// A thread control block (saved context + `CSpace`/`VSpace` roots).
     Tcb,
+    /// A capability node: a capability space carved from untyped memory.
+    CNode,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -140,6 +143,30 @@ impl ObjectId {
         // derived from the region base where a Tcb was placed; it is live for
         // the kernel's lifetime. The caller guarantees exclusivity and the
         // correct kind per this function's contract.
+        unsafe { &mut *ptr }
+    }
+
+    /// Returns an exclusive reference to the [`KernelCapSpace`] backing the
+    /// [`KernelCNode`] this handle names.
+    ///
+    /// `KernelCNode` is `repr(C)` with `space` first, so the object's address
+    /// is the address of the embedded `CapSpace`; this returns that directly,
+    /// which is what every CNode operation (insert/mint/lookup/revoke) needs.
+    ///
+    /// # Safety
+    ///
+    /// As [`as_page_table_mut`](Self::as_page_table_mut), but for a CNode: the
+    /// kind must be `CNode`, the owning region live, and no aliasing reference
+    /// may exist.
+    pub unsafe fn as_cnode_mut(self) -> &'static mut KernelCapSpace {
+        debug_assert_eq!(self.kind, ObjectKind::CNode);
+        // space is at offset 0 of KernelCNode (repr C), so the object address
+        // is the CapSpace address.
+        let ptr = core::ptr::with_exposed_provenance_mut::<KernelCapSpace>(self.addr);
+        // SAFETY: the address was captured in retype (kind CNode) from a pointer
+        // derived from the region base where a KernelCNode was placed (space at
+        // offset 0); it is live for the kernel's lifetime. The caller guarantees
+        // exclusivity and the correct kind per this function's contract.
         unsafe { &mut *ptr }
     }
 }
@@ -333,10 +360,11 @@ pub enum TcbState {
 /// [`Endpoint`]. It completes jos's five seL4 object types (Untyped, page
 /// table, `CNode`/`CSpace`, `Tcb`, `Endpoint`).
 ///
-/// The `CSpace` root is stored as an [`ObjectId`] placeholder for now: a
-/// `CNode` is not yet a retypeable kernel object (the kernel currently holds a
-/// `CapSpace` directly), so a freshly carved `Tcb` records `None` and the
-/// capability syscalls in slice 3d resolve the active `CSpace` explicitly.
+/// The `CSpace` root names a [`KernelCNode`] object (carved from untyped via
+/// [`UntypedRegion::retype_cnode`]); a freshly carved `Tcb` records `None`
+/// until one is assigned. The IPC syscalls still resolve a single active
+/// `CSpace` directly for now; wiring per-`Tcb` resolution through
+/// `cspace_root` is the per-`Tcb` CSpace follow-up.
 #[repr(C, align(64))]
 pub struct Tcb {
     /// The thread's saved register context.
@@ -344,8 +372,8 @@ pub struct Tcb {
     /// Physical address of the thread's `VSpace` `PML4` (its address space
     /// root). Zero means "no address space assigned yet".
     pub vspace_root: u64,
-    /// The thread's `CSpace` root capability, once `CNode`s are retypeable
-    /// objects (deferred); `None` for now.
+    /// The thread's `CSpace` root: an [`ObjectId`] naming a [`KernelCNode`], or
+    /// `None` if no capability space has been assigned yet.
     pub cspace_root: Option<ObjectId>,
     /// The thread's run state.
     pub state: TcbState,
@@ -388,6 +416,59 @@ impl Default for Tcb {
 
 const _: () = assert!(core::mem::size_of::<Tcb>() == TCB_SIZE);
 const _: () = assert!(core::mem::align_of::<Tcb>() == TCB_ALIGN);
+
+// --------------------------------------------------------------------------
+// CNode object
+// --------------------------------------------------------------------------
+
+/// `size_bits` of the kernel's `CNode` object: log2 of [`CNODE_SIZE`] (4096),
+/// the [`ObjectType::CNode`] argument used when carving one from untyped.
+pub const KERNEL_CNODE_SIZE_BITS: u8 = 12;
+
+/// A kernel CNode: a [`KernelCapSpace`] padded and aligned to match
+/// [`ObjectType::CNode`] (`size_bits = 12`, i.e. [`CNODE_SIZE`] bytes), so it
+/// can be placed in untyped memory and named by an [`ObjectId`].
+///
+/// This is the retypeable capability-space object: a task's `CSpace` root
+/// ([`Tcb::cspace_root`]) names one. `repr(C)` keeps `space` at offset 0, so a
+/// handle's address is the address of the embedded `CapSpace` and
+/// [`ObjectId::as_cnode_mut`] hands back a `&mut KernelCapSpace` directly.
+#[repr(C, align(4096))]
+pub struct KernelCNode {
+    /// The capability space this CNode backs.
+    pub space: KernelCapSpace,
+    // pad out to the full CNODE_SIZE so the layout matches ObjectType::CNode.
+    _pad: [u8; KernelCNode::PAD],
+}
+
+impl KernelCNode {
+    // bytes of padding so size_of::<KernelCNode>() == CNODE_SIZE. if the
+    // capability space ever outgrows CNODE_SIZE this underflows and fails the
+    // build, which is the signal to raise CNODE_SIZE (and KERNEL_CNODE_SIZE_BITS).
+    const PAD: usize = CNODE_SIZE - core::mem::size_of::<KernelCapSpace>();
+
+    /// Creates an empty CNode.
+    ///
+    /// Not `const`: `KernelCapSpace::new` is not const (the cap table builds its
+    /// slots with `array::from_fn`), so a CNode cannot initialize a `static`. It
+    /// is created at runtime and placed into untyped via [`UntypedRegion::retype_cnode`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            space: KernelCapSpace::new(),
+            _pad: [0; Self::PAD],
+        }
+    }
+}
+
+impl Default for KernelCNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<KernelCNode>() == CNODE_SIZE);
+const _: () = assert!(core::mem::align_of::<KernelCNode>() == CNODE_ALIGN);
 
 // --------------------------------------------------------------------------
 // Untyped region
@@ -453,6 +534,24 @@ impl UntypedRegion {
     /// handle. Returns `None` if the region has no room for another `Tcb`.
     pub fn retype_tcb(&mut self) -> Option<ObjectId> {
         self.retype(ObjectType::Tcb, Tcb::new(), ObjectKind::Tcb)
+    }
+
+    /// Carves a fresh empty [`KernelCNode`] (capability space) out of this
+    /// region and returns its handle. Returns `None` if the region has no room.
+    ///
+    /// A CNode is [`CNODE_ALIGN`] (4096) aligned, so this only succeeds when the
+    /// region's base is page-aligned; a merely 64-aligned region cannot hold a
+    /// CNode (it would surface as a placement panic, like [`retype_page_table`]).
+    ///
+    /// [`retype_page_table`]: Self::retype_page_table
+    pub fn retype_cnode(&mut self) -> Option<ObjectId> {
+        self.retype(
+            ObjectType::CNode {
+                size_bits: KERNEL_CNODE_SIZE_BITS,
+            },
+            KernelCNode::new(),
+            ObjectKind::CNode,
+        )
     }
 
     // shared carving primitive: place `value` (whose layout must match `ty`)

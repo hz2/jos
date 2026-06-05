@@ -45,6 +45,15 @@ pub struct CapRef {
     generation: u32,
 }
 
+/// Error from [`CapTable::insert_at`] / [`CapSpace::insert_at`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertAtError {
+    /// The requested slot index is `>= N` (out of the table's range).
+    OutOfRange,
+    /// The requested slot already holds a live capability.
+    Occupied,
+}
+
 impl CapRef {
     /// Returns the slot index this reference points at.
     #[inline]
@@ -123,6 +132,35 @@ impl<T, const N: usize> CapTable<T, N> {
     #[must_use]
     pub const fn is_full(&self) -> bool {
         self.len == N
+    }
+
+    /// Inserts `cap` into the specific slot `slot` and returns a [`CapRef`] to
+    /// it.
+    ///
+    /// Unlike [`insert`](Self::insert), which picks the lowest free slot, this
+    /// places the capability at a caller-chosen index. It is the primitive a
+    /// `Retype`-style operation needs: the caller names the destination slot,
+    /// and a deterministic layout (rather than "wherever it landed") is what
+    /// lets userspace address the new capability afterward.
+    ///
+    /// # Errors
+    ///
+    /// - [`InsertAtError::OutOfRange`] if `slot >= N`.
+    /// - [`InsertAtError::Occupied`] if `slot` already holds a live capability
+    ///   (preserving the existing occupant; nothing is overwritten).
+    pub fn insert_at(&mut self, slot: usize, cap: T) -> Result<CapRef, InsertAtError> {
+        if slot >= N {
+            return Err(InsertAtError::OutOfRange);
+        }
+        if self.slots[slot].entry.is_some() {
+            return Err(InsertAtError::Occupied);
+        }
+        self.slots[slot].entry = Some(cap);
+        self.len += 1;
+        Ok(CapRef {
+            slot,
+            generation: self.slots[slot].generation,
+        })
     }
 
     /// Inserts `cap` into the lowest free slot and returns a [`CapRef`] to it.
@@ -289,6 +327,49 @@ mod tests {
     }
 
     #[test]
+    fn insert_at_places_at_requested_slot() {
+        let mut t: CapTable<u32, 4> = CapTable::new();
+        let r = t.insert_at(2, 42).unwrap();
+        assert_eq!(r.slot(), 2);
+        assert_eq!(t.get(r), Some(&42));
+        assert_eq!(t.len(), 1);
+        // slots 0, 1, 3 remain free; a subsequent lowest-free insert takes 0.
+        assert_eq!(t.insert(7).unwrap().slot(), 0);
+    }
+
+    #[test]
+    fn insert_at_rejects_occupied_slot() {
+        let mut t: CapTable<u32, 4> = CapTable::new();
+        let _ = t.insert_at(1, 10).unwrap();
+        // a second insert_at the same slot must not overwrite the occupant.
+        assert_eq!(t.insert_at(1, 20), Err(InsertAtError::Occupied));
+        // the original value is intact.
+        assert_eq!(t.ref_at(1).and_then(|r| t.get(r)), Some(&10));
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn insert_at_rejects_out_of_range() {
+        let mut t: CapTable<u32, 2> = CapTable::new();
+        assert_eq!(t.insert_at(2, 1), Err(InsertAtError::OutOfRange));
+        assert_eq!(t.insert_at(99, 1), Err(InsertAtError::OutOfRange));
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn insert_at_then_remove_reuses_with_bumped_generation() {
+        let mut t: CapTable<u32, 4> = CapTable::new();
+        let r = t.insert_at(3, 5).unwrap();
+        assert!(t.remove(r).is_some());
+        // the slot is free again; re-inserting there yields a fresh generation.
+        let r2 = t.insert_at(3, 6).unwrap();
+        assert_eq!(r2.slot(), 3);
+        assert_ne!(r2.generation(), r.generation());
+        assert_eq!(t.get(r), None); // stale ref rejected
+        assert_eq!(t.get(r2), Some(&6));
+    }
+
+    #[test]
     fn remove_returns_value_and_frees_slot() {
         let mut t: CapTable<u32, 4> = CapTable::new();
         let r = t.insert(7).unwrap();
@@ -450,6 +531,30 @@ mod kani_proofs {
         let _ = t.remove(r);
         assert!(t.get(r).is_none());
         assert!(t.remove(r).is_none());
+    }
+
+    // insert_at places at exactly the requested slot when free, and the
+    // resulting ref resolves to the inserted value; an occupied or
+    // out-of-range slot is rejected without disturbing the table.
+    #[kani::proof]
+    fn insert_at_places_or_rejects() {
+        let mut t: CapTable<u32, 4> = CapTable::new();
+        let slot: usize = kani::any();
+        let v: u32 = kani::any();
+        match t.insert_at(slot, v) {
+            Ok(r) => {
+                // success implies the slot was in range and was free.
+                assert!(slot < 4);
+                assert!(r.slot() == slot);
+                assert!(t.get(r) == Some(&v));
+            }
+            Err(super::InsertAtError::OutOfRange) => assert!(slot >= 4),
+            Err(super::InsertAtError::Occupied) => {
+                // the only prior occupant is none (fresh table), so Occupied is
+                // unreachable here; assert the table is unchanged regardless.
+                assert!(t.is_empty());
+            }
+        }
     }
 
     // the revocation guarantee: an old ref cannot reach a slot's new occupant.

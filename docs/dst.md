@@ -298,12 +298,75 @@ feature (which the kernel enables), so the default, Kani, and Miri builds of the
 pure-logic crate stay dependency-free. That keeps the verification toolchains,
 which the dependency-free split exists to serve, unaffected.
 
+## Injected time: the `KernelClock` seam
+
+Randomness was the first injected dependency; time is the second. The kernel
+core never reads a real clock. It takes a `KernelClock` (`jos-core/src/clock.rs`)
+and is handed either a real hardware clock (a later kernel-side impl over the
+timer IRQ or the TSC) or the deterministic `SimClock` the simulation drives by
+hand, the same shape as Tokio's `time::pause()` plus `advance()`. Same schedule,
+same timeline, every run, so a timing-dependent failure reproduces exactly.
+
+`Instant` and `Duration` are `u64`-tick newtypes. The substance is the deadline
+arithmetic, factored as pure `const fn`s so the proofs are over straight-line
+integer add and compare (no 64-bit multiply, so no CBMC hang): `saturating_add`
+computes a deadline that never wraps into the past (a wrapped deadline would fire
+immediately, a real timeout-bug class), and `reached` is the inclusive "at or
+after" threshold a timeout fires on. `SimClock::advance` saturates and `set` is
+monotonic-guarded (a backward set is clamped), so `now()` never decreases. Four
+Kani harnesses discharge the obligations (deadline-never-in-the-past, `reached`
+monotone in now, advance/set monotone); there is deliberately no tautological
+"the clock is deterministic" proof, since a hand-advanced counter is
+deterministic by language guarantee, exactly as `SimRng`'s stream is.
+`tests/dst_clock.rs` is the determinism guard: under a seeded schedule it
+advances a `SimClock` and tracks armed deadlines, asserting monotonicity,
+threshold correctness, and that each deadline flips not-reached to reached
+exactly once, precisely when the timeline crosses it.
+
+## Deadline-ordered wakeups: the first consumer
+
+A seam with no consumer is hollow. The first consumer is `TimerQueue`
+(`jos-core/src/timer.rs`), the building block beneath both IPC
+receive-with-timeout and a timed scheduler tick: a caller arms timers (a deadline
+plus an opaque payload naming what to wake), and as the injected clock advances
+it drains the ones that have come due, earliest first. Storage is a
+fixed-capacity, heap-free packed array with swap-remove (like the fault delay
+queue), so it runs unchanged in the kernel and is small enough for Kani; finding
+the earliest is a linear scan rather than a binary heap, which is cheap at
+microkernel queue sizes and, more importantly, trivially verifiable (no
+heap-order invariant to maintain or prove). Each armed timer gets a strictly
+increasing `TimerId` that is never reused, so a cancel names exactly one timer
+and there is no ABA across arm, expire, and re-arm.
+
+Five Kani harnesses pin the behaviour down: arm respects capacity; `expire_next`
+never fires before a timer is due *and* always fires when a due timer exists (the
+two together characterize firing exactly); a fired timer really is the earliest;
+and cancel removes exactly the named timer or nothing. The `[0..len]` packed /
+`[len..]` empty storage invariant is re-checked by a `debug_assert` after every
+mutation (compiled out of release, in the style of the bitmap allocator's bounds
+guards); it is what justifies the panic-free code paths in `peek_next` and
+`expire_next`.
+
+`tests/dst_timeout.rs` is the time-driven DST, the first to drive a consumer
+through the clock seam. It runs the verified queue against an independent
+`BTreeMap` shadow (a different shape, so a divergence is a real bug) under a
+seeded `SimClock` schedule in two regimes (`Calm`, light load and small clock
+steps; `Turbulent`, heavy arm/cancel churn and large clock jumps). Per step it
+checks population and per-timer agreement with the shadow and a conservation
+identity (armed equals fired plus cancelled plus still-live). Per drain it checks
+no early fire, earliest-first agreement with the shadow's independent
+computation, a globally non-decreasing fire order, and liveness: after a drain no
+due timer survives. This is the property a timeout subsystem rests on, and the
+mechanism that will make IPC deadlock-freedom (a blocked receive that always
+either receives or times out) provable.
+
 ## Still ahead
 
-A `KernelClock` seam (the deterministic injected clock, mirroring `KernelRng`)
-for time-driven scenarios such as timeouts; record/replay built on the live
-trace (reset and re-present the recorded `SyscallEvent` stream, now that off-box
-capture exists); and a small host-side decoder for the `TRACE` serial lines.
+A real hardware `KernelClock` on the kernel side (over the timer IRQ or the TSC)
+and a `recv`-with-timeout syscall wiring the `TimerQueue` into the async IPC
+path; record/replay built on the live trace (reset and re-present the recorded
+`SyscallEvent` stream, now that off-box capture exists); and a small host-side
+decoder for the `TRACE` serial lines.
 
 [^1]: [FoundationDB deterministic simulation](https://apple.github.io/foundationdb/testing.html)
 [^2]: [TigerBeetle VOPR](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/vopr.zig)

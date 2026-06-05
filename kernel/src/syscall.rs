@@ -45,15 +45,14 @@
 //! `KernelGsBase`/`swapgs` on entry) arrives with the retypeable `Tcb` object
 //! in slice 3c.
 
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-
 use x86_64::VirtAddr;
-use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
+use x86_64::registers::model_specific::{Efer, EferFlags, GsBase, KernelGsBase, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 
 use crate::cap::{
     cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectKind, RetypeError,
 };
+use crate::cpu_local::{self, OFF_KERNEL_RSP, OFF_USER_RSP_SCRATCH};
 use crate::gdt;
 use jos_core::cap_rights::Rights;
 use jos_core::cap_space::InsertAtError;
@@ -213,36 +212,30 @@ fn decode_object_type(type_word: u64) -> Option<ObjectType> {
     }
 }
 
-/// The kernel stack pointer the syscall entry stub switches to on entry.
-///
-/// Set by [`set_kernel_stack`] before dropping to user mode. A single slot
-/// suffices for one userspace thread; slice 3c replaces it with a per-thread
-/// stack selected via `KernelGsBase`.
-static KERNEL_RSP: AtomicU64 = AtomicU64::new(0);
+// The kernel stack and current capability space the syscall path uses now live
+// in the per-CPU block ([`crate::cpu_local`]), selected per thread on a context
+// switch via `swapgs`. The two setters below remain as compat shims so the
+// single-thread tests (slices 3b/3d/retype) keep working unchanged; multi-
+// thread code uses `cpu_local::switch_to` instead.
 
-/// Records the kernel stack pointer the next syscall entry will switch to.
+/// Records the kernel stack the next `syscall` entry switches to, by writing the
+/// per-CPU block directly.
 ///
-/// Call with the top of a valid kernel stack before [`crate::usermode::
-/// enter_user_mode`]. The value is read by the assembly entry stub.
+/// Compat shim for single-thread setup (call before [`crate::usermode::
+/// enter_user_mode`]); prefer [`crate::cpu_local::switch_to`] once TCBs drive
+/// scheduling.
 pub fn set_kernel_stack(rsp: VirtAddr) {
-    KERNEL_RSP.store(rsp.as_u64(), Ordering::SeqCst);
+    // SAFETY: single-threaded setup; the per-CPU block is not concurrently
+    // accessed (interrupts disabled / no other thread running yet).
+    unsafe {
+        (*cpu_local::cpu_local_ptr()).kernel_rsp = rsp.as_u64();
+    }
 }
 
-/// The current task's capability space, resolved per IPC syscall.
+/// Installs `cspace` as the current task's capability space for IPC syscalls, by
+/// writing the per-CPU block directly.
 ///
-/// The IPC syscalls take a capability *slot index* from userspace and resolve
-/// it against this `CSpace` on every call (via `ref_at`, which reconstructs the
-/// generation-checked `CapRef`), rather than borrowing a Rust reference once.
-/// That per-call resolution is exactly what lets a revoked capability be
-/// rejected on the next syscall, the property the slice-2b borrow-based API
-/// could not provide.
-///
-/// A single slot holds the one userspace task's `CSpace` for now; the per-`Tcb`
-/// `CSpace` root (a retypeable `CNode`) is deferred. Stored as a raw pointer to
-/// a kernel-owned `CapSpace`; the kernel is single-threaded across syscalls.
-static CURRENT_CSPACE: AtomicPtr<KernelCapSpace> = AtomicPtr::new(core::ptr::null_mut());
-
-/// Installs `cspace` as the current task's capability space for IPC syscalls.
+/// Compat shim for single-thread setup; prefer [`crate::cpu_local::switch_to`].
 ///
 /// # Safety
 ///
@@ -250,7 +243,10 @@ static CURRENT_CSPACE: AtomicPtr<KernelCapSpace> = AtomicPtr::new(core::ptr::nul
 /// while it is installed (in practice a `'static` kernel object), and must not
 /// be mutated concurrently (jos is single-threaded across the syscall path).
 pub unsafe fn set_current_cspace(cspace: *mut KernelCapSpace) {
-    CURRENT_CSPACE.store(cspace, Ordering::SeqCst);
+    // SAFETY: single-threaded setup, as above.
+    unsafe {
+        (*cpu_local::cpu_local_ptr()).current_cspace = cspace;
+    }
 }
 
 /// Programs the syscall MSRs so `syscall`/`sysret` work. Call once during
@@ -283,6 +279,13 @@ pub fn init_syscall() {
     // be interrupted. Also clear the direction and trap flags for a sane kernel
     // entry state.
     SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::DIRECTION_FLAG | RFlags::TRAP_FLAG);
+
+    // per-CPU data for the swapgs-based entry stub. KernelGsBase holds the
+    // CpuLocal pointer while userspace runs; the entry stub's `swapgs` moves it
+    // into GsBase so `gs:` addresses the block. GsBase itself is 0 (jos has no
+    // userspace TLS), so after the exit `swapgs` GsBase is back to 0 in ring 3.
+    GsBase::write(VirtAddr::new(0));
+    KernelGsBase::write(VirtAddr::new(cpu_local::cpu_local_ptr() as u64));
 
     // finally enable the syscall/sysret instructions in EFER.
     // SAFETY: we set only the SYSTEM_CALL_EXTENSIONS bit; Efer::write preserves
@@ -328,15 +331,23 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 
     }
 }
 
+// the current task's CSpace pointer, read from the per-CPU block. this is the
+// thread the entry stub's swapgs + switch_to selected; it is the heart of
+// per-thread isolation (each thread resolves capabilities in ITS OWN space).
+fn current_cspace_ptr() -> *mut KernelCapSpace {
+    // SAFETY: single-CPU, interrupts disabled on the syscall path; reading the
+    // per-CPU block does not alias another access.
+    unsafe { (*cpu_local::cpu_local_ptr()).current_cspace }
+}
+
 // resolves the current task's CSpace for MUTATION (retype installs a capability
 // via insert_at). same pointer as current_cspace, but exclusive.
 //
-// SAFETY note: returns an exclusive reference to the kernel-owned CapSpace
-// behind CURRENT_CSPACE; sound on the single-threaded syscall path where
-// set_current_cspace's contract guarantees the pointer is live and unaliased,
-// and no other reference is taken for the duration of the call.
+// SAFETY note: returns an exclusive reference to the kernel-owned CapSpace the
+// per-CPU block points at; sound on the single-threaded syscall path where the
+// pointer is live and unaliased, and no other reference is taken for the call.
 fn current_cspace_mut() -> Option<&'static mut KernelCapSpace> {
-    let ptr = CURRENT_CSPACE.load(Ordering::SeqCst);
+    let ptr = current_cspace_ptr();
     if ptr.is_null() {
         return None;
     }
@@ -348,18 +359,18 @@ fn current_cspace_mut() -> Option<&'static mut KernelCapSpace> {
 // resolves the current task's CSpace, the one IPC syscalls address capabilities
 // in. returns None if no CSpace is installed (a kernel setup bug).
 //
-// SAFETY note: the returned reference borrows the kernel-owned CapSpace behind
-// CURRENT_CSPACE; the caller (an IPC syscall handler) uses it only within the
-// single-threaded syscall path, where set_current_cspace's contract guarantees
-// the pointer is live and unaliased.
+// SAFETY note: the returned reference borrows the kernel-owned CapSpace the
+// per-CPU block points at; the caller (an IPC syscall handler) uses it only
+// within the single-threaded syscall path, where the pointer is live and
+// unaliased.
 fn current_cspace() -> Option<&'static KernelCapSpace> {
-    let ptr = CURRENT_CSPACE.load(Ordering::SeqCst);
+    let ptr = current_cspace_ptr();
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: ptr was installed via set_current_cspace, whose contract requires
-    // it to point at a live, 'static, non-concurrently-mutated KernelCapSpace.
-    // jos is single-threaded across syscalls, so no aliasing &mut exists.
+    // SAFETY: the pointer was installed via switch_to / set_current_cspace,
+    // pointing at a live, 'static, non-concurrently-mutated KernelCapSpace. jos
+    // is single-threaded across syscalls, so no aliasing &mut exists.
     Some(unsafe { &*ptr })
 }
 
@@ -536,35 +547,44 @@ fn invoke_errno(e: IpcError) -> u64 {
 }
 
 // the raw syscall entry point installed in LSTAR. it runs in ring 0 with the
-// USER stack still in rsp (syscall does not switch stacks), so it must switch
-// to the kernel stack before touching memory through the stack.
+// USER stack still in rsp (syscall does not switch stacks) and with GS still the
+// user's, so it must swapgs to reach the per-CPU block and switch to the kernel
+// stack before touching memory through the stack.
 //
 // written as a global_asm symbol (not a naked fn) so the compiler emits no
 // stack frame of its own: rsp is still the user stack on entry, so any
 // compiler-generated prologue would push onto user memory. the whole body is
 // one assembly block.
 //
-// register discipline (jos syscall ABI, slice 3b):
+// register discipline (jos syscall ABI):
 //   on entry  rcx = user return RIP, r11 = user RFLAGS (both set by `syscall`);
 //             rax = syscall nr; rdi/rsi/rdx = args 0/1/2.
 //   a syscall is treated like a C call: caller-saved registers may be clobbered
 //   by the dispatcher; rcx and r11 are reserved by the instruction; rax holds
 //   the return value on the way out.
 //
-// stack alignment: the SysV C ABI requires rsp % 16 == 0 at a `call`. KERNEL_RSP
-// is 16-aligned (see set_kernel_stack), so three 8-byte pushes leave rsp % 16
-// == 8; an explicit 8-byte pad restores 16 before the call and is undone after.
+// swapgs discipline: exactly one swapgs on entry, one on exit. After the entry
+// swapgs, GS base = the CpuLocal pointer (KernelGsBase held it while in ring 3),
+// so `gs:[OFF_*]` addresses the per-CPU block; the exit swapgs restores the user
+// GS and parks the CpuLocal pointer back in KernelGsBase. The kernel_rsp loaded
+// is THIS thread's (switch_to set it), which is what makes the stack per-thread.
+//
+// stack alignment: the SysV C ABI requires rsp % 16 == 0 at a `call`. kernel_rsp
+// is 16-aligned, so three 8-byte pushes leave rsp % 16 == 8; an explicit 8-byte
+// pad restores 16 before the call and is undone after.
 core::arch::global_asm!(
     ".global syscall_entry",
     "syscall_entry:",
-    // save the user stack pointer into a scratch register the SysV ABI lets us
-    // clobber (r10 is caller-saved and untouched by `syscall`), then switch to
-    // the kernel stack loaded from KERNEL_RSP.
-    "mov r10, rsp",                 // r10 = user rsp
-    "mov rsp, [rip + {kernel_rsp}]",// rsp = kernel stack top (16-aligned)
+    // swapgs: KernelGsBase (the CpuLocal ptr) <-> GsBase. now gs: addresses the
+    // per-CPU block.
+    "swapgs",
+    // stash the user rsp in the per-CPU scratch slot (we cannot push to the user
+    // stack from ring 0), then load this thread's kernel stack top.
+    "mov gs:[{user_rsp_scratch}], rsp",
+    "mov rsp, gs:[{kernel_rsp}]",   // rsp = kernel stack top (16-aligned)
     // preserve the values sysretq depends on, plus the user rsp, on the kernel
     // stack across the dispatcher call.
-    "push r10",                     // [kernel stack] user rsp        rsp%16=8
+    "push gs:[{user_rsp_scratch}]", // [kernel stack] user rsp        rsp%16=8
     "push rcx",                     // user return RIP (sysretq uses)  rsp%16=0
     "push r11",                     // user RFLAGS (sysretq uses)      rsp%16=8
     "sub rsp, 8",                   // align to 16 for the call        rsp%16=0
@@ -579,14 +599,15 @@ core::arch::global_asm!(
     "mov rdi, rax",                 // nr   -> 1st C arg (rdi)
     "call {dispatch}",              // rax = return value
     // tear down: drop the alignment pad, restore the syscall-return state and
-    // the user stack, then return to ring 3.
+    // the user stack, then swapgs back and return to ring 3.
     "add rsp, 8",                   // drop alignment pad
     "pop r11",                      // user RFLAGS
     "pop rcx",                      // user return RIP
-    "pop r10",                      // user rsp
-    "mov rsp, r10",                 // back onto the user stack
+    "pop rsp",                      // restore user rsp directly
+    "swapgs",                       // restore user GS, park CpuLocal in KernelGsBase
     "sysretq",                      // -> ring 3 at rcx, RFLAGS = r11
-    kernel_rsp = sym KERNEL_RSP,
+    user_rsp_scratch = const OFF_USER_RSP_SCRATCH,
+    kernel_rsp = const OFF_KERNEL_RSP,
     dispatch = sym dispatch_syscall,
 );
 

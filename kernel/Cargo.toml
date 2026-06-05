@@ -48,6 +48,12 @@ harness = false
 name = "retype_invoke"
 harness = false
 
+# two_thread_cspace switches to a TCB and runs its userspace program, exiting
+# qemu from ring 3, so it likewise runs without the framework.
+[[test]]
+name = "two_thread_cspace"
+harness = false
+
 [dependencies]
 jos-core = { path = "../jos-core" }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts

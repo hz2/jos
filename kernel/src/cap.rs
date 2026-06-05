@@ -394,10 +394,20 @@ pub struct Tcb {
     /// Physical address of the thread's `VSpace` `PML4` (its address space
     /// root). Zero means "no address space assigned yet".
     pub vspace_root: u64,
+    /// Top of this thread's kernel stack (16-aligned). The per-CPU block's
+    /// `kernel_rsp` is loaded from here on a context switch, so the `syscall`
+    /// entry stub switches to THIS thread's kernel stack. Zero until assigned.
+    pub kernel_stack_top: u64,
+    /// Raw pointer to the [`KernelCapSpace`] backing this thread's `CSpace`
+    /// (the `space` field of the `cspace_root` `KernelCNode`, or a directly
+    /// owned space). Copied into the per-CPU block on a context switch so IPC
+    /// syscalls resolve capabilities in THIS thread's space. Null until assigned.
+    pub cspace_ptr: *mut KernelCapSpace,
     /// The thread's `CSpace` root: an [`ObjectId`] naming a [`KernelCNode`], or
     /// `None` if no capability space has been assigned yet.
     pub cspace_root: Option<ObjectId>,
-    /// The thread's run state.
+    /// The thread's run state. Last of the real fields (a small type), before
+    /// the padding, so it introduces no interior alignment gap.
     pub state: TcbState,
     // pad to the full TCB_SIZE so the layout matches ObjectType::Tcb exactly.
     _pad: [u8; Tcb::PAD],
@@ -410,7 +420,9 @@ impl Tcb {
     const USED: usize = core::mem::size_of::<SavedContext>()
         + core::mem::size_of::<u64>()
         + core::mem::size_of::<Option<ObjectId>>()
-        + core::mem::size_of::<TcbState>();
+        + core::mem::size_of::<TcbState>()
+        + core::mem::size_of::<u64>()
+        + core::mem::size_of::<*mut KernelCapSpace>();
     const PAD: usize = TCB_SIZE - Self::USED;
 
     /// Creates an inactive `Tcb` with a zeroed context and no roots.
@@ -425,6 +437,8 @@ impl Tcb {
             vspace_root: 0,
             cspace_root: None,
             state: TcbState::Inactive,
+            kernel_stack_top: 0,
+            cspace_ptr: core::ptr::null_mut(),
             _pad: [0; Self::PAD],
         }
     }

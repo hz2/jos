@@ -280,13 +280,30 @@ record/replay on real hardware: the visible "traceable" half of the
 verify-and-simulate story, made concrete against the running kernel rather than
 only the host model.
 
+## Off-box capture
+
+The trace can leave the machine. `jos_core::trace::codec` serializes a
+`SyscallEvent` with `postcard`, a compact `no_std`, allocation-free wire format,
+and frames each record with COBS (a zero-byte delimiter) so a concatenated
+stream of events splits back apart on the receiving side. The kernel's
+`dump_trace_hex` drains the buffer and prints each framed record as a `TRACE
+<hex>` line over the serial port; a host tool reading the serial log hex-decodes
+those lines, concatenates the bytes, and recovers the events with
+`codec::decode_framed`. A round-trip test on the real dispatch path confirms the
+serialized form is a faithful, reconstructable record of what crossed the
+boundary.
+
+`serde` and `postcard` are pulled in only behind jos-core's opt-in `postcard`
+feature (which the kernel enables), so the default, Kani, and Miri builds of the
+pure-logic crate stay dependency-free. That keeps the verification toolchains,
+which the dependency-free split exists to serve, unaffected.
+
 ## Still ahead
 
 A `KernelClock` seam (the deterministic injected clock, mirroring `KernelRng`)
 for time-driven scenarios such as timeouts; record/replay built on the live
-trace (reset and re-present the recorded `SyscallEvent` stream); and optional
-`postcard` serialization of the trace for off-box capture (the events are
-already fixed-size and serialization-shaped).
+trace (reset and re-present the recorded `SyscallEvent` stream, now that off-box
+capture exists); and a small host-side decoder for the `TRACE` serial lines.
 
 [^1]: [FoundationDB deterministic simulation](https://apple.github.io/foundationdb/testing.html)
 [^2]: [TigerBeetle VOPR](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/vopr.zig)

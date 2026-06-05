@@ -23,6 +23,10 @@ use core::task::{Context, Poll, Waker};
 use jos_core::cap_rights::Rights;
 use jos_core::cap_space::CapSpace;
 use jos_core::cap_table::CapRef;
+// the verified rendezvous state machine. referenced by module path
+// (`endpoint::Endpoint` etc.) so it does not collide with this module's own
+// `Endpoint` object type or its `SendOutcome` / `RecvOutcome` adapter enums.
+use jos_core::endpoint;
 use jos_core::placement::{place, PlaceError};
 use jos_core::untyped::{
     ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, PAGE_TABLE_SIZE,
@@ -197,45 +201,38 @@ impl ObjectId {
 // Endpoint object
 // --------------------------------------------------------------------------
 
+/// A small inline IPC message: a tag plus four data words.
+///
+/// This is the verified [`jos_core::endpoint::Message`], re-exported so the rest
+/// of the kernel keeps naming it `cap::Message`. The rendezvous logic that moves
+/// it lives in the verified state machine, so the kernel does not redefine it.
+pub use jos_core::endpoint::Message;
+
 /// The mutable state of a synchronous IPC endpoint, behind the endpoint's lock.
 ///
 /// An endpoint owns its blocked peers (the seL4 model: a thread blocked on IPC
 /// is queued on the endpoint, not spinning). jos has a single waiter slot per
 /// direction for now (capacity-1 rendezvous); a full wait queue arrives when
-/// userspace threads can contend an endpoint. A waiter is woken by storing the
-/// counterpart message / clearing the slot and calling its [`Waker`].
+/// userspace threads can contend an endpoint.
+///
+/// The rendezvous itself, the slot, the capacity-1 rule, and which peer to wake,
+/// is the verified [`jos_core::endpoint::Endpoint`] state machine. This struct
+/// adds only the one thing pure logic cannot hold: each parked peer's
+/// [`Waker`]. The model's `sender_parked` / `receiver_parked` flags are kept in
+/// exact correspondence with `send_waiter` / `recv_waiter` being `Some`, so the
+/// model decides the rendezvous and this struct decides who to wake.
 #[derive(Debug)]
 pub struct EndpointInner {
-    /// Current rendezvous state.
-    pub state: EndpointState,
-    /// The parked message when `state == SendBlocked`.
-    pub message: Option<Message>,
+    /// The verified rendezvous state machine: the message slot and the parked
+    /// flags. The single source of truth for the rendezvous.
+    rendezvous: endpoint::Endpoint,
     /// Waker of a sender parked because the endpoint already held a message.
-    /// Woken when a receiver drains the endpoint and frees the slot.
+    /// `Some` exactly when `rendezvous.sender_parked()`. Woken when a receiver
+    /// drains the endpoint and frees the slot.
     send_waiter: Option<Waker>,
-    /// Waker of a receiver parked because the endpoint had no message. Woken
-    /// when a sender deposits a message.
+    /// Waker of a receiver parked because the endpoint had no message. `Some`
+    /// exactly when `rendezvous.receiver_parked()`. Woken when a sender deposits.
     recv_waiter: Option<Waker>,
-}
-
-/// Endpoint rendezvous state (seL4-style synchronous endpoint).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EndpointState {
-    /// No message is parked. A receiver may be blocked (see `recv_waiter`),
-    /// waiting for a sender.
-    Idle,
-    /// A sender has parked a message, waiting for a receiver.
-    SendBlocked,
-}
-
-/// A small inline IPC message. No IPC buffer / pages yet: a tag plus four data
-/// words, mirroring seL4's short register-passed messages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Message {
-    /// Message tag / method label.
-    pub label: u64,
-    /// Up to four inline data words.
-    pub words: [u64; 4],
 }
 
 /// A synchronous IPC endpoint, sized and aligned to match
@@ -269,8 +266,7 @@ impl Endpoint {
     pub const fn new() -> Self {
         Self {
             inner: Mutex::new(EndpointInner {
-                state: EndpointState::Idle,
-                message: None,
+                rendezvous: endpoint::Endpoint::new(),
                 send_waiter: None,
                 recv_waiter: None,
             }),
@@ -744,28 +740,61 @@ enum RecvOutcome {
 }
 
 impl EndpointInner {
-    // try to deposit a message without blocking. the single locked primitive
-    // both cap_send and the CapSend future build on, so the deposit/wake logic
-    // lives in exactly one place and the take-or-park stays race-free (it all
-    // happens under one lock acquisition by the caller).
+    // try to deposit a message without blocking, delegating the rendezvous to
+    // the verified state machine. the single locked primitive both cap_send and
+    // the CapSend future build on, so the deposit/wake logic lives in exactly one
+    // place and the take-or-park stays race-free (it all happens under one lock
+    // acquisition by the caller). when the model reports a receiver was released,
+    // its stored waker is taken so the caller can fire it after the lock drops.
     fn try_deposit(&mut self, message: Message) -> SendOutcome {
-        if self.state == EndpointState::SendBlocked {
-            return SendOutcome::Full;
+        match self.rendezvous.try_send(message) {
+            endpoint::SendOutcome::Deposited { woke_receiver } => {
+                // the model cleared its receiver_parked flag iff it released a
+                // receiver; keep our waker slot in lockstep by taking it then.
+                let waker = if woke_receiver { self.recv_waiter.take() } else { None };
+                SendOutcome::Deposited(waker)
+            }
+            endpoint::SendOutcome::Full => SendOutcome::Full,
         }
-        self.message = Some(message);
-        self.state = EndpointState::SendBlocked;
-        SendOutcome::Deposited(self.recv_waiter.take())
     }
 
-    // try to take the parked message without blocking.
+    // try to take the parked message without blocking, delegating to the model.
     fn try_take(&mut self) -> RecvOutcome {
-        match self.message.take() {
-            Some(message) => {
-                self.state = EndpointState::Idle;
-                RecvOutcome::Took(message, self.send_waiter.take())
+        match self.rendezvous.try_recv() {
+            endpoint::RecvOutcome::Took { message, woke_sender } => {
+                let waker = if woke_sender { self.send_waiter.take() } else { None };
+                RecvOutcome::Took(message, waker)
             }
-            None => RecvOutcome::Empty,
+            endpoint::RecvOutcome::Empty => RecvOutcome::Empty,
         }
+    }
+
+    // park the current task as the sender waiting for the slot to free, storing
+    // its waker. mirrors the model's self-guarding park_sender: the waker is kept
+    // iff the model actually records the sender as parked (slot full), so
+    // send_waiter.is_some() stays equal to rendezvous.sender_parked().
+    fn park_sender(&mut self, waker: Waker) {
+        if self.rendezvous.park_sender() {
+            self.send_waiter = Some(waker);
+        }
+    }
+
+    // park the current task as the receiver waiting for a message; mirror of
+    // park_sender.
+    fn park_receiver(&mut self, waker: Waker) {
+        if self.rendezvous.park_receiver() {
+            self.recv_waiter = Some(waker);
+        }
+    }
+
+    // clear both parked peers (on revoke), returning their wakers to fire. the
+    // model clears its flags so its invariant holds; the wakers are returned so
+    // the blocked tasks observe the cancellation on their next poll.
+    fn clear_parked(&mut self) -> (Option<Waker>, Option<Waker>) {
+        let (had_sender, had_receiver) = self.rendezvous.clear_parked();
+        let send_waiter = if had_sender { self.send_waiter.take() } else { None };
+        let recv_waiter = if had_receiver { self.recv_waiter.take() } else { None };
+        (send_waiter, recv_waiter)
     }
 }
 
@@ -856,9 +885,10 @@ impl Future for CapSend<'_> {
             match inner.try_deposit(self.message) {
                 SendOutcome::Deposited(waker) => waker,
                 SendOutcome::Full => {
-                    // endpoint full: register our waker so a receiver draining
-                    // it wakes us, and yield. (lock drops at end of scope.)
-                    inner.send_waiter = Some(context.waker().clone());
+                    // endpoint full: park as the sender (storing our waker in the
+                    // model + the waker slot together) so a receiver draining it
+                    // wakes us, and yield. (lock drops at end of scope.)
+                    inner.park_sender(context.waker().clone());
                     return Poll::Pending;
                 }
             }
@@ -891,9 +921,9 @@ impl Future for CapRecv<'_> {
             match inner.try_take() {
                 RecvOutcome::Took(message, waker) => (message, waker),
                 RecvOutcome::Empty => {
-                    // endpoint empty: register our waker so a sender depositing
+                    // endpoint empty: park as the receiver so a sender depositing
                     // a message wakes us, and yield.
-                    inner.recv_waiter = Some(context.waker().clone());
+                    inner.park_receiver(context.waker().clone());
                     return Poll::Pending;
                 }
             }
@@ -977,7 +1007,9 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
         let endpoint = unsafe { obj.as_endpoint() };
         let (send_waiter, recv_waiter) = {
             let mut inner = endpoint.inner.lock();
-            (inner.send_waiter.take(), inner.recv_waiter.take())
+            // clear_parked clears the model's parked flags and hands back the
+            // matching wakers, keeping the model's invariant intact on revoke.
+            inner.clear_parked()
         };
         if let Some(waker) = send_waiter {
             waker.wake();
@@ -1032,7 +1064,7 @@ impl Future for CapRecvResolving {
             match inner.try_take() {
                 RecvOutcome::Took(message, waker) => (message, waker),
                 RecvOutcome::Empty => {
-                    inner.recv_waiter = Some(context.waker().clone());
+                    inner.park_receiver(context.waker().clone());
                     return Poll::Pending;
                 }
             }

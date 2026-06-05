@@ -8,11 +8,20 @@ authors.workspace = true
 # `cargo test`, Miri, and Kani can exercise it) and for the kernel's bare-metal
 # target alike, because it never touches asm, MMIO, or platform intrinsics.
 [dependencies]
+# both are no_std (default-features off) and optional, gated behind the
+# `postcard` feature below. serde supplies the derive; postcard supplies the
+# slice-based (no-alloc) encoder/decoder and COBS framing.
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+postcard = { version = "1", default-features = false, optional = true }
 
 [features]
 default = []
 # enabled when compiled under `cargo kani` to gate proof harnesses.
 kani = []
+# off-box trace capture: postcard serialization of trace events. opt-in only, so
+# the default / Kani / Miri builds stay dependency-free (the load-bearing
+# property that keeps the crate Miri/Kani/Verus-clean).
+postcard = ["dep:postcard", "dep:serde"]
 
 [lints.rust]
 # `cargo kani` injects --cfg=kani at the compiler level; declare it here so

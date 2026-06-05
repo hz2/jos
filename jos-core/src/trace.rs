@@ -209,7 +209,12 @@ impl TraceEvent {
 /// `syscall` through the kernel's `Syscall` enum. All fields are `u64` (no
 /// platform-width or pointer types), so the event is fixed-size and shaped for
 /// wire or snapshot serialization, like the rest of this module.
+///
+/// Under the `postcard` feature it derives `serde::Serialize` /
+/// `Deserialize`, so [`codec`] can encode it for off-box capture. The derive is
+/// feature-gated so the default, Kani, and Miri builds stay dependency-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 pub struct SyscallEvent {
     /// Monotone per-buffer sequence number; gives total order within one trace.
     pub seq: u64,
@@ -232,6 +237,90 @@ impl SyscallEvent {
             args,
             result,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// postcard codec (feature-gated, for off-box capture)
+// ---------------------------------------------------------------------------
+
+/// Serialization of trace events for off-box capture, over `postcard`.
+///
+/// `postcard` is a compact, `no_std`, allocation-free wire format: a
+/// [`SyscallEvent`] encodes to a handful of bytes (its `u64` fields become
+/// LEB128 varints), with no schema or framing assumptions baked in. This module
+/// wraps the slice-based encode/decode (no heap, suitable for the kernel) and
+/// adds COBS framing, which delimits records with a zero byte so a stream of
+/// events can be split back apart on the receiving side.
+///
+/// The whole module is gated behind the `postcard` feature, so it exists only
+/// when a consumer (the kernel's off-box trace dump) opts in; the default,
+/// Kani, and Miri builds never pull `serde` or `postcard`.
+#[cfg(feature = "postcard")]
+pub mod codec {
+    use super::SyscallEvent;
+
+    /// A safe upper bound on the encoded size of one [`SyscallEvent`], framed.
+    ///
+    /// A `SyscallEvent` is six `u64` fields (`seq`, `syscall`, three `args`,
+    /// `result`). `postcard` encodes each `u64` as a LEB128 varint of at most 10
+    /// bytes, so the plain encoding is at most 60 bytes. COBS framing adds at
+    /// most one overhead byte per 254 bytes plus a trailing delimiter, so 64
+    /// bytes is a comfortable ceiling for one framed event. A caller sizing a
+    /// per-event scratch buffer can use this constant.
+    pub const MAX_FRAMED_EVENT_LEN: usize = 64;
+
+    /// Encodes `event` into `buf` (no framing), returning the written prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `postcard` error if `buf` is too small (it must hold the
+    /// varint encoding; see [`MAX_FRAMED_EVENT_LEN`] for a safe size).
+    pub fn encode<'a>(
+        event: &SyscallEvent,
+        buf: &'a mut [u8],
+    ) -> postcard::Result<&'a mut [u8]> {
+        postcard::to_slice(event, buf)
+    }
+
+    /// Decodes one [`SyscallEvent`] from `bytes` (no framing).
+    ///
+    /// # Errors
+    ///
+    /// Returns the `postcard` error if `bytes` is not a valid encoding.
+    pub fn decode(bytes: &[u8]) -> postcard::Result<SyscallEvent> {
+        postcard::from_bytes(bytes)
+    }
+
+    /// Encodes `event` into `buf` as a COBS-framed record, returning the framed
+    /// bytes (including the trailing zero delimiter).
+    ///
+    /// COBS framing lets a receiver split a concatenated stream of events back
+    /// into records by scanning for the zero delimiter, which is what makes a
+    /// drained trace buffer reconstructable off-box.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `postcard` error if `buf` is too small.
+    pub fn encode_framed<'a>(
+        event: &SyscallEvent,
+        buf: &'a mut [u8],
+    ) -> postcard::Result<&'a mut [u8]> {
+        postcard::to_slice_cobs(event, buf)
+    }
+
+    /// Decodes the first COBS-framed [`SyscallEvent`] from `bytes`, returning it
+    /// along with the remaining bytes after the frame.
+    ///
+    /// Call repeatedly, feeding back the returned remainder, to decode a stream
+    /// of framed events. `bytes` is mutated in place (COBS decoding is
+    /// destructive), so pass a scratch copy if the original must be preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `postcard` error if no complete, valid frame is present.
+    pub fn decode_framed(bytes: &mut [u8]) -> postcard::Result<(SyscallEvent, &mut [u8])> {
+        postcard::take_from_bytes_cobs(bytes)
     }
 }
 
@@ -317,5 +406,75 @@ mod tests {
         assert_eq!(ev.syscall, 7);
         assert_eq!(ev.args, [0xAA, 0xBB, 0xCC]);
         assert_eq!(ev.result, 0xD00D);
+    }
+}
+
+// postcard round-trip tests, compiled only when the feature (and so the codec)
+// is present. they link std via the test harness; the library stays no_std.
+#[cfg(all(test, feature = "postcard"))]
+mod codec_tests {
+    use super::codec::{self, MAX_FRAMED_EVENT_LEN};
+    use super::SyscallEvent;
+    extern crate std;
+    use std::vec::Vec;
+
+    #[test]
+    fn plain_round_trip_recovers_the_event() {
+        let ev = SyscallEvent::new(42, 4, [0x1111, 0x2222, 0x3333], 0xDEAD_BEEF);
+        let mut buf = [0u8; MAX_FRAMED_EVENT_LEN];
+        let encoded = codec::encode(&ev, &mut buf).expect("encode fits");
+        let decoded = codec::decode(encoded).expect("decode succeeds");
+        assert_eq!(decoded, ev, "plain round trip must recover the exact event");
+    }
+
+    #[test]
+    fn framed_round_trip_recovers_the_event() {
+        let ev = SyscallEvent::new(7, 2, [0, u64::MAX, 1], 0);
+        let mut buf = [0u8; MAX_FRAMED_EVENT_LEN];
+        let framed = codec::encode_framed(&ev, &mut buf).expect("encode fits");
+        // a COBS frame ends in a zero delimiter and contains no interior zeros.
+        assert_eq!(framed.last(), Some(&0), "COBS frame ends in a zero delimiter");
+        let (decoded, rest) = codec::decode_framed(framed).expect("decode one frame");
+        assert_eq!(decoded, ev);
+        assert!(rest.is_empty(), "a single frame leaves no trailing bytes");
+    }
+
+    #[test]
+    fn a_stream_of_framed_events_splits_back_apart() {
+        // the off-box case: many events concatenated as COBS frames, decoded one
+        // at a time by feeding the remainder back in. this is what reconstructs a
+        // drained trace buffer on the receiving side.
+        let events = [
+            SyscallEvent::new(0, 0, [1, 2, 3], 6),
+            SyscallEvent::new(1, 4, [0, 0, 0], 0),
+            SyscallEvent::new(2, 3, [u64::MAX, 0, 7], u64::MAX),
+        ];
+        let mut stream: Vec<u8> = Vec::new();
+        for ev in &events {
+            let mut buf = [0u8; MAX_FRAMED_EVENT_LEN];
+            let framed = codec::encode_framed(ev, &mut buf).expect("encode fits");
+            stream.extend_from_slice(framed);
+        }
+        // decode the concatenated stream back into the original sequence.
+        let mut remaining = stream.as_mut_slice();
+        let mut recovered = Vec::new();
+        while !remaining.is_empty() {
+            let (ev, rest) = codec::decode_framed(remaining).expect("decode a frame");
+            recovered.push(ev);
+            remaining = rest;
+        }
+        assert_eq!(recovered, events, "the stream must split back into the originals");
+    }
+
+    #[test]
+    fn worst_case_event_fits_the_size_bound() {
+        // every field at u64::MAX is the largest varint encoding; it must still
+        // fit MAX_FRAMED_EVENT_LEN, the constant callers size scratch buffers by.
+        let ev = SyscallEvent::new(u64::MAX, u64::MAX, [u64::MAX; 3], u64::MAX);
+        let mut buf = [0u8; MAX_FRAMED_EVENT_LEN];
+        let framed = codec::encode_framed(&ev, &mut buf).expect("worst case must fit the bound");
+        assert!(framed.len() <= MAX_FRAMED_EVENT_LEN);
+        let (decoded, _) = codec::decode_framed(framed).expect("decode");
+        assert_eq!(decoded, ev);
     }
 }

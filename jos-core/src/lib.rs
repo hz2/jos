@@ -36,5 +36,6 @@ pub mod page_table;
 pub mod placement;
 pub mod pte;
 pub mod ring_buffer;
+pub mod rng;
 pub mod run_queue;
 pub mod untyped;

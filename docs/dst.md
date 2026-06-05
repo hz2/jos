@@ -263,13 +263,30 @@ and nowhere else. The slice-2 fault regimes apply at the message layer (sends
 are dropped, delayed, duplicated, and corrupted), with conservation anchored on
 the realized stream just as the capability oracle is.
 
+## In-kernel tracing
+
+Tracing is now wired into the kernel itself, not just the host harness. Because
+every capability operation from userspace crosses the syscall dispatcher, that
+dispatcher is a mandatory chokepoint, and `dispatch_syscall` taps it: each call
+records a `jos_core::trace::SyscallEvent` (the raw boundary values, the syscall
+number, its register arguments, and the `rax` result, plus a monotone sequence
+number) into a per-CPU ring buffer.
+
+The buffer (`kernel/src/trace.rs`) wraps the Kani-verified `RingBuffer` with an
+overwrite-oldest policy and a monotone sequence counter, so a busy syscall stream
+keeps the most recent window rather than going deaf, and an ordered drain yields
+the events in the order they happened. That ordered drain is the record half of
+record/replay on real hardware: the visible "traceable" half of the
+verify-and-simulate story, made concrete against the running kernel rather than
+only the host model.
+
 ## Still ahead
 
 A `KernelClock` seam (the deterministic injected clock, mirroring `KernelRng`)
-for time-driven scenarios such as timeouts, and wiring tracing into the kernel
-proper: a structured `TraceEvent` emitted on every capability invocation into a
-per-CPU ring buffer, which turns the record/replay property from a host-side
-harness feature into something usable against the kernel running on hardware.
+for time-driven scenarios such as timeouts; record/replay built on the live
+trace (reset and re-present the recorded `SyscallEvent` stream); and optional
+`postcard` serialization of the trace for off-box capture (the events are
+already fixed-size and serialization-shaped).
 
 [^1]: [FoundationDB deterministic simulation](https://apple.github.io/foundationdb/testing.html)
 [^2]: [TigerBeetle VOPR](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/vopr.zig)

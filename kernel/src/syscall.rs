@@ -297,6 +297,19 @@ pub fn init_syscall() {
     }
 }
 
+/// Invokes the syscall dispatcher directly, for in-kernel tests.
+///
+/// Drives the exact path a real `syscall` instruction reaches (including the
+/// trace tap), so a test can verify dispatch behaviour and tracing without
+/// assembling a ring-3 program. Hidden from the public API: this is a test
+/// seam, not a kernel interface (userspace reaches the dispatcher only through
+/// the `syscall` instruction). Avoid `Syscall::Exit` through it, which diverges.
+#[doc(hidden)]
+#[must_use]
+pub fn dispatch_for_test(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
+    dispatch_syscall(nr, arg0, arg1, arg2)
+}
+
 /// The Rust system-call dispatcher, called by [`syscall_entry`] with the user
 /// arguments already in C-ABI registers.
 ///
@@ -306,9 +319,13 @@ pub fn init_syscall() {
 /// `extern "C"` so the assembly stub can call it with the standard argument
 /// registers (`rdi`, `rsi`, `rdx`, `rcx`) holding (nr, arg0, arg1, arg2).
 extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    match Syscall::from_u64(nr) {
+    let result = match Syscall::from_u64(nr) {
         Some(Syscall::Add) => arg0.wrapping_add(arg1),
         Some(Syscall::Exit) => {
+            // Exit never returns, so record it BEFORE diverging: the trace must
+            // capture the final syscall too. its "result" is the exit code it
+            // was asked for (arg0), since no value flows back to userspace.
+            crate::trace::record(nr, [arg0, arg1, arg2], arg0);
             // arg0 is the exit code; map the two known codes, default to Failed.
             let code = match arg0 {
                 0x10 => crate::QemuExitCode::Success,
@@ -328,7 +345,12 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 
         // invoke(cap_slot = arg0, method = arg1, arg0_word = arg2).
         Some(Syscall::Invoke) => sys_invoke(arg0, arg1, arg2),
         None => ENOSYS,
-    }
+    };
+    // tap the chokepoint: every returning syscall is recorded with the value it
+    // hands back to userspace, the structured trace event of VISION star 5.
+    // (Exit recorded itself above, since it does not reach here.)
+    crate::trace::record(nr, [arg0, arg1, arg2], result);
+    result
 }
 
 // the current task's CSpace pointer, read from the per-CPU block. this is the

@@ -127,3 +127,48 @@ fn full_buffer_overwrites_oldest() {
     let oldest = trace::with_buffer(|buf| buf.drain_oldest()).expect("event present");
     assert_eq!(oldest.args[0], 5, "the five oldest events should have been dropped");
 }
+
+// off-box capture: events recorded on the real dispatch path survive a postcard
+// COBS-frame encode and decode unchanged. this is the round trip a host capture
+// tool performs (drain -> frame -> serial -> decode), proving the serialized
+// form is a faithful, reconstructable record of what crossed the boundary.
+#[test_case]
+fn recorded_events_survive_postcard_round_trip() {
+    use jos_core::trace::codec::{self, MAX_FRAMED_EVENT_LEN};
+
+    clear_trace();
+    // dispatch a few real syscalls with distinctive arguments.
+    let _ = dispatch_for_test(Syscall::Add as u64, 0xCAFE, 0xBABE, 0);
+    let _ = dispatch_for_test(Syscall::Add as u64, 1, 2, 0);
+
+    // drain and round-trip each event: encode it as a framed record, decode the
+    // frame back, and assert the decoded event equals the original.
+    let mut events = [SyscallEvent::new(0, 0, [0; 3], 0); 4];
+    let n = drain_all(&mut events);
+    assert_eq!(n, 2, "two syscalls were dispatched");
+    for original in &events[..n] {
+        let mut buf = [0u8; MAX_FRAMED_EVENT_LEN];
+        let framed = codec::encode_framed(original, &mut buf).expect("encode fits");
+        // a real frame is COBS-delimited by a trailing zero.
+        assert_eq!(framed.last(), Some(&0), "framed record ends in the COBS delimiter");
+        let (decoded, rest) = codec::decode_framed(framed).expect("decode the frame");
+        assert_eq!(&decoded, original, "the decoded event must match what was recorded");
+        assert!(rest.is_empty(), "one frame, no trailing bytes");
+    }
+    serial_println!("[trace] {} events survived the postcard round trip", n);
+}
+
+// dump_trace_hex drains the buffer and reports how many events it emitted; an
+// empty buffer dumps nothing. (the hex output itself goes to the serial log for
+// a host tool; here we just confirm the drain count and that it empties.)
+#[test_case]
+fn dump_trace_hex_drains_and_counts() {
+    clear_trace();
+    let _ = dispatch_for_test(Syscall::Add as u64, 7, 8, 0);
+    let _ = dispatch_for_test(Syscall::Add as u64, 9, 10, 0);
+    let _ = dispatch_for_test(Syscall::Add as u64, 11, 12, 0);
+    let dumped = trace::dump_trace_hex();
+    assert_eq!(dumped, 3, "dump should emit every recorded event");
+    // the buffer is now empty, so a second dump emits nothing.
+    assert_eq!(trace::dump_trace_hex(), 0, "a drained buffer dumps nothing");
+}

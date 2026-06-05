@@ -159,6 +159,52 @@ pub fn with_buffer<R>(f: impl FnOnce(&mut TraceBuffer) -> R) -> R {
     f(&mut TRACE.lock())
 }
 
+// --------------------------------------------------------------------------
+// Off-box capture
+// --------------------------------------------------------------------------
+
+/// Drains the trace buffer and prints each event as a COBS-framed postcard
+/// record in hex over the serial port, oldest first.
+///
+/// This is jos's off-box capture path: a host-side tool reading the serial log
+/// pulls the `TRACE` lines, hex-decodes them, concatenates the bytes, and splits
+/// the stream back into events with `jos_core::trace::codec::decode_framed`. Hex
+/// (rather than raw bytes) keeps the output safe to interleave with the kernel's
+/// other line-oriented serial logging. Each line is one framed event, so a
+/// truncated capture still yields every complete record before the cut.
+///
+/// Draining empties the buffer; call it at a natural checkpoint (a debug
+/// command, or shutdown). Returns the number of events dumped.
+pub fn dump_trace_hex() -> usize {
+    let mut count = 0;
+    // drain one event at a time, holding the lock only across each single pop so
+    // a recording syscall is never blocked behind the whole dump. encoding and
+    // printing happen outside the lock.
+    loop {
+        let Some(event) = TRACE.lock().drain_oldest() else {
+            break;
+        };
+        let mut buf = [0u8; jos_core::trace::codec::MAX_FRAMED_EVENT_LEN];
+        match jos_core::trace::codec::encode_framed(&event, &mut buf) {
+            Ok(framed) => {
+                crate::serial_print!("TRACE ");
+                for byte in framed.iter() {
+                    crate::serial_print!("{byte:02x}");
+                }
+                crate::serial_print!("\n");
+                count += 1;
+            }
+            // a framed SyscallEvent always fits MAX_FRAMED_EVENT_LEN (asserted by
+            // the jos-core worst-case test), so this is unreachable; note it
+            // rather than dropping silently if the invariant ever breaks.
+            Err(e) => {
+                crate::serial_println!("TRACE encode error: {:?}", e);
+            }
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TraceBuffer, TRACE_CAPACITY};

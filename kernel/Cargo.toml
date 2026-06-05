@@ -55,7 +55,10 @@ name = "two_thread_cspace"
 harness = false
 
 [dependencies]
-jos-core = { path = "../jos-core" }
+# the `postcard` feature pulls in serde + postcard for off-box trace capture
+# (kernel/src/trace.rs dump_trace_hex). jos-core's default build stays
+# dependency-free; only the kernel, which actually emits the trace, opts in.
+jos-core = { path = "../jos-core", features = ["postcard"] }
 volatile = "0.2.6" # note: newer versions are not compatible with the blog posts
 spin     = "0.5.2"
 uart_16550 = "0.2.0" # todo: see if there isn't a better crate to use now

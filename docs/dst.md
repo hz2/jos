@@ -217,35 +217,59 @@ over all 64-bit words for each concrete bound.
 Rule: never feed a symbolic 64-bit value into both operands of `*` in a Kani
 harness. Make the constant operand concrete.
 
-## Fault regimes (next DST slice, in progress)
+## Fault regimes (DST slice 2)
 
-The current harness tests the capability space under a benign workload: all
-operations are well-formed and the simulated environment is cooperative. The
-next slice introduces TigerBeetle-style fault regimes for IPC messages, modeled
-on the ClearSky / Stormy / Apocalyptic progression:
+DST slice 2 adds TigerBeetle-style fault regimes (`jos_core::fault`). A
+`FaultInjector` transforms an incoming operation stream into a realized stream
+by applying faults drawn from the seeded RNG, modeled on the ClearSky / Stormy /
+Apocalyptic progression:
 
-- **ClearSky.** No faults. Used to establish a baseline and to warm the seed
-  sweep. Every message is delivered exactly once, in order.
+- **ClearSky.** No faults. The baseline: every operation is delivered exactly
+  once, in order, and the full differential oracle holds.
 
-- **Stormy.** Occasional faults: messages may be dropped or delayed. The IPC
-  layer delivers some fraction of messages and silently drops the rest. The
-  kernel core must handle missing responses without hanging.
+- **Stormy.** Drops, delays, reorders, and duplicates, but no corruption. A
+  dropped operation reaches neither side; a delayed one is released later
+  (possibly behind operations that were not delayed); a duplicate is applied
+  twice.
 
-- **Apocalyptic.** Hostile environment: messages may be dropped, delayed,
-  reordered, duplicated, or corrupted. This is the "the network is adversarial
-  and lossy" regime, the stress that exercises safety invariants under extreme
-  environmental hostility.
+- **Apocalyptic.** Adds field corruption: mangled slot indices and rights masks.
+  The "environment is adversarial and lossy" regime.
 
-Each regime is a parameter to the simulation harness, not a code path. Switching
-regimes requires only swapping the injected HAL implementation behind the
-`KernelRng` / `KernelClock` / IPC trait boundary.
+The key design point is that faults are injected at the transport layer, above
+both the implementation and the shadow model, so the differential oracle holds
+on the realized stream even under Apocalyptic corruption: both sides see the
+identical realized operations, including corrupted ones. A capability reference
+cannot be forged at all (its fields are private), so the strongest corruption an
+attacker controls is the slot index in an operation, which the core resolves per
+call and rejects when stale or out of range. That rejection, a stale or forged
+reference never being honored, is the seL4 unforgeability property under fault
+injection, and the `dst_faults` harness probes it on every step.
 
-The prerequisite for fault injection into IPC is a pure endpoint/IPC rendezvous
-state machine in `jos-core` (today the rendezvous logic lives in
-`kernel/src/cap.rs` behind a `Mutex`, not host-testable). Extracting that state
-machine into `jos-core` as a trait-parameterized type is DST slice 2, and it
-unlocks both the IPC-sequence harness (message conservation: nothing duplicated
-or lost under interleaved send/recv) and the fault-regime work above.
+## IPC message conservation (DST slice 3)
+
+DST slice 3 lifts the capacity-1 synchronous endpoint rendezvous out of
+`kernel/src/cap.rs` into a pure, host-testable, Kani-verified state machine
+(`jos_core::endpoint`); the kernel's `EndpointInner` now delegates to it and
+keeps only the parked peers' `Waker`s. The rendezvous invariants (capacity-1,
+a sender and a receiver are never parked at once, a taken message equals the
+deposited one) are proven in `jos-core` rather than only asserted by the QEMU
+tests.
+
+On top of that, `dst_ipc` drives many senders and receivers contending several
+capacity-1 endpoints under a seeded schedule, and proves conservation: no
+message is lost, duplicated, or corrupted. Every message that enters the
+pipeline ends up received, in an endpoint slot, or waiting in a sender outbox,
+and nowhere else. The slice-2 fault regimes apply at the message layer (sends
+are dropped, delayed, duplicated, and corrupted), with conservation anchored on
+the realized stream just as the capability oracle is.
+
+## Still ahead
+
+A `KernelClock` seam (the deterministic injected clock, mirroring `KernelRng`)
+for time-driven scenarios such as timeouts, and wiring tracing into the kernel
+proper: a structured `TraceEvent` emitted on every capability invocation into a
+per-CPU ring buffer, which turns the record/replay property from a host-side
+harness feature into something usable against the kernel running on hardware.
 
 [^1]: [FoundationDB deterministic simulation](https://apple.github.io/foundationdb/testing.html)
 [^2]: [TigerBeetle VOPR](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/vopr.zig)

@@ -818,3 +818,138 @@ pub fn send(space: &KernelCapSpace, cap_ref: CapRef, message: Message) -> CapSen
 pub fn recv(space: &KernelCapSpace, cap_ref: CapRef) -> CapRecv<'_> {
     CapRecv { space, cap_ref }
 }
+
+// --------------------------------------------------------------------------
+// Revocation that cancels blocked IPC
+// --------------------------------------------------------------------------
+
+/// Revokes `cap_ref` and its derivation subtree from `space`, and wakes any IPC
+/// waiter parked on an endpoint named by a revoked capability so the blocked
+/// task observes the cancellation instead of hanging forever.
+///
+/// Returns the number of capabilities removed (as [`CapSpace::revoke`] does).
+///
+/// The pure [`CapSpace::revoke`] only edits the capability table; it does not
+/// know that a removed capability named an [`Endpoint`] with a parked
+/// [`Waker`]. That waker would otherwise never fire, leaving a blocked
+/// `recv`/`send` future stuck. This kernel-glue wrapper closes that gap: it
+/// drains and wakes those wakers. A woken future re-polls, its per-poll
+/// `resolve_endpoint` finds the now-stale capability, and it resolves to
+/// [`IpcError::InvalidCap]` rather than re-parking.
+///
+/// The wake is done AFTER `revoke` has bumped the generations, so when the
+/// woken task re-validates it genuinely sees the capability as gone. Because
+/// the marked set is collected (via `for_each_in_subtree`) before `revoke`
+/// clears the slots, the endpoint objects are still reachable to wake.
+pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
+    // mark phase: collect the endpoint objects in the revoke subtree while the
+    // parent links are still intact. fixed-size scratch sized to the space (no
+    // heap); CSPACE_SLOTS bounds the subtree.
+    let mut endpoints: [Option<ObjectId>; CSPACE_SLOTS] = [None; CSPACE_SLOTS];
+    let mut count = 0;
+    space.for_each_in_subtree(cap_ref, |_r, cap| {
+        if cap.object.kind() == ObjectKind::Endpoint && count < CSPACE_SLOTS {
+            endpoints[count] = Some(cap.object);
+            count += 1;
+        }
+    });
+
+    // revoke: removes the capability entries and bumps their generations, so any
+    // outstanding ref (including one a blocked future holds) is now stale.
+    let removed = space.revoke(cap_ref);
+
+    // wake phase: take and fire each parked waiter, AFTER releasing the endpoint
+    // lock (the wake transport is lock-free, but keep the wake off the locked
+    // path as the cap_send/cap_recv primitives do). a woken future re-polls,
+    // sees the stale cap, and returns InvalidCap.
+    for obj in endpoints.into_iter().take(count).flatten() {
+        // SAFETY: obj.kind == Endpoint (checked in the mark phase), the object
+        // outlives the kernel (static untyped region), single-CPU interrupts-
+        // disabled context so no aliasing live &mut exists.
+        let endpoint = unsafe { obj.as_endpoint() };
+        let (send_waiter, recv_waiter) = {
+            let mut inner = endpoint.inner.lock();
+            (inner.send_waiter.take(), inner.recv_waiter.take())
+        };
+        if let Some(waker) = send_waiter {
+            waker.wake();
+        }
+        if let Some(waker) = recv_waiter {
+            waker.wake();
+        }
+    }
+
+    removed
+}
+
+// --------------------------------------------------------------------------
+// IPC futures that resolve the capability space afresh on every poll
+// --------------------------------------------------------------------------
+//
+// CapSend/CapRecv borrow `&'a KernelCapSpace`, so the space cannot be mutated
+// (revoked) while such a future is in flight: the borrow is held across the
+// await. To cancel a PARKED waiter on revoke, the space must be resolved fresh
+// on each poll instead, so a concurrent &mut revoke is sound. These futures
+// hold a raw `*const KernelCapSpace` and re-derive a transient shared reference
+// inside each poll only. This is the in-kernel mirror of the syscall path,
+// where the CSpace is resolved per-call (slice 3d); the revoke happens between
+// polls (cooperative single-threaded executor), so no reference is live across
+// the mutation.
+
+/// Future that receives a message, resolving its capability space on every
+/// poll (so a revoke between polls cancels it with [`IpcError::InvalidCap`]).
+/// Created by [`recv_resolving`].
+#[must_use = "futures do nothing unless awaited"]
+pub struct CapRecvResolving {
+    space: *const KernelCapSpace,
+    cap_ref: CapRef,
+}
+
+impl Future for CapRecvResolving {
+    type Output = Result<Message, IpcError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        // SAFETY: the pointer was created from a valid &KernelCapSpace in
+        // recv_resolving and the space outlives the future (its owner keeps it
+        // alive for the IPC's duration). The executor is cooperative and single-
+        // threaded, so no &mut to the space is live concurrently with this
+        // transient shared borrow; any revoke runs between polls, not during one.
+        let space = unsafe { &*self.space };
+        let endpoint = match resolve_endpoint(space, self.cap_ref, Rights::READ) {
+            Ok(endpoint) => endpoint,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        let (message, to_wake) = {
+            let mut inner = endpoint.inner.lock();
+            match inner.try_take() {
+                RecvOutcome::Took(message, waker) => (message, waker),
+                RecvOutcome::Empty => {
+                    inner.recv_waiter = Some(context.waker().clone());
+                    return Poll::Pending;
+                }
+            }
+        };
+        if let Some(waker) = to_wake {
+            waker.wake();
+        }
+        Poll::Ready(Ok(message))
+    }
+}
+
+/// Receives a message from the endpoint named by `cap_ref`, resolving the
+/// capability `space` afresh on every poll.
+///
+/// Unlike [`recv`], which borrows the space for the future's whole lifetime,
+/// this holds only a pointer and re-resolves each poll, so the space may be
+/// mutated (a capability revoked) between polls. Revoking `cap_ref` (via
+/// [`revoke_and_wake`]) while this future is parked wakes it, and the next poll
+/// returns [`IpcError::InvalidCap`].
+///
+/// # Safety
+///
+/// `space` must remain valid and not be dropped for as long as the returned
+/// future is alive, and the future must be polled only on the single-threaded
+/// cooperative executor (no concurrent `&mut` to `*space` during a poll).
+pub unsafe fn recv_resolving(space: *const KernelCapSpace, cap_ref: CapRef) -> CapRecvResolving {
+    CapRecvResolving { space, cap_ref }
+}

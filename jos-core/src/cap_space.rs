@@ -228,6 +228,24 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         removed
     }
 
+    /// Calls `f` with the [`CapRef`] and a shared reference to every capability
+    /// in the subtree rooted at `root` (the root itself plus every capability
+    /// transitively derived from it), in ascending slot order.
+    ///
+    /// This visits exactly the set [`revoke`](Self::revoke) would remove, but
+    /// without removing anything, so a caller can act on those capabilities'
+    /// objects (for example, waking any IPC waiters parked on a soon-to-be-
+    /// revoked endpoint) *before* revoking them, while the parent links are
+    /// still intact. The closure cannot mutate the space; collect what it needs
+    /// and act afterward.
+    pub fn for_each_in_subtree(&self, root: CapRef, mut f: impl FnMut(CapRef, &Capability<O>)) {
+        self.table.for_each(|r, cap| {
+            if self.descends_from(r, root) {
+                f(r, cap);
+            }
+        });
+    }
+
     /// Returns `true` if `cap_ref` is `ancestor`, or is transitively derived
     /// from `ancestor` by following `parent` links.
     #[must_use]
@@ -347,6 +365,41 @@ mod tests {
         assert!(space.lookup(root).is_some());
         assert!(space.lookup(child).is_none());
         assert!(space.lookup(grandchild).is_none());
+    }
+
+    #[test]
+    fn for_each_in_subtree_visits_exactly_the_revoke_set() {
+        let mut space: CapSpace<Obj, 32> = CapSpace::new();
+        let root = space.insert(1, Rights::all()).unwrap();
+        let child = space.mint(root, Rights::READ_WRITE).unwrap();
+        let grandchild = space.mint(child, Rights::READ).unwrap();
+        // an unrelated capability that must NOT be visited.
+        let other = space.insert(2, Rights::all()).unwrap();
+
+        let mut visited = std::vec::Vec::new();
+        space.for_each_in_subtree(root, |r, _| visited.push(r));
+        // visits root + child + grandchild (the revoke set), not `other`.
+        assert_eq!(visited.len(), 3);
+        assert!(visited.contains(&root));
+        assert!(visited.contains(&child));
+        assert!(visited.contains(&grandchild));
+        assert!(!visited.contains(&other));
+
+        // and it matches what revoke would remove.
+        let removed = space.revoke(root);
+        assert_eq!(removed, visited.len());
+        assert!(space.lookup(other).is_some());
+    }
+
+    #[test]
+    fn for_each_in_subtree_of_leaf_is_just_the_leaf() {
+        let mut space: CapSpace<Obj, 16> = CapSpace::new();
+        let root = space.insert(1, Rights::all()).unwrap();
+        let child = space.mint(root, Rights::READ).unwrap();
+        let mut visited = std::vec::Vec::new();
+        space.for_each_in_subtree(child, |r, _| visited.push(r));
+        // the child has no descendants, so only it is visited.
+        assert_eq!(visited, std::vec![child]);
     }
 
     #[test]

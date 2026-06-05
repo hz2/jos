@@ -38,4 +38,5 @@ pub mod pte;
 pub mod ring_buffer;
 pub mod rng;
 pub mod run_queue;
+pub mod trace;
 pub mod untyped;

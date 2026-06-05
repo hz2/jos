@@ -668,11 +668,16 @@ mod kani_proofs {
         }
     }
 
-    /// `retype_fits` is total: it never panics for any bounded input.
+    /// `retype_fits` is total (never panics for any bounded input) AND, when it
+    /// reports a fit, the new watermark genuinely stays within the region.
     ///
-    /// this harness does not assert a particular result; it proves that no
-    /// overflow or arithmetic panic can occur for any input in the bounded
-    /// range. kani reports a failure only if it finds a reachable panic.
+    /// Totality is proved implicitly: kani treats any reachable panic or
+    /// arithmetic overflow as a counterexample, so the call alone discharges it.
+    /// The explicit post-condition below makes the non-trivial property checked
+    /// in the harness body (matching the style of the sibling `*_in_range` /
+    /// `*_placement_aligned` harnesses) rather than relying on the call alone, so
+    /// the harness cannot be mistaken for an assertion-free one and would fail if
+    /// the arithmetic ever returned an out-of-range watermark.
     #[kani::proof]
     fn retype_fits_never_panics() {
         let region_size: usize = kani::any();
@@ -686,7 +691,12 @@ mod kani_proofs {
         // must restrict to valid inputs here to avoid the debug_assert path).
         kani::assume(watermark <= region_size);
 
-        let _ = retype_fits(region_size, watermark, ty);
+        // a reported fit must keep the watermark in (watermark, region_size]:
+        // the new watermark never exceeds the region and strictly advances.
+        if let Some(new_watermark) = retype_fits(region_size, watermark, ty) {
+            assert!(new_watermark <= region_size);
+            assert!(new_watermark >= watermark);
+        }
     }
 
     /// `align_up(value, align)` returns a result that, when `value +

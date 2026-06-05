@@ -216,16 +216,29 @@ pub fn _print(args: fmt::Arguments) {
 
 // tests
 
+// printing far more lines than the buffer is tall must scroll without panicking
+// AND leave the most recent line readable at the bottom. the bare "call println!
+// 200 times and assert nothing" version could not catch a scroll that corrupted
+// or blanked the visible line, so read the last written line back and check it.
 #[test_case]
-fn test_println_simple() {
-    println!("test_println_simple output");
-}
+fn test_println_scrolls_and_keeps_last_line() {
+    use core::fmt::Write;
+    use x86_64::instructions::interrupts;
 
-#[test_case]
-fn test_println_many() {
-    for _ in 0..200 {
-        println!("test_println_many output");
-    }
+    // more than BUFFER_HEIGHT lines, so the buffer scrolls many times over.
+    let last = "final line after scrolling";
+    interrupts::without_interrupts(|| {
+        let mut writer = WRITER.lock();
+        for i in 0..BUFFER_HEIGHT * 3 {
+            writeln!(writer, "filler line {i}").expect("writeln failed");
+        }
+        // the last line printed lands on the row above the (blank) cursor row.
+        writeln!(writer, "{last}").expect("writeln failed");
+        for (i, c) in last.chars().enumerate() {
+            let screen_char = writer.buffer().chars[BUFFER_HEIGHT - 2][i].read();
+            assert_eq!(char::from(screen_char.ascii_character), c);
+        }
+    });
 }
 
 #[test_case]

@@ -367,11 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn event_is_plain_copyable_data() {
-        // a TraceEvent is Copy: storing one in a log and keeping the original is
-        // a copy, not a move. (this is what lets a harness push events into a
-        // Vec while still inspecting them.)
-        let ev = TraceEvent::new(
+    fn events_compare_unequal_when_any_field_differs() {
+        // equality must discriminate on every field: a record/replay diff or a
+        // trace consumer relies on two events being unequal when their seq, op,
+        // OR outcome differs, not just when the whole struct happens to match. a
+        // derived PartialEq that ignored a field would pass a naive "build one,
+        // copy it, compare" test but fail here.
+        let base = TraceEvent::new(
             7,
             CapOp::Insert {
                 object: ObjectToken(0xAB),
@@ -379,10 +381,26 @@ mod tests {
             },
             CapOutcome::Installed { slot: 2 },
         );
-        let copy = ev;
-        assert_eq!(ev, copy);
-        assert_eq!(ev.seq, 7);
-        assert_eq!(copy.outcome, CapOutcome::Installed { slot: 2 });
+        // differs only in seq.
+        let other_seq = TraceEvent::new(8, base.op, base.outcome);
+        assert_ne!(base, other_seq, "events with different seq must differ");
+        // differs only in the op's rights field.
+        let other_op = TraceEvent::new(
+            base.seq,
+            CapOp::Insert {
+                object: ObjectToken(0xAB),
+                rights: Rights::READ, // was READ_WRITE
+            },
+            base.outcome,
+        );
+        assert_ne!(base, other_op, "events with different op must differ");
+        // differs only in the outcome's slot.
+        let other_outcome =
+            TraceEvent::new(base.seq, base.op, CapOutcome::Installed { slot: 3 });
+        assert_ne!(base, other_outcome, "events with different outcome must differ");
+        // and an identical rebuild compares equal (the positive half).
+        let same = TraceEvent::new(7, base.op, base.outcome);
+        assert_eq!(base, same);
     }
 
     #[test]

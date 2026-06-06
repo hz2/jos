@@ -104,6 +104,97 @@ pub fn place<T>(
     Ok((start, new_watermark))
 }
 
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use crate::untyped::{ObjectType, ENDPOINT_ALIGN, ENDPOINT_SIZE};
+
+    // a concrete type whose layout matches ObjectType::Endpoint (128 bytes, 64-byte align).
+    // the untyped kani proofs cover retype_fits arithmetic; these harnesses cover
+    // the ptr::write path inside place() itself.
+    #[repr(C, align(64))]
+    #[derive(Clone, Copy)]
+    struct FakeEp {
+        tag: u64,
+        _rest: [u8; 120],
+    }
+
+    // 384 bytes holds three endpoints with full alignment; repr(align(64)) ensures
+    // the base pointer is 64-byte aligned so place() does not hit RegionMisaligned.
+    #[repr(C, align(64))]
+    struct Buf([u8; 384]);
+
+    /// Two consecutive calls to `place` using the advanced watermark from the
+    /// first produce non-overlapping byte ranges: `wm1 <= start2`.
+    ///
+    /// This is the MEM-1 spatial-disjointness property at the `place()` level:
+    /// the `ptr::write` path (not just the arithmetic in `retype_fits`) maintains
+    /// non-overlap for any valid watermark in a bounded region.
+    #[kani::proof]
+    fn two_placements_occupy_disjoint_ranges() {
+        let mut buf = Buf([0u8; 384]);
+        let region = &mut buf.0[..];
+
+        let watermark: usize = kani::any();
+        kani::assume(watermark <= region.len());
+
+        let v1 = FakeEp { tag: 0x1111, _rest: [0u8; 120] };
+        let Ok((start1, wm1)) = place(region, watermark, ObjectType::Endpoint, v1) else {
+            return;
+        };
+
+        let v2 = FakeEp { tag: 0x2222, _rest: [0u8; 120] };
+        let Ok((start2, wm2)) = place(region, wm1, ObjectType::Endpoint, v2) else {
+            return;
+        };
+
+        // disjointness: first band [start1, wm1) ends at or before second [start2, wm2) starts.
+        assert!(wm1 <= start2, "second placement overlaps the first");
+        assert!(start1 < start2, "placements not in ascending order");
+        assert!(start1 < wm1, "first band is empty");
+        assert!(start2 < wm2, "second band is empty");
+    }
+
+    /// `place` keeps the returned watermark within `(watermark, region.len()]`
+    /// and the start offset within `[watermark, region.len())`.
+    #[kani::proof]
+    fn place_watermark_stays_in_bounds() {
+        let mut buf = Buf([0u8; 384]);
+        let region = &mut buf.0[..];
+
+        let watermark: usize = kani::any();
+        kani::assume(watermark <= region.len());
+
+        let v = FakeEp { tag: 0, _rest: [0u8; 120] };
+        if let Ok((start, new_wm)) = place(region, watermark, ObjectType::Endpoint, v) {
+            assert!(new_wm <= region.len(), "new_watermark escapes the region");
+            assert!(new_wm > watermark, "watermark did not advance");
+            assert!(watermark <= start, "placement start is below the old watermark");
+            assert!(start < new_wm, "start >= new_watermark (empty or inverted band)");
+        }
+    }
+
+    /// `place` returns a start offset that is a multiple of the object's alignment.
+    ///
+    /// The buffer base is 64-byte aligned (repr(align(64))); the offset `start`
+    /// is itself a multiple of 64, so `base + start` is 64-byte aligned as required
+    /// by the `ptr::write` in `place`.
+    #[kani::proof]
+    fn place_returns_aligned_start() {
+        let mut buf = Buf([0u8; 384]);
+        let region = &mut buf.0[..];
+
+        let watermark: usize = kani::any();
+        kani::assume(watermark <= region.len());
+
+        let v = FakeEp { tag: 0, _rest: [0u8; 120] };
+        if let Ok((start, _)) = place(region, watermark, ObjectType::Endpoint, v) {
+            assert_eq!(start % ENDPOINT_ALIGN, 0, "start is not object-aligned");
+            assert_eq!(ENDPOINT_SIZE, 128);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

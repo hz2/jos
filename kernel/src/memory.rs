@@ -106,6 +106,16 @@ impl BootstrapFrameAllocator {
         unsafe {
             multiboot2::for_each_usable_region(info_ptr, |base, len| {
                 if allocator.region_count >= MAX_REGIONS {
+                    // out of region slots: this drops usable RAM. warn rather
+                    // than drop silently, so an over-fragmented memory map is
+                    // visible on the serial log instead of mysteriously short on
+                    // memory. the cue to bump MAX_REGIONS. (QEMU/grub hand us a
+                    // handful of regions, so this is not expected to fire.)
+                    crate::serial_println!(
+                        "WARNING: multiboot2 memory map has more than {} usable regions; \
+                         dropping region at {:#x} (+{:#x}). bump MAX_REGIONS.",
+                        MAX_REGIONS, base, len
+                    );
                     return;
                 }
                 // clip to frame boundaries: round the start up, the end down.

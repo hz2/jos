@@ -204,9 +204,11 @@ pub unsafe fn enter_user_mode(entry: VirtAddr, stack_top: VirtAddr) -> ! {
         ES::set_reg(sel.user_data);
     }
 
-    // RFLAGS with only bit 1 (reserved, always 1) set: IF clear, so no maskable
-    // interrupt fires in ring 3 for this bring-up.
-    let rflags: u64 = 0x0000_0002;
+    // RFLAGS: bit 1 (reserved, always 1) + bit 9 (IF). IF=1 allows the timer
+    // and keyboard IRQs to preempt ring-3 code. the IDT handlers are now
+    // equipped with conditional swapgs, so it is safe to take an interrupt
+    // from ring 3.
+    let rflags: u64 = 0x0000_0202;
 
     // SAFETY: the pushed frame is a well-formed long-mode iretq frame (SS, RSP,
     // RFLAGS, CS, RIP from top of stack downward as pushed). cs/ss are the

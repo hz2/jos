@@ -20,6 +20,13 @@
 //! - `start` is aligned to `align_of::<T>()`
 //! - the bytes `[start, new_watermark)` now hold a valid `T` (written via
 //!   `ptr::write`, which does not read or drop the prior bytes)
+//!
+//! Because `watermark <= start` and the watermark only advances, objects placed
+//! by a sequence of [`place`] calls occupy disjoint byte ranges: a later object
+//! never overlaps an earlier one. This is the spatial-non-overlap property
+//! ([`crate::untyped`]'s `MEM-1` keystone, Kani-proven there over the watermark
+//! arithmetic); the `two_placements_occupy_disjoint_ranges_without_corruption`
+//! test exercises it on real placed objects under Miri.
 
 use crate::untyped::{object_layout, retype_fits, ObjectType};
 
@@ -157,6 +164,34 @@ mod tests {
             place(region, wm1, ObjectType::Endpoint, FakeEndpoint::new(2)).unwrap();
         assert_eq!(start2, 128);
         assert_eq!(wm2, 256);
+    }
+
+    #[test]
+    fn two_placements_occupy_disjoint_ranges_without_corruption() {
+        // the runtime / Miri counterpart to untyped's two_retypes_occupy_disjoint_bands
+        // Kani proof: two real objects placed back to back land in disjoint byte
+        // ranges, and writing the second does not disturb the first (no overlap,
+        // no aliasing). distinct tags let us prove the first survives the second.
+        let (mut buf, off) = aligned_buf(384, 64);
+        let region = &mut buf[off..off + 300];
+
+        let (start1, wm1) =
+            place(region, 0, ObjectType::Endpoint, FakeEndpoint::new(0x1111)).unwrap();
+        let (start2, wm2) =
+            place(region, wm1, ObjectType::Endpoint, FakeEndpoint::new(0x2222)).unwrap();
+
+        // the two committed bands are [start1, wm1) and [start2, wm2); disjoint
+        // means the first ends at or before the second begins.
+        assert!(wm1 <= start2, "second placement overlaps the first");
+        assert!(wm2 > start2, "second band is empty");
+        assert!(start1 < start2, "placements not in ascending order");
+
+        // both tags read back intact: writing the second object did not corrupt
+        // the first (which it would if the ranges overlapped).
+        let tag1 = u64::from_ne_bytes(region[start1..start1 + 8].try_into().unwrap());
+        let tag2 = u64::from_ne_bytes(region[start2..start2 + 8].try_into().unwrap());
+        assert_eq!(tag1, 0x1111, "first object was corrupted by the second placement");
+        assert_eq!(tag2, 0x2222, "second object did not land correctly");
     }
 
     #[test]

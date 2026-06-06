@@ -17,9 +17,18 @@
 //! 2. `(nw - size) % align == 0` -- the placement start is correctly aligned.
 //! 3. `nw > watermark` -- the watermark strictly advances for any non-zero
 //!    object (zero-size objects are excluded by the object model below).
+//! 4. The object occupies exactly the band `[nw - size, nw)`, which lies within
+//!    `[watermark, region_size)`; consecutive retypes therefore carve disjoint
+//!    bands (the seL4 spatial-non-overlap property: no two objects retyped from
+//!    one region ever alias the same byte).
 //!
-//! These three properties are the exact lemmas discharged by the
-//! `#[cfg(kani)]` harnesses at the bottom of this file.
+//! These properties are the exact lemmas discharged by the `#[cfg(kani)]`
+//! harnesses at the bottom of this file. Property 4 is the `MEM-1` safety
+//! keystone: `retype_commits_a_band_within_the_region` proves each object stays
+//! inside the band the watermark advances over, and
+//! `two_retypes_occupy_disjoint_bands` proves two consecutive carves do not
+//! overlap; disjointness of a whole sequence then follows from the monotonicity
+//! in property 1.
 //!
 //! # Object sizes
 //!
@@ -697,6 +706,92 @@ mod kani_proofs {
             assert!(new_watermark <= region_size);
             assert!(new_watermark >= watermark);
         }
+    }
+
+    /// A single retype commits exactly the band `[nw - size, nw)`, and that band
+    /// lies within `[watermark, region_size)`: the object starts at or after the
+    /// old watermark (`watermark <= nw - size`) and ends at or before the region
+    /// end (`nw <= region_size`).
+    ///
+    /// This is the per-object half of the seL4 spatial-safety property
+    /// (`MEM-1`): every carved object lives inside the fresh band the watermark
+    /// advances over, never reaching back below the watermark into
+    /// already-committed memory. Pairwise disjointness of a whole retype
+    /// *sequence* follows from this plus the monotonicity proved in
+    /// [`retype_fits_result_in_range`]: each object's band sits in
+    /// `[wm_i, wm_{i+1})`, and those bands are consecutive and non-overlapping
+    /// because the watermark only advances.
+    #[kani::proof]
+    fn retype_commits_a_band_within_the_region() {
+        let region_size: usize = kani::any();
+        let watermark: usize = kani::any();
+        let ty = any_object_type();
+
+        kani::assume(region_size <= MAX_REGION);
+        kani::assume(watermark <= region_size);
+
+        let (size, _align) = object_layout(ty);
+
+        if let Some(nw) = retype_fits(region_size, watermark, ty) {
+            // the object occupies [start, nw); start is where placement writes it.
+            let start = nw - size;
+            // the band starts at or after the old watermark: the object never
+            // overlaps memory committed before this call.
+            assert!(watermark <= start, "object reaches back below the watermark");
+            // and ends within the region.
+            assert!(nw <= region_size, "object band escapes the region");
+            // the band is exactly `size` bytes wide (no truncation underflow:
+            // start <= nw because size <= nw, which retype_fits guarantees).
+            assert!(nw - start == size, "committed band is not `size` bytes");
+        }
+    }
+
+    /// Two objects carved by consecutive retypes occupy disjoint byte ranges.
+    ///
+    /// The second retype uses the first's returned watermark as its starting
+    /// watermark (the way a caller threads the watermark through a sequence of
+    /// `Retype` calls). The first object occupies `[start1, nw1)` and the second
+    /// `[start2, nw2)`; this proves `nw1 <= start2`, i.e. the first object ends
+    /// at or before the second begins, so the two ranges never overlap.
+    ///
+    /// This is the spatial-disjointness keystone of the untyped-memory model
+    /// (`MEM-1`): no two objects retyped from one region alias the same byte.
+    /// Unforgeability (a `CapRef` only names a real table slot) plus this
+    /// (distinct objects occupy distinct memory) together give the seL4 memory-
+    /// safety story for the carving path.
+    #[kani::proof]
+    fn two_retypes_occupy_disjoint_bands() {
+        let region_size: usize = kani::any();
+        let watermark: usize = kani::any();
+        let ty1 = any_object_type();
+        let ty2 = any_object_type();
+
+        kani::assume(region_size <= MAX_REGION);
+        kani::assume(watermark <= region_size);
+
+        let (size1, _a1) = object_layout(ty1);
+        let (size2, _a2) = object_layout(ty2);
+
+        // first retype; if it does not fit there is nothing to prove.
+        let Some(nw1) = retype_fits(region_size, watermark, ty1) else {
+            return;
+        };
+        // the caller threads nw1 in as the next watermark. it is a valid
+        // watermark (in range) by retype_fits_result_in_range, so the second
+        // call's precondition holds.
+        let Some(nw2) = retype_fits(region_size, nw1, ty2) else {
+            return;
+        };
+
+        let start1 = nw1 - size1;
+        let start2 = nw2 - size2;
+
+        // the two committed bands are [start1, nw1) and [start2, nw2).
+        // disjointness: the first ends at or before the second starts.
+        assert!(nw1 <= start2, "the second object overlaps the first");
+        // and (sanity, follows from the above) the first band is strictly below
+        // the second: start1 < nw1 <= start2 < nw2.
+        assert!(start1 < nw2, "band ordering inverted");
     }
 
     /// `align_up(value, align)` returns a result that, when `value +

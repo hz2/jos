@@ -39,6 +39,7 @@
 //! | `Untyped { size_bits }` | `2^size_bits` | `2^size_bits` |
 //! | `PageTable` | 4096 | 4096 |
 //! | `Tcb` | 512 | 64 |
+//! | `Notification` | 64 | 64 |
 //!
 //! `CNode { size_bits }` uses byte-size semantics (`size = 2^size_bits` bytes),
 //! like `Untyped`: `size_bits` is the log2 of the byte size, not a slot count.
@@ -95,6 +96,19 @@ pub const TCB_SIZE: usize = 512;
 
 /// Alignment requirement of a `Tcb` object in bytes (one cache line).
 pub const TCB_ALIGN: usize = 64;
+
+/// Size of one `Notification` object in bytes.
+///
+/// 64 bytes: enough for the verified notification state (a badge word plus a
+/// parked flag) and the single waiter slot the async wait path stores in it,
+/// with headroom. Equal to [`NOTIFICATION_ALIGN`] (one cache line), so a placed
+/// notification occupies exactly one line and never falsely shares with a
+/// neighbour.
+pub const NOTIFICATION_SIZE: usize = 64;
+
+/// Alignment requirement of a `Notification` object in bytes (one cache line),
+/// so concurrent signalling of distinct notifications does not falsely share.
+pub const NOTIFICATION_ALIGN: usize = 64;
 
 /// Size and alignment of the kernel's `CNode` (capability-node) object in
 /// bytes.
@@ -169,6 +183,13 @@ pub enum ObjectType {
     /// Fixed size: [`TCB_SIZE`] bytes, [`TCB_ALIGN`]-byte aligned. Holds a
     /// saved register context plus the thread's `CSpace`/`VSpace` roots.
     Tcb,
+
+    /// An asynchronous notification (a coalescing signal word).
+    ///
+    /// Fixed size: [`NOTIFICATION_SIZE`] bytes, [`NOTIFICATION_ALIGN`]-byte
+    /// aligned. The async counterpart to an [`Endpoint`](ObjectType::Endpoint):
+    /// holds the verified notification state plus the parked waiter's waker.
+    Notification,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +235,7 @@ pub const fn object_layout(ty: ObjectType) -> (usize, usize) {
         }
         ObjectType::PageTable => (PAGE_TABLE_SIZE, PAGE_TABLE_SIZE),
         ObjectType::Tcb => (TCB_SIZE, TCB_ALIGN),
+        ObjectType::Notification => (NOTIFICATION_SIZE, NOTIFICATION_ALIGN),
     }
 }
 
@@ -631,12 +653,13 @@ mod kani_proofs {
         let size_bits: u8 = kani::any();
         // keep size_bits small: 2^12 = 4096 bytes max, well inside MAX_REGION.
         kani::assume(size_bits <= 12);
-        match tag % 5 {
+        match tag % 6 {
             0 => ObjectType::Endpoint,
             1 => ObjectType::CNode { size_bits },
             2 => ObjectType::Untyped { size_bits },
             3 => ObjectType::PageTable,
-            _ => ObjectType::Tcb,
+            4 => ObjectType::Tcb,
+            _ => ObjectType::Notification,
         }
     }
 

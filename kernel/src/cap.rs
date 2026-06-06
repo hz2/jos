@@ -27,10 +27,14 @@ use jos_core::cap_table::CapRef;
 // (`endpoint::Endpoint` etc.) so it does not collide with this module's own
 // `Endpoint` object type or its `SendOutcome` / `RecvOutcome` adapter enums.
 use jos_core::endpoint;
+// the verified async notification state machine, referenced by module path
+// (`notification::Notification`) so it does not collide with this module's own
+// `Notification` kernel object type.
+use jos_core::notification;
 use jos_core::placement::{place, PlaceError};
 use jos_core::untyped::{
-    ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, PAGE_TABLE_SIZE,
-    TCB_ALIGN, TCB_SIZE,
+    ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, NOTIFICATION_ALIGN,
+    NOTIFICATION_SIZE, PAGE_TABLE_SIZE, TCB_ALIGN, TCB_SIZE,
 };
 use spin::Mutex;
 
@@ -61,6 +65,8 @@ pub enum ObjectKind {
     /// handle's address is the address of the [`UntypedRegion`] struct itself
     /// (kernel memory), not the bytes it manages.
     Untyped,
+    /// An asynchronous notification (a coalescing signal word).
+    Notification,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -104,6 +110,26 @@ impl ObjectId {
         // placement-written; it is live for the kernel's lifetime (the static
         // untyped region is never freed). Per this function's contract the
         // caller guarantees no aliasing live &mut, and the kind is Endpoint.
+        unsafe { &*ptr }
+    }
+
+    /// Returns a shared reference to the [`Notification`] this handle names.
+    ///
+    /// # Safety
+    ///
+    /// As [`as_endpoint`](Self::as_endpoint): the caller must ensure (1)
+    /// `self.kind == ObjectKind::Notification`, (2) the owning untyped region is
+    /// still live, and (3) a single-CPU, interrupts-disabled context so no
+    /// concurrent access races this one. The notification's interior mutability
+    /// (its embedded `Mutex`) makes a shared reference sufficient.
+    unsafe fn as_notification(self) -> &'static Notification {
+        debug_assert_eq!(self.kind, ObjectKind::Notification);
+        let ptr = core::ptr::with_exposed_provenance::<Notification>(self.addr);
+        // SAFETY: the address was captured in retype (kind Notification) from a
+        // pointer derived from the region base where a Notification was placed;
+        // it is live for the kernel's lifetime (static untyped region). Per this
+        // function's contract the caller guarantees no aliasing live &mut and the
+        // kind is Notification.
         unsafe { &*ptr }
     }
 
@@ -285,6 +311,67 @@ impl Default for Endpoint {
 // time: placement relies on these matching.
 const _: () = assert!(core::mem::size_of::<Endpoint>() == ENDPOINT_SIZE);
 const _: () = assert!(core::mem::align_of::<Endpoint>() == ENDPOINT_ALIGN);
+
+// --------------------------------------------------------------------------
+// Notification object
+// --------------------------------------------------------------------------
+
+/// The mutable state of an asynchronous notification, behind its lock.
+///
+/// The asynchronous counterpart to [`EndpointInner`]: where an endpoint blocks
+/// both peers until they rendezvous, a notification's signaller never blocks.
+/// The verified [`notification::Notification`] state machine owns the coalescing
+/// badge and the parked flag; this struct adds only the parked waiter's
+/// [`Waker`], kept `Some` exactly when the model reports a waiter parked, so the
+/// model decides delivery and this struct decides whom to wake.
+#[derive(Debug)]
+pub struct NotificationInner {
+    /// The verified notification state: the pending badge and the parked flag.
+    state: notification::Notification,
+    /// Waker of a waiter parked because nothing was pending. `Some` exactly when
+    /// `state.waiter_parked()`. Woken when a signal arrives.
+    waiter: Option<Waker>,
+}
+
+/// An asynchronous notification object, sized and aligned to match
+/// [`ObjectType::Notification`] so it can be placed in untyped memory.
+///
+/// Like [`Endpoint`], the mutable state lives behind a `Mutex` so a shared
+/// `&Notification` is enough to operate on it (signalling from any context, and
+/// the async wait path). On single-CPU jos the lock is uncontended.
+#[repr(C, align(64))]
+pub struct Notification {
+    inner: Mutex<NotificationInner>,
+    // pad out to the full NOTIFICATION_SIZE so the type's layout matches the
+    // untyped object size exactly (asserted below).
+    _pad: [u8; Notification::PAD],
+}
+
+impl Notification {
+    // bytes of padding so size_of::<Notification>() == NOTIFICATION_SIZE.
+    const PAD: usize = NOTIFICATION_SIZE - core::mem::size_of::<Mutex<NotificationInner>>();
+
+    /// Creates a fresh idle notification.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: Mutex::new(NotificationInner {
+                state: notification::Notification::new(),
+                waiter: None,
+            }),
+            _pad: [0; Self::PAD],
+        }
+    }
+}
+
+impl Default for Notification {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<Notification>() == NOTIFICATION_SIZE);
+const _: () = assert!(core::mem::align_of::<Notification>() == NOTIFICATION_ALIGN);
 
 // --------------------------------------------------------------------------
 // PageTable object
@@ -585,6 +672,7 @@ impl UntypedRegion {
         }
         let carved = match ty {
             ObjectType::Endpoint => self.retype_endpoint(),
+            ObjectType::Notification => self.retype_notification(),
             ObjectType::PageTable => self.retype_page_table(),
             ObjectType::Tcb => self.retype_tcb(),
             ObjectType::CNode { size_bits } if size_bits == KERNEL_CNODE_SIZE_BITS => {
@@ -606,6 +694,16 @@ impl UntypedRegion {
     /// region has no room for another endpoint.
     pub fn retype_endpoint(&mut self) -> Option<ObjectId> {
         self.retype(ObjectType::Endpoint, Endpoint::new(), ObjectKind::Endpoint)
+    }
+
+    /// Carves a fresh idle [`Notification`] out of this region and returns its
+    /// handle. Returns `None` if the region has no room for another one.
+    pub fn retype_notification(&mut self) -> Option<ObjectId> {
+        self.retype(
+            ObjectType::Notification,
+            Notification::new(),
+            ObjectKind::Notification,
+        )
     }
 
     /// Carves a fresh zeroed [`PageTable`] out of this region and returns its
@@ -958,6 +1056,145 @@ pub fn recv(space: &KernelCapSpace, cap_ref: CapRef) -> CapRecv<'_> {
 }
 
 // --------------------------------------------------------------------------
+// Notification operations
+// --------------------------------------------------------------------------
+//
+// the async counterpart to endpoint IPC: a signaller never blocks (it ORs its
+// badge into the notification and returns, waking any parked waiter), and a
+// waiter parks only when nothing is pending. like the endpoint path, each poll
+// does the collect-or-park under a SINGLE notification lock (no lost-wakeup
+// window), the rights/liveness check runs on every poll (so a revoke under a
+// blocked waiter cancels it), and the waker is fired after the lock is released.
+
+/// The badge bits a notification carries; the kernel re-export of the verified
+/// [`notification::Badge`].
+pub use jos_core::notification::Badge;
+
+// resolves a capability ref to the notification it names, enforcing that it is
+// live, carries `required`, and is actually a notification. the notification
+// mirror of resolve_endpoint.
+fn resolve_notification(
+    space: &KernelCapSpace,
+    cap_ref: CapRef,
+    required: Rights,
+) -> Result<&'static Notification, IpcError> {
+    let cap = space.lookup(cap_ref).ok_or(IpcError::InvalidCap)?;
+    if !space.check(cap_ref, required) {
+        return Err(IpcError::InsufficientRights);
+    }
+    if cap.object.kind() != ObjectKind::Notification {
+        return Err(IpcError::NotAnEndpoint);
+    }
+    // SAFETY: the capability is live (lookup succeeded) and names a notification
+    // (checked above); single-CPU, interrupts-disabled context, so no aliasing
+    // live &mut exists. the object outlives the kernel (static untyped region).
+    Ok(unsafe { cap.object.as_notification() })
+}
+
+impl NotificationInner {
+    // signal the notification, delegating to the verified state machine. returns
+    // the waiter waker to fire (if the signal released a parked waiter) so the
+    // caller can wake it after the lock drops, keeping the wake off the locked
+    // path as the endpoint primitives do.
+    fn signal(&mut self, badge: Badge) -> Option<Waker> {
+        let outcome = self.state.signal(badge);
+        // the model cleared its parked flag iff it released a waiter; keep our
+        // waker slot in lockstep by taking it exactly then.
+        if outcome.woke_waiter {
+            self.waiter.take()
+        } else {
+            None
+        }
+    }
+
+    // try to collect the pending badge without blocking, delegating to the model.
+    fn try_collect(&mut self) -> notification::PollOutcome {
+        self.state.poll()
+    }
+
+    // park the current task as the waiter, storing its waker. mirrors the model's
+    // self-guarding park: the waker is kept iff the model records the waiter as
+    // parked (nothing pending), so waiter.is_some() stays equal to
+    // state.waiter_parked().
+    fn park(&mut self, waker: Waker) {
+        if self.state.park() {
+            self.waiter = Some(waker);
+        }
+    }
+
+    // clear the parked waiter (on revoke), returning its waker to fire.
+    fn clear_parked(&mut self) -> Option<Waker> {
+        if self.state.clear_parked() {
+            self.waiter.take()
+        } else {
+            None
+        }
+    }
+}
+
+/// Signals the notification named by `cap_ref` with `badge`, without blocking.
+///
+/// Requires the capability to carry [`Rights::WRITE`]. The badge is coalesced
+/// (OR-ed) into the notification's pending set, and any waiter blocked on it is
+/// woken. Always succeeds for a live, sufficiently-righted capability (a
+/// notification never blocks a signaller, the defining difference from
+/// [`cap_send`]).
+///
+/// # Errors
+///
+/// See [`IpcError`] (invalid cap, insufficient rights, or not a notification).
+pub fn cap_signal(space: &KernelCapSpace, cap_ref: CapRef, badge: Badge) -> Result<(), IpcError> {
+    let notification = resolve_notification(space, cap_ref, Rights::WRITE)?;
+    let to_wake = notification.inner.lock().signal(badge);
+    if let Some(waker) = to_wake {
+        waker.wake();
+    }
+    Ok(())
+}
+
+/// Future that waits for a notification, collecting (and clearing) its badge.
+/// Parks while nothing is pending. Created by [`wait`].
+#[must_use = "futures do nothing unless awaited"]
+pub struct CapWait<'a> {
+    space: &'a KernelCapSpace,
+    cap_ref: CapRef,
+}
+
+impl Future for CapWait<'_> {
+    type Output = Result<Badge, IpcError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        let notification = match resolve_notification(self.space, self.cap_ref, Rights::READ) {
+            Ok(n) => n,
+            // bad cap / insufficient rights / wrong object: terminal, even if a
+            // prior poll parked us. covers revocation while blocked.
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        // collect-or-park under one lock, so no signal can slip in between the
+        // poll and the park (no lost wakeup).
+        let mut inner = notification.inner.lock();
+        match inner.try_collect() {
+            notification::PollOutcome::Collected(badge) => Poll::Ready(Ok(badge)),
+            notification::PollOutcome::Empty => {
+                inner.park(context.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Waits on the notification named by `cap_ref`, awaiting a signal.
+///
+/// Requires [`Rights::READ`]. Resolves to the coalesced [`Badge`] once any
+/// signal is pending (collecting and clearing it); parks until then. Terminal
+/// errors (invalid cap, insufficient rights, not a notification) resolve the
+/// future immediately, so revoking the capability under a parked waiter cancels
+/// the wait with [`IpcError::InvalidCap`] on its next poll.
+pub fn wait(space: &KernelCapSpace, cap_ref: CapRef) -> CapWait<'_> {
+    CapWait { space, cap_ref }
+}
+
+// --------------------------------------------------------------------------
 // Revocation that cancels blocked IPC
 // --------------------------------------------------------------------------
 
@@ -980,14 +1217,16 @@ pub fn recv(space: &KernelCapSpace, cap_ref: CapRef) -> CapRecv<'_> {
 /// the marked set is collected (via `for_each_in_subtree`) before `revoke`
 /// clears the slots, the endpoint objects are still reachable to wake.
 pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
-    // mark phase: collect the endpoint objects in the revoke subtree while the
-    // parent links are still intact. fixed-size scratch sized to the space (no
-    // heap); CSPACE_SLOTS bounds the subtree.
-    let mut endpoints: [Option<ObjectId>; CSPACE_SLOTS] = [None; CSPACE_SLOTS];
+    // mark phase: collect the endpoint and notification objects in the revoke
+    // subtree while the parent links are still intact. both own a parked waiter
+    // that must be woken so a blocked future observes the cancellation. fixed-
+    // size scratch sized to the space (no heap); CSPACE_SLOTS bounds the subtree.
+    let mut blockers: [Option<ObjectId>; CSPACE_SLOTS] = [None; CSPACE_SLOTS];
     let mut count = 0;
     space.for_each_in_subtree(cap_ref, |_r, cap| {
-        if cap.object.kind() == ObjectKind::Endpoint && count < CSPACE_SLOTS {
-            endpoints[count] = Some(cap.object);
+        let kind = cap.object.kind();
+        if matches!(kind, ObjectKind::Endpoint | ObjectKind::Notification) && count < CSPACE_SLOTS {
+            blockers[count] = Some(cap.object);
             count += 1;
         }
     });
@@ -996,26 +1235,42 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
     // outstanding ref (including one a blocked future holds) is now stale.
     let removed = space.revoke(cap_ref);
 
-    // wake phase: take and fire each parked waiter, AFTER releasing the endpoint
+    // wake phase: take and fire each parked waiter, AFTER releasing the object
     // lock (the wake transport is lock-free, but keep the wake off the locked
     // path as the cap_send/cap_recv primitives do). a woken future re-polls,
     // sees the stale cap, and returns InvalidCap.
-    for obj in endpoints.into_iter().take(count).flatten() {
-        // SAFETY: obj.kind == Endpoint (checked in the mark phase), the object
-        // outlives the kernel (static untyped region), single-CPU interrupts-
-        // disabled context so no aliasing live &mut exists.
-        let endpoint = unsafe { obj.as_endpoint() };
-        let (send_waiter, recv_waiter) = {
-            let mut inner = endpoint.inner.lock();
-            // clear_parked clears the model's parked flags and hands back the
-            // matching wakers, keeping the model's invariant intact on revoke.
-            inner.clear_parked()
-        };
-        if let Some(waker) = send_waiter {
-            waker.wake();
-        }
-        if let Some(waker) = recv_waiter {
-            waker.wake();
+    for obj in blockers.into_iter().take(count).flatten() {
+        match obj.kind() {
+            ObjectKind::Endpoint => {
+                // SAFETY: obj.kind == Endpoint (checked in the mark phase), the
+                // object outlives the kernel (static untyped region), single-CPU
+                // interrupts-disabled context so no aliasing live &mut exists.
+                let endpoint = unsafe { obj.as_endpoint() };
+                let (send_waiter, recv_waiter) = {
+                    let mut inner = endpoint.inner.lock();
+                    // clear_parked clears the model's parked flags and hands back
+                    // the matching wakers, keeping the invariant intact on revoke.
+                    inner.clear_parked()
+                };
+                if let Some(waker) = send_waiter {
+                    waker.wake();
+                }
+                if let Some(waker) = recv_waiter {
+                    waker.wake();
+                }
+            }
+            ObjectKind::Notification => {
+                // SAFETY: obj.kind == Notification (checked in the mark phase),
+                // the object outlives the kernel, single-CPU interrupts-disabled
+                // context so no aliasing live &mut exists.
+                let notification = unsafe { obj.as_notification() };
+                let waiter = notification.inner.lock().clear_parked();
+                if let Some(waker) = waiter {
+                    waker.wake();
+                }
+            }
+            // only Endpoint / Notification are collected in the mark phase.
+            _ => {}
         }
     }
 

@@ -17,7 +17,14 @@
 //! - Authority is the capability: an operation is permitted only if the holder
 //!   has a live `CapRef` whose `Capability` carries the required `Rights`.
 //! - Attenuation is monotone: [`mint`](CapSpace::mint) can only reduce rights
-//!   (it intersects via [`Rights::attenuate`]), never grant new ones.
+//!   (it intersects via [`Rights::attenuate`]), never grant new ones. This holds
+//!   transitively: along a derivation chain of any depth, no descendant holds a
+//!   right its root ancestor lacked, so delegation can never manufacture
+//!   authority (the global no-amplification property, the seL4 integrity story).
+//!   The `mint_chain_never_amplifies` and `derived_authority_bounded_by_root`
+//!   Kani harnesses discharge this over the real `mint`/`check` path; it rests on
+//!   the single-link `mint_never_escalates` plus `contains` transitivity (both
+//!   proved here and in [`crate::cap_rights`]).
 //! - Unforgeability is a language property: `CapRef` fields are private, so a
 //!   ref can only come from inserting into a real table. No "fake" capability
 //!   can be constructed in safe code.
@@ -452,5 +459,63 @@ mod kani_proofs {
         space.remove(r);
         let required = Rights::from_bits_truncate(kani::any());
         assert!(!space.check(r, required));
+    }
+
+    // the global no-amplification property, the headline security guarantee:
+    // along a derivation CHAIN of arbitrary masks, no descendant holds a right
+    // its root ancestor lacked. mint_never_escalates proves one link; this
+    // proves the transitive closure over a three-deep chain (root -> child ->
+    // grandchild), which by induction stands for any depth (each mint only
+    // attenuates, and contains is transitive, proved in cap_rights). a 4-slot
+    // space holds the whole chain; any mint may legitimately fail with
+    // SpaceFull, so each link is guarded rather than unwrapped.
+    #[kani::proof]
+    fn mint_chain_never_amplifies() {
+        let mut space: CapSpace<u32, 4> = CapSpace::new();
+        let root_rights = Rights::from_bits_truncate(kani::any());
+        let mask1 = Rights::from_bits_truncate(kani::any());
+        let mask2 = Rights::from_bits_truncate(kani::any());
+
+        let root = space.insert(kani::any(), root_rights).unwrap();
+        if let Ok(child) = space.mint(root, mask1) {
+            // the child never exceeds the root (the single-link property).
+            let child_rights = space.lookup(child).unwrap().rights;
+            assert!(root_rights.contains(child_rights));
+
+            if let Ok(grandchild) = space.mint(child, mask2) {
+                // the transitive guarantee: two derivations deep, the grandchild
+                // still holds no right the root lacked. this is what "authority
+                // only ever decreases along the derivation tree" means.
+                let grandchild_rights = space.lookup(grandchild).unwrap().rights;
+                assert!(child_rights.contains(grandchild_rights));
+                assert!(root_rights.contains(grandchild_rights));
+            }
+        }
+    }
+
+    // the operational form of no-amplification: if any descendant in a mint
+    // chain passes check(required) (i.e. is permitted to perform an operation),
+    // then the root ancestor also holds `required`. so a derived capability can
+    // never authorize an operation the original could not: delegation cannot
+    // manufacture authority. this is the property a confused-deputy attack would
+    // have to violate.
+    #[kani::proof]
+    fn derived_authority_bounded_by_root() {
+        let mut space: CapSpace<u32, 4> = CapSpace::new();
+        let root_rights = Rights::from_bits_truncate(kani::any());
+        let mask1 = Rights::from_bits_truncate(kani::any());
+        let mask2 = Rights::from_bits_truncate(kani::any());
+        let required = Rights::from_bits_truncate(kani::any());
+
+        let root = space.insert(kani::any(), root_rights).unwrap();
+        if let Ok(child) = space.mint(root, mask1) {
+            if let Ok(grandchild) = space.mint(child, mask2) {
+                // if the grandchild is allowed to do something requiring
+                // `required`, the root must have been allowed it too.
+                if space.check(grandchild, required) {
+                    assert!(space.check(root, required));
+                }
+            }
+        }
     }
 }

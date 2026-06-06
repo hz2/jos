@@ -433,4 +433,21 @@ mod kani_proofs {
         let b = any_rights();
         assert_eq!(a.attenuate(b), b.attenuate(a));
     }
+
+    /// Containment is transitive: if `a` contains `b` and `b` contains `c`, then
+    /// `a` contains `c`. This is the foundational lemma behind the global
+    /// no-amplification property: along a capability derivation chain each link
+    /// is a subset of its parent (`attenuation_is_monotone`), so by transitivity
+    /// the deepest descendant is a subset of the root. The chain form is proved
+    /// over the real `CapSpace::mint` in `cap_space::kani_proofs`; this discharges
+    /// the underlying set-theoretic step on the rights lattice itself.
+    #[kani::proof]
+    fn contains_is_transitive() {
+        let a = any_rights();
+        let b = any_rights();
+        let c = any_rights();
+        if a.contains(b) && b.contains(c) {
+            assert!(a.contains(c));
+        }
+    }
 }

@@ -102,6 +102,26 @@ pub fn selectors() -> Selectors {
     unsafe { (*core::ptr::addr_of!(SELECTORS)).expect("init_gdt must run before selectors()") }
 }
 
+/// Updates `rsp0` in the TSS to `rsp`, the kernel stack the CPU will switch to
+/// on the next ring-3 interrupt.
+///
+/// The CPU reads `privilege_stack_table[0]` from memory on each ring-3 -> ring-0
+/// transition, so writing it here takes effect at the next such transition.
+/// Call from [`crate::cpu_local::switch_to`] on every context switch so each
+/// thread gets its own interrupt-entry stack.
+///
+/// # Safety
+///
+/// Must be called from ring 0 with interrupts disabled. [`init_gdt`] must have
+/// run first (so the TSS is loaded and the CPU knows its address).
+pub unsafe fn set_rsp0(rsp: VirtAddr) {
+    // SAFETY: single-CPU, interrupts disabled (caller's contract). TSS is a
+    // 'static loaded via ltr in init_gdt; no other reference is live.
+    unsafe {
+        (*core::ptr::addr_of_mut!(TSS)).privilege_stack_table[0] = rsp;
+    }
+}
+
 /// Installs the GDT and TSS and loads the task register, making the
 /// double-fault IST stack and the ring-0 privilege stack available. Call once
 /// during early kernel init, before the IDT registers the double-fault handler.

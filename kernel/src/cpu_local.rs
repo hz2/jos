@@ -117,5 +117,14 @@ pub unsafe fn switch_to(tcb: *mut Tcb) {
         local.kernel_rsp = tcb_ref.kernel_stack_top;
         local.current_cspace = tcb_ref.cspace_ptr;
         local.current_tcb = tcb;
+        // keep TSS rsp0 in sync so ring-3 interrupts also land on this thread's
+        // kernel stack, not the shared boot-time PRIVILEGE_STACK. the CPU reads
+        // privilege_stack_table[0] from memory on every ring-3 -> ring-0
+        // transition, so this takes effect at the next such transition.
+        if tcb_ref.kernel_stack_top != 0 {
+            // SAFETY: ring 0, interrupts disabled (this fn's contract); init_gdt
+            // has run (required before any switch_to call).
+            crate::gdt::set_rsp0(x86_64::VirtAddr::new(tcb_ref.kernel_stack_top));
+        }
     }
 }

@@ -26,11 +26,11 @@
 //!
 //! Every ring-3 -> ring-0 transition must `swapgs` exactly once on entry and
 //! once on exit; an unpaired `swapgs` permanently corrupts `GS` until the next
-//! one. Today only the `syscall` path needs it (interrupts are masked while in
-//! ring 3 during the deterministic bring-up). When ring 3 becomes
-//! interruptible, every IDT entry reachable from ring 3 must gain a
-//! conditional `swapgs` (gated on the saved `CS` `RPL`); that is deferred with
-//! preemption. See `interrupts.rs`.
+//! one. The `syscall` path swaps unconditionally (only reachable from ring 3).
+//! IDT handlers swap conditionally: they check the saved `CS` `RPL` field and
+//! swap only when `RPL == 3`. Today ring 3 runs with `IF=0` so IDT handlers are
+//! ring-0-only in practice, but the conditional `swapgs` is already wired. See
+//! `interrupts.rs`.
 
 use crate::cap::{KernelCapSpace, Tcb};
 

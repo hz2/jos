@@ -9,6 +9,26 @@
 //! needs no ACPI/MADT parsing, and single-core does not need the APIC yet. The
 //! APIC is a later upgrade (alongside SMP).
 //!
+//! # `swapgs` discipline for IDT handlers
+//!
+//! Every handler that can fire from ring 3 must pair `swapgs` exactly once on
+//! entry (to activate the kernel's per-CPU `GS` block) and once on exit (to
+//! restore the user's `GS` before `iretq`). Because the same handler fires from
+//! both ring 0 and ring 3, the swap is conditional: check the `RPL` field of the
+//! saved `CS` on the interrupt frame. `CS & 3 == 3` → came from ring 3 → swap.
+//! `CS & 3 == 0` → already in ring 0 → do nothing.
+//!
+//! The `extern "x86-interrupt"` prologue saves registers with plain `push`
+//! instructions and never accesses `gs:`-relative memory, so it is safe to read
+//! `stack_frame.code_segment` (a normal stack load) before the first `swapgs`.
+//!
+//! The double-fault handler is excluded: it uses an IST stack and is always
+//! invoked from ring 0 (the CPU switches to the IST stack before calling it), so
+//! its `GS` is already the kernel's.
+//!
+//! Today ring 3 runs with `IF=0`, so these handlers are ring-0-only in practice.
+//! The conditional `swapgs` is correct now and ready for when `IF` is enabled.
+//!
 //! The IDT is also the future syscall/IPC trap path of the capability kernel.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -105,14 +125,39 @@ pub fn init_pics() {
     }
 }
 
+/// Swaps GS if and only if the interrupt came from ring 3.
+///
+/// Read the saved CS from the interrupt frame before calling: `CS & 3 == 3`
+/// means ring 3. Call once at handler entry before any `gs:`-relative access,
+/// and again at exit before the implicit `iretq` (to restore the user `GS`).
+///
+/// # Safety
+///
+/// Must be called at the very start of the handler body (before any GS access)
+/// and at the very end (after all GS accesses, before `iretq`). Interrupts are
+/// disabled on IRQ entry by the CPU, so no re-entrant interrupt can race with
+/// this swap.
+#[inline(always)]
+unsafe fn conditional_swapgs(cs: u64) {
+    if cs & 3 == 3 {
+        // SAFETY: ensured by caller (see module doc).
+        unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)); }
+    }
+}
+
 // breakpoint (#BP) is a trap: the cpu resumes at the instruction after int3
 // once the handler returns, so we just log and continue. the x86-interrupt abi
 // makes the compiler emit the correct prologue/epilogue (it preserves all
 // registers and uses iretq), so the handler is an ordinary safe fn.
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+    let cs = stack_frame.code_segment;
+    // SAFETY: entry swap; no GS access before this point.
+    unsafe { conditional_swapgs(cs); }
     // pass stack_frame as an explicit arg: serial_println! expands through
     // concat!, which blocks inline {var} capture in the format string.
     serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+    // SAFETY: exit swap; restores user GS before the implicit iretq.
+    unsafe { conditional_swapgs(cs); }
 }
 
 // double fault (#DF) fires when handling one exception triggers another (the
@@ -135,18 +180,26 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
+    let cs = stack_frame.code_segment;
+    // SAFETY: entry swap; no GS access before this point.
+    unsafe { conditional_swapgs(cs); }
     let addr = x86_64::registers::control::Cr2::read();
     serial_println!("EXCEPTION: PAGE FAULT");
     serial_println!("  accessed address: {:?}", addr);
     serial_println!("  error code: {:?}", error_code);
     serial_println!("{:#?}", stack_frame);
+    // hlt_loop does not return; no exit swap needed (GS state is irrelevant
+    // once the kernel halts).
     crate::hlt_loop();
 }
 
 // timer (IRQ0, vector 32). the PIT fires continuously (~18.2 Hz) once the PIC
 // is initialized. we bump the tick counter and MUST send EOI, or the PIC will
 // never deliver another timer interrupt.
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
+    let cs = stack_frame.code_segment;
+    // SAFETY: entry swap; no GS access before this point.
+    unsafe { conditional_swapgs(cs); }
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     // fire any timers that have come due (by the TSC clock), waking their tasks.
     // bounded, heap-free work; the executor's wake transport is lock-free, so it
@@ -159,6 +212,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+    // SAFETY: exit swap; restores user GS before the implicit iretq.
+    unsafe { conditional_swapgs(cs); }
 }
 
 // keyboard (IRQ1, vector 33). the handler does the minimum bounded work:
@@ -168,8 +223,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 // ScancodeStream pattern), not in interrupt context. the handler runs with
 // interrupts disabled (the cpu clears IF on entry), so add_scancode's queue push
 // is uncontended here.
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
+
+    let cs = stack_frame.code_segment;
+    // SAFETY: entry swap; no GS access before this point.
+    unsafe { conditional_swapgs(cs); }
 
     // always drain the PS/2 data register (port 0x60), or the controller will
     // not raise further keyboard interrupts.
@@ -186,6 +245,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
     }
+    // SAFETY: exit swap; restores user GS before the implicit iretq.
+    unsafe { conditional_swapgs(cs); }
 }
 
 #[cfg(test)]

@@ -27,6 +27,7 @@ use core::task::Waker;
 use jos_core::clock::{Instant, KernelClock};
 use jos_core::timer::{TimerId, TimerQueue};
 use spin::Mutex;
+use x86_64::instructions::interrupts;
 
 use crate::executor::MAX_TASKS;
 
@@ -61,9 +62,15 @@ impl KernelClock for TscClock {
 /// The kernel's global wall of pending timers, sized to one per task slot.
 ///
 /// Behind a `Mutex` because both task context (arming a timer) and the timer
-/// IRQ handler (draining due ones) touch it. The handler runs with interrupts
-/// disabled, and arming is brief, so the lock is held only momentarily; a task
-/// must not hold it across an `.await`.
+/// IRQ handler (draining due ones) touch it. CRITICAL: this lock is shared with
+/// an interrupt handler, so every TASK-context acquisition must hold it with
+/// interrupts disabled (`interrupts::without_interrupts`), exactly as
+/// `serial::_print` does for `SERIAL1`. Otherwise a timer IRQ firing while a
+/// task holds the lock would spin-deadlock (`spin::Mutex` is not reentrant, and
+/// on single-core the held lock never releases). The IRQ handler itself runs
+/// with interrupts already disabled, so its acquisition needs no extra guard;
+/// `without_interrupts` saves/restores the flag, so wrapping it there too is a
+/// correct no-op. A task must not hold this across an `.await`.
 static TIMERS: Mutex<TimerQueue<MAX_TASKS>> = Mutex::new(TimerQueue::new());
 
 /// Arms a timer for `deadline` carrying `data`, returning its [`TimerId`], or
@@ -73,7 +80,8 @@ static TIMERS: Mutex<TimerQueue<MAX_TASKS>> = Mutex::new(TimerQueue::new());
 /// or token it can correlate when the timer fires. The caller pairs the id with
 /// whatever it must cancel if its other wakeup (a delivered message) wins first.
 pub fn arm(deadline: Instant, data: u64) -> Option<TimerId> {
-    TIMERS.lock().arm(deadline, data)
+    // interrupts off while holding the IRQ-shared lock (see TIMERS doc).
+    interrupts::without_interrupts(|| TIMERS.lock().arm(deadline, data))
 }
 
 /// Cancels the timer with id `id`, returning `true` if one was removed.
@@ -81,7 +89,7 @@ pub fn arm(deadline: Instant, data: u64) -> Option<TimerId> {
 /// Called when a timeout's other outcome wins (a message arrived before the
 /// deadline), so the timer does not later fire a stale wakeup.
 pub fn cancel(id: TimerId) -> bool {
-    TIMERS.lock().cancel(id)
+    interrupts::without_interrupts(|| TIMERS.lock().cancel(id))
 }
 
 /// Returns the current time from the TSC.
@@ -103,7 +111,10 @@ pub fn drain_due(mut on_fire: impl FnMut(TimerId)) -> usize {
     // the IRQ path); at most MAX_TASKS timers can be due at once.
     let mut fired: [TimerId; MAX_TASKS] = [TimerId(0); MAX_TASKS];
     let mut count = 0;
-    {
+    // interrupts off while holding the IRQ-shared lock (see TIMERS doc). when
+    // called FROM the timer IRQ, interrupts are already disabled, so this is a
+    // no-op; when called from task context it is the necessary guard.
+    interrupts::without_interrupts(|| {
         let mut timers = TIMERS.lock();
         while let Some(timer) = timers.expire_next(now) {
             fired[count] = timer.id;
@@ -114,7 +125,7 @@ pub fn drain_due(mut on_fire: impl FnMut(TimerId)) -> usize {
                 break;
             }
         }
-    }
+    });
     // fire callbacks after dropping the lock.
     for &id in fired.iter().take(count) {
         on_fire(id);
@@ -149,33 +160,42 @@ static TIMER_WAKERS: Mutex<[Option<TimerWaker>; MAX_TASKS]> =
 /// MAX_TASKS sizing makes unreachable in practice). A prior registration for the
 /// same id is replaced, so re-arming on a later poll updates the waker.
 pub fn register_timer_waker(id: TimerId, waker: Waker) -> bool {
-    let mut registry = TIMER_WAKERS.lock();
-    // replace an existing entry for this id (a re-poll re-registers).
-    for entry in registry.iter_mut() {
-        if matches!(entry, Some(e) if e.id == id) {
-            *entry = Some(TimerWaker { id, waker });
-            return true;
+    // interrupts off while holding the IRQ-shared registry lock (see TIMERS doc):
+    // take_timer_waker is also called from on_timer_tick in interrupt context.
+    interrupts::without_interrupts(|| {
+        let mut registry = TIMER_WAKERS.lock();
+        // replace an existing entry for this id (a re-poll re-registers).
+        for entry in registry.iter_mut() {
+            if matches!(entry, Some(e) if e.id == id) {
+                *entry = Some(TimerWaker { id, waker });
+                return true;
+            }
         }
-    }
-    // otherwise take the first free slot.
-    for entry in registry.iter_mut() {
-        if entry.is_none() {
-            *entry = Some(TimerWaker { id, waker });
-            return true;
+        // otherwise take the first free slot.
+        for entry in registry.iter_mut() {
+            if entry.is_none() {
+                *entry = Some(TimerWaker { id, waker });
+                return true;
+            }
         }
-    }
-    false
+        false
+    })
 }
 
 /// Removes and returns the waker registered for timer `id`, if any.
 pub fn take_timer_waker(id: TimerId) -> Option<Waker> {
-    let mut registry = TIMER_WAKERS.lock();
-    for entry in registry.iter_mut() {
-        if matches!(entry, Some(e) if e.id == id) {
-            return entry.take().map(|e| e.waker);
+    // interrupts off while holding the IRQ-shared registry lock (see TIMERS doc).
+    // a no-op when called from on_timer_tick (interrupts already disabled), the
+    // necessary guard when called from task context (forget_timer_waker).
+    interrupts::without_interrupts(|| {
+        let mut registry = TIMER_WAKERS.lock();
+        for entry in registry.iter_mut() {
+            if matches!(entry, Some(e) if e.id == id) {
+                return entry.take().map(|e| e.waker);
+            }
         }
-    }
-    None
+        None
+    })
 }
 
 /// Discards any registered waker for timer `id` (without firing it).

@@ -218,6 +218,31 @@ impl Endpoint {
         self.receiver_parked = false;
         (had_sender, had_receiver)
     }
+
+    /// Clears just the parked receiver, returning whether one was parked.
+    ///
+    /// This is the mechanism a receive-with-timeout uses to abandon its blocked
+    /// `recv` when the deadline passes: it clears only the receiver, leaving the
+    /// slot and any parked sender untouched. Like [`clear_parked`](Self::clear_parked)
+    /// it only ever clears, so it cannot make both peers parked and preserves
+    /// every state invariant (a timed-out receiver consumed no message; the slot
+    /// is unchanged).
+    pub fn cancel_receiver(&mut self) -> bool {
+        let had_receiver = self.receiver_parked;
+        self.receiver_parked = false;
+        had_receiver
+    }
+
+    /// Clears just the parked sender, returning whether one was parked.
+    ///
+    /// The mirror of [`cancel_receiver`](Self::cancel_receiver), for a
+    /// send-with-timeout. Clears only the sender, leaving the slot and any parked
+    /// receiver untouched, so it preserves every state invariant.
+    pub fn cancel_sender(&mut self) -> bool {
+        let had_sender = self.sender_parked;
+        self.sender_parked = false;
+        had_sender
+    }
 }
 
 impl Default for Endpoint {
@@ -337,6 +362,39 @@ mod tests {
         // a loaded slot would satisfy a receive, so parking a receiver is refused.
         assert!(!ep.park_receiver());
         assert!(!ep.receiver_parked());
+    }
+
+    #[test]
+    fn cancel_receiver_clears_only_the_receiver() {
+        let mut ep = Endpoint::new();
+        // park a receiver on an empty endpoint.
+        ep.try_recv();
+        ep.park_receiver();
+        assert!(ep.receiver_parked());
+        // cancelling it (a timeout) clears just the receiver; the slot stays empty.
+        assert!(ep.cancel_receiver());
+        assert!(!ep.receiver_parked());
+        assert!(!ep.is_loaded());
+        // a second cancel reports nothing was parked.
+        assert!(!ep.cancel_receiver());
+    }
+
+    #[test]
+    fn cancel_sender_clears_only_the_sender() {
+        let mut ep = Endpoint::new();
+        ep.try_send(msg(1)); // slot full
+        ep.try_send(msg(2)); // refused
+        ep.park_sender();
+        assert!(ep.sender_parked());
+        // cancelling the sender leaves the parked message in the slot.
+        assert!(ep.cancel_sender());
+        assert!(!ep.sender_parked());
+        assert!(ep.is_loaded());
+        // the message still delivers to a later receiver.
+        assert_eq!(
+            ep.try_recv(),
+            RecvOutcome::Took { message: msg(1), woke_sender: false }
+        );
     }
 
     #[test]
@@ -475,5 +533,33 @@ mod kani_proofs {
         if ep2.park_receiver() {
             assert!(empty_before && !ep2.is_loaded());
         }
+    }
+
+    // cancelling a parked peer (the timeout mechanism) only clears, so it
+    // preserves every state invariant from any valid state, and leaves the slot
+    // and the other peer untouched.
+    #[kani::proof]
+    fn cancel_preserves_invariant() {
+        let mut ep = any_valid_endpoint();
+        let loaded_before = ep.is_loaded();
+        let sender_before = ep.sender_parked();
+        let _ = ep.cancel_receiver();
+        // the receiver is now clear; the slot and the sender are unchanged.
+        assert!(!ep.receiver_parked());
+        assert!(ep.is_loaded() == loaded_before);
+        assert!(ep.sender_parked() == sender_before);
+        // the core invariants still hold.
+        assert!(!(ep.sender_parked() && ep.receiver_parked()));
+        assert!(!ep.sender_parked() || ep.is_loaded());
+
+        let mut ep2 = any_valid_endpoint();
+        let loaded_before2 = ep2.is_loaded();
+        let receiver_before2 = ep2.receiver_parked();
+        let _ = ep2.cancel_sender();
+        assert!(!ep2.sender_parked());
+        assert!(ep2.is_loaded() == loaded_before2);
+        assert!(ep2.receiver_parked() == receiver_before2);
+        assert!(!(ep2.sender_parked() && ep2.receiver_parked()));
+        assert!(!ep2.receiver_parked() || !ep2.is_loaded());
     }
 }

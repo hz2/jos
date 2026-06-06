@@ -148,6 +148,11 @@ extern "x86-interrupt" fn page_fault_handler(
 // never deliver another timer interrupt.
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    // fire any timers that have come due (by the TSC clock), waking their tasks.
+    // bounded, heap-free work; the executor's wake transport is lock-free, so it
+    // is safe to fire wakers from interrupt context. this is the demand-driven
+    // wakeup behind receive-with-timeout.
+    crate::clock::on_timer_tick();
     // SAFETY: Timer is the correct vector for IRQ0; signaling EOI for the wrong
     // line could leave an unrelated interrupt masked.
     unsafe {

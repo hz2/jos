@@ -20,9 +20,12 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 
+use crate::clock;
 use jos_core::cap_rights::Rights;
 use jos_core::cap_space::CapSpace;
 use jos_core::cap_table::CapRef;
+use jos_core::clock::Instant;
+use jos_core::timer::TimerId;
 // the verified rendezvous state machine. referenced by module path
 // (`endpoint::Endpoint` etc.) so it does not collide with this module's own
 // `Endpoint` object type or its `SendOutcome` / `RecvOutcome` adapter enums.
@@ -885,6 +888,18 @@ impl EndpointInner {
         }
     }
 
+    // clear just the parked receiver (a receive-with-timeout abandoning its
+    // blocked recv when the deadline passes), returning its waker if any. mirrors
+    // the model's cancel_receiver: only the receiver is cleared, so send_waiter
+    // and the slot are untouched and the lockstep invariant holds.
+    fn cancel_receiver(&mut self) -> Option<Waker> {
+        if self.rendezvous.cancel_receiver() {
+            self.recv_waiter.take()
+        } else {
+            None
+        }
+    }
+
     // clear both parked peers (on revoke), returning their wakers to fire. the
     // model clears its flags so its invariant holds; the wakers are returned so
     // the blocked tasks observe the cancellation on their next poll.
@@ -1030,6 +1045,117 @@ impl Future for CapRecv<'_> {
             waker.wake();
         }
         Poll::Ready(Ok(message))
+    }
+}
+
+/// The outcome of a [`recv_timeout`]: a delivered message, or a timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvTimeout {
+    /// A message was received before the deadline.
+    Message(Message),
+    /// The deadline passed before any message arrived.
+    TimedOut,
+}
+
+/// Future that receives a message from an endpoint, giving up at a deadline.
+/// Created by [`recv_timeout`].
+///
+/// This is the consumer that makes IPC deadlock-freedom real: a blocked `recv`
+/// can no longer wait forever. Each poll resolves the endpoint and tries to
+/// receive; if the slot is empty it parks the receiver AND (once) arms a global
+/// timer for the deadline, registering this task's waker. Whichever fires first
+/// wins: a sender's deposit wakes the parked receiver (and the next poll cancels
+/// the timer), or the timer fires at the deadline (and the next poll observes
+/// the deadline passed, cancels the parked receiver, and reports
+/// [`RecvTimeout::TimedOut`]). The endpoint stays clock-free; the timer lives one
+/// layer up, exactly as the deterministic-simulation slice plan prescribed.
+#[must_use = "futures do nothing unless awaited"]
+pub struct CapRecvTimeout<'a> {
+    space: &'a KernelCapSpace,
+    cap_ref: CapRef,
+    deadline: Instant,
+    // the armed timer's id, set on the first poll that parks. used to cancel the
+    // timer if a message wins, and to avoid arming more than once.
+    timer: Option<TimerId>,
+}
+
+impl Future for CapRecvTimeout<'_> {
+    type Output = Result<RecvTimeout, IpcError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        let endpoint = match resolve_endpoint(self.space, self.cap_ref, Rights::READ) {
+            Ok(endpoint) => endpoint,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+
+        // try to receive. on success, cancel any armed timer and deliver.
+        let (message, to_wake) = {
+            let mut inner = endpoint.inner.lock();
+            match inner.try_take() {
+                RecvOutcome::Took(message, waker) => (message, waker),
+                RecvOutcome::Empty => {
+                    // nothing waiting. if the deadline has passed, time out:
+                    // cancel our parked receiver and report TimedOut.
+                    if clock::now().reached(self.deadline) {
+                        inner.cancel_receiver();
+                        drop(inner);
+                        if let Some(id) = self.timer.take() {
+                            clock::cancel(id);
+                            clock::forget_timer_waker(id);
+                        }
+                        return Poll::Ready(Ok(RecvTimeout::TimedOut));
+                    }
+                    // not yet due: park the receiver so a sender wakes us.
+                    inner.park_receiver(context.waker().clone());
+                    drop(inner);
+                    // arm a timer for the deadline (once), so the timer IRQ wakes
+                    // us at the deadline even if no sender ever arrives, and
+                    // register this task's waker under the returned id (the IRQ
+                    // fires it by id). the timer's data word is unused here.
+                    // arm once. if the global queue is full, arm returns None and
+                    // we fall back to a bare park: a sender can still wake us, and
+                    // the deadline is then enforced on a later poll that observes
+                    // now >= deadline, so progress still holds.
+                    if self.timer.is_none()
+                        && let Some(id) = clock::arm(self.deadline, 0)
+                    {
+                        clock::register_timer_waker(id, context.waker().clone());
+                        self.timer = Some(id);
+                    }
+                    return Poll::Pending;
+                }
+            }
+        };
+        // a message won: cancel the timer so it cannot fire a stale wakeup.
+        if let Some(id) = self.timer.take() {
+            clock::cancel(id);
+            clock::forget_timer_waker(id);
+        }
+        if let Some(waker) = to_wake {
+            waker.wake();
+        }
+        Poll::Ready(Ok(RecvTimeout::Message(message)))
+    }
+}
+
+/// Receives a message from the endpoint named by `cap_ref`, giving up at
+/// `deadline` (a [`jos_core::clock::Instant`] on the kernel's TSC clock).
+///
+/// The bounded counterpart of [`recv`]: it parks until a message arrives or the
+/// deadline passes, resolving to [`RecvTimeout::Message`] or
+/// [`RecvTimeout::TimedOut`]. This is what makes a blocked receive provably
+/// terminate (IPC deadlock-freedom): the timer IRQ guarantees a wakeup at the
+/// deadline even with no sender.
+pub fn recv_timeout(
+    space: &KernelCapSpace,
+    cap_ref: CapRef,
+    deadline: Instant,
+) -> CapRecvTimeout<'_> {
+    CapRecvTimeout {
+        space,
+        cap_ref,
+        deadline,
+        timer: None,
     }
 }
 

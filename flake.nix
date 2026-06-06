@@ -1,5 +1,5 @@
 {
-  description = "jos — a capability-microkernel OS in Rust (reproducible build + verification toolchain)";
+  description = "jos -- a capability-microkernel OS in Rust (reproducible build + verification toolchain)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -38,7 +38,7 @@
 
         # Verus and Kani ship prebuilt binaries (bundled Z3 / CBMC) that are dynamically
         # linked against a standard loader+glibc, which do not exist at the expected paths
-        # on NixOS — so they are autoPatchelf'd onto the Nix runtime. Kept in a separate
+        # on NixOS, so they are autoPatchelf'd onto the Nix runtime. Kept in a separate
         # `verify` shell so the default shell stays minimal and rock-solid.
         verus = pkgs.callPackage ./nix/verus.nix { };
 
@@ -81,7 +81,7 @@
             pkgs.cargo-binutils # rust-objcopy etc.
           ];
           shellHook = commonShellHook + ''
-            echo "jos dev shell — rustc $(rustc --version | cut -d' ' -f2), qemu $(qemu-system-x86_64 --version | head -1 | cut -d' ' -f4)"
+            echo "jos dev shell -- rustc $(rustc --version | cut -d' ' -f2), qemu $(qemu-system-x86_64 --version | head -1 | cut -d' ' -f4)"
             echo "  cargo build / cargo run / cargo test    (kernel under QEMU)"
             echo "  cargo miri test -p jos-core             (Stage 0 UB checks, once workspace split lands)"
             echo "  nix develop .#verify                    (adds Verus + Kani)"
@@ -102,7 +102,7 @@
             kani
           ];
           shellHook = commonShellHook + ''
-            echo "jos verify shell — adds verus + kani on top of the default toolchain"
+            echo "jos verify shell -- adds verus + kani on top of the default toolchain"
             echo "  note: verus expects a rustup-managed toolchain 1.95.0; if missing, run:"
             echo "        rustup install 1.95.0-x86_64-unknown-linux-gnu"
           '';

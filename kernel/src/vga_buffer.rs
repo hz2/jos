@@ -208,7 +208,7 @@ pub fn _print(args: fmt::Arguments) {
 //     };
 //     writer.write_byte(b'H');
 //     writer.write_string("ello, world!");
-//     writer.write_string("Wörld!"); // non-ASCII character
+//     writer.write_string("W\u{f6}rld!"); // non-ASCII character (o-umlaut)
 
 //     // after implementing the above macros
 //     println!("Hello, world!");

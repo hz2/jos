@@ -66,7 +66,7 @@ stdenv.mkDerivation rec {
   dontStrip = true;
 
   meta = with lib; {
-    description = "Verus — an SMT-based verifier for Rust (prebuilt release, patched for NixOS)";
+    description = "Verus -- an SMT-based verifier for Rust (prebuilt release, patched for NixOS)";
     homepage = "https://github.com/verus-lang/verus";
     license = with licenses; [ mit asl20 ];
     platforms = [ "x86_64-linux" ];

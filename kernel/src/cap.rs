@@ -754,10 +754,17 @@ impl UntypedRegion {
             Ok((start, new_watermark)) => {
                 self.watermark = new_watermark;
                 self.has_children = true;
+                // derive from as_MUT_ptr, not as_ptr: the address is later
+                // reconstructed as a *mut T (as_page_table_mut / as_tcb_mut /
+                // as_cnode_mut / as_untyped_mut) and WRITTEN through. as_ptr
+                // would expose read-only provenance, so a write through the
+                // reconstructed pointer would be UB under strict provenance
+                // (Stacked/Tree Borrows); as_mut_ptr exposes write provenance.
+                // retype takes &mut self, so the unique borrow is available.
                 // SAFETY: `start <= new_watermark - size` and `new_watermark <=
                 // bytes.len()` (place returned them), so the offset is in bounds
                 // and `add` stays within the region's provenance.
-                let obj_ptr = unsafe { self.bytes.as_ptr().add(start) };
+                let obj_ptr = unsafe { self.bytes.as_mut_ptr().add(start) };
                 let addr = obj_ptr.expose_provenance();
                 Some(ObjectId { addr, kind })
             }

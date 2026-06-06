@@ -62,10 +62,9 @@ pub struct UserImage {
 
 /// Maps the user code and stack pages and copies `code` into the code page.
 ///
-/// The code page is mapped present + writable + user so the kernel can write
-/// the payload into it from ring 0 regardless of `CR0.WP`; a real loader would
-/// drop `WRITABLE` afterward to enforce W^X, which is left for a later slice.
-/// The stack page is mapped present + writable + user.
+/// The code page is initially mapped writable so the kernel can copy the
+/// payload in; `WRITABLE` is cleared immediately after the copy (W^X).
+/// The stack page is mapped present + writable + user + `NO_EXECUTE`.
 ///
 /// # Panics
 ///
@@ -92,7 +91,18 @@ where
         "user payload must fit in a single 4 KiB page"
     );
 
-    let user = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    // code page: mapped temporarily writable so we can copy the payload from
+    // ring 0; WRITABLE is stripped after the copy to enforce W^X.
+    let code_rw = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::USER_ACCESSIBLE;
+    let code_rx = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+
+    // stack page: writable but never executable.
+    let stack_rw_nx = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::USER_ACCESSIBLE
+        | PageTableFlags::NO_EXECUTE;
 
     // map the code page.
     let code_page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(USER_CODE_ADDR));
@@ -101,23 +111,32 @@ where
         .expect("no frame for user code page");
     // SAFETY: USER_CODE_ADDR is a fresh, unmapped, lower-half page (per this
     // function's contract); the frame is freshly allocated and mapped nowhere
-    // else, so the mapping introduces no aliasing. user + writable lets ring 3
-    // execute it and lets ring 0 write the payload below.
+    // else, so the mapping introduces no aliasing. writable so ring 0 can copy
+    // the payload; stripped to rx immediately after.
     unsafe {
         mapper
-            .map_to(code_page, code_frame, user, frame_allocator)
+            .map_to(code_page, code_frame, code_rw, frame_allocator)
             .expect("map user code page")
             .flush();
     }
 
-    // copy the payload into the freshly mapped code page (through its virtual
-    // address, which now points at code_frame).
-    // SAFETY: the page is mapped present + writable above and is at least
-    // code.len() bytes (one full page); the destination does not overlap the
-    // source (the source is a kernel rodata/stack slice, the destination the
+    // copy the payload into the freshly mapped code page.
+    // SAFETY: the page is mapped present + writable above and is exactly one
+    // 4 KiB page; the destination does not overlap the source (kernel slice vs.
     // user frame).
     unsafe {
         core::ptr::copy_nonoverlapping(code.as_ptr(), USER_CODE_ADDR as *mut u8, code.len());
+    }
+
+    // W^X: strip WRITABLE now that the copy is done. the CPU re-reads PTE flags
+    // on each TLB miss, so the flush here takes effect before ring 3 runs.
+    // SAFETY: code_page is mapped (we just mapped it above); single-CPU, no
+    // concurrent TLB shootdown needed.
+    unsafe {
+        mapper
+            .update_flags(code_page, code_rx)
+            .expect("clear writable on code page")
+            .flush();
     }
 
     // map the stack page.
@@ -129,7 +148,7 @@ where
     // from the code page; the frame is freshly allocated and unique.
     unsafe {
         mapper
-            .map_to(stack_page, stack_frame, user, frame_allocator)
+            .map_to(stack_page, stack_frame, stack_rw_nx, frame_allocator)
             .expect("map user stack page")
             .flush();
     }

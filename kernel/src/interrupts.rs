@@ -26,12 +26,12 @@
 //! invoked from ring 0 (the CPU switches to the IST stack before calling it), so
 //! its `GS` is already the kernel's.
 //!
-//! Today ring 3 runs with `IF=0`, so these handlers are ring-0-only in practice.
-//! The conditional `swapgs` is correct now and ready for when `IF` is enabled.
+//! Ring 3 now runs with `IF=1` (set by `enter_user_mode`), so these handlers
+//! fire from both ring 0 and ring 3 in practice.
 //!
 //! The IDT is also the future syscall/IPC trap path of the capability kernel.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::AtomicUsize;
 
 use pic8259::ChainedPics;
 use spin::Mutex;
@@ -107,7 +107,10 @@ pub fn init_idt() {
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
         idt.page_fault.set_handler_fn(page_fault_handler);
         // hardware interrupt handlers (post 07).
-        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        // timer uses the naked preemption stub (sched module) so it can save
+        // all GPRs and context-switch between ring-3 threads.
+        idt[InterruptIndex::Timer.as_usize()]
+            .set_handler_fn(crate::sched::timer_preempt_entry);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt.load();
     }
@@ -191,29 +194,6 @@ extern "x86-interrupt" fn page_fault_handler(
     // hlt_loop does not return; no exit swap needed (GS state is irrelevant
     // once the kernel halts).
     crate::hlt_loop();
-}
-
-// timer (IRQ0, vector 32). the PIT fires continuously (~18.2 Hz) once the PIC
-// is initialized. we bump the tick counter and MUST send EOI, or the PIC will
-// never deliver another timer interrupt.
-extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
-    let cs = stack_frame.code_segment;
-    // SAFETY: entry swap; no GS access before this point.
-    unsafe { conditional_swapgs(cs); }
-    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-    // fire any timers that have come due (by the TSC clock), waking their tasks.
-    // bounded, heap-free work; the executor's wake transport is lock-free, so it
-    // is safe to fire wakers from interrupt context. this is the demand-driven
-    // wakeup behind receive-with-timeout.
-    crate::clock::on_timer_tick();
-    // SAFETY: Timer is the correct vector for IRQ0; signaling EOI for the wrong
-    // line could leave an unrelated interrupt masked.
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
-    // SAFETY: exit swap; restores user GS before the implicit iretq.
-    unsafe { conditional_swapgs(cs); }
 }
 
 // keyboard (IRQ1, vector 33). the handler does the minimum bounded work:

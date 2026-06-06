@@ -38,6 +38,8 @@ pub mod keyboard;
 pub mod memory;
 pub mod serial;
 #[cfg(target_arch = "x86_64")]
+pub mod sched;
+#[cfg(target_arch = "x86_64")]
 pub mod syscall;
 pub mod trace;
 #[cfg(target_arch = "x86_64")]

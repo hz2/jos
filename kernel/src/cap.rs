@@ -272,6 +272,14 @@ pub struct EndpointInner {
 /// the lock is uncontended (cap ops run with interrupts disabled), so it never
 /// actually spins; it is here for sound exclusive access and SMP-readiness.
 //
+// LOCK DISCIPLINE (load-bearing): no interrupt handler may acquire this lock.
+// It is held only from task context, so unlike the timer locks in `clock.rs` it
+// needs no `without_interrupts` guard. If a future device-IRQ path ever signals
+// an endpoint (or notification) from interrupt context, that acquisition WOULD
+// race a task holding the lock and spin-deadlock on single-core (spin::Mutex is
+// not reentrant); such a path must either avoid the lock in the IRQ or wrap
+// every TASK-context acquisition in `without_interrupts`, the way clock.rs does.
+//
 // TODO(locking): the endpoint lock is an uncontended placeholder today. when we
 // add SMP / preemption, revisit how it scales: the real anti-busy-wait answer
 // for IPC is blocking + waker + hlt via the async executor (a sender with no
@@ -340,8 +348,14 @@ pub struct NotificationInner {
 /// [`ObjectType::Notification`] so it can be placed in untyped memory.
 ///
 /// Like [`Endpoint`], the mutable state lives behind a `Mutex` so a shared
-/// `&Notification` is enough to operate on it (signalling from any context, and
-/// the async wait path). On single-CPU jos the lock is uncontended.
+/// `&Notification` is enough to operate on it (signalling and the async wait
+/// path). On single-CPU jos the lock is uncontended.
+///
+/// Same LOCK DISCIPLINE as [`Endpoint`]: this lock is acquired only from task
+/// context and so needs no `without_interrupts` guard. A future device-IRQ that
+/// signals a notification from interrupt context would reintroduce the
+/// single-core spin-deadlock the timer locks in `clock.rs` avoid; such a path
+/// must guard every task-context acquisition (or signal without the lock).
 #[repr(C, align(64))]
 pub struct Notification {
     inner: Mutex<NotificationInner>,
@@ -500,9 +514,15 @@ pub struct Tcb {
 }
 
 impl Tcb {
-    // bytes of padding so size_of::<Tcb>() == TCB_SIZE. computed from the sum of
-    // the real fields' sizes; if a field is added this const fails to compile
-    // until updated, which is the intended tripwire.
+    // bytes of padding so size_of::<Tcb>() == TCB_SIZE, from the sum of the real
+    // fields' sizes. This is sound only because every field is 8-byte-sized and
+    // 8-aligned, so repr(C) inserts NO inter-field padding and the sum equals the
+    // true used-bytes offset. (offset_of!(Tcb, _pad) would be exact regardless,
+    // but it cycles here: _pad's type is [u8; PAD] and PAD would depend on its
+    // own offset.) The real backstop is the `size_of::<Tcb>() == TCB_SIZE`
+    // assertion below: if a future field introduces inter-field padding, or the
+    // sum drifts, PAD is wrong and that assertion fails the build loudly. Keep
+    // new fields 8-aligned (or update this sum) so the no-padding premise holds.
     const USED: usize = core::mem::size_of::<SavedContext>()
         + core::mem::size_of::<u64>()
         + core::mem::size_of::<Option<ObjectId>>()

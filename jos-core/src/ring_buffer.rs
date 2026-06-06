@@ -356,7 +356,7 @@ mod tests {
     }
 }
 
-#[cfg(feature = "kani")]
+#[cfg(kani)]
 mod kani_proofs {
     use super::RingBuffer;
 

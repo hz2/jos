@@ -29,7 +29,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use jos_core::run_queue::RunQueue;
+use jos_core::sched_policy::{RoundRobin, SchedPolicy};
 use spin::Mutex;
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -50,8 +50,9 @@ const NO_THREAD: usize = usize::MAX;
 static mut THREAD_TABLE: [*mut Tcb; MAX_THREADS] = [core::ptr::null_mut(); MAX_THREADS];
 static mut THREAD_COUNT: usize = 0;
 
-/// FIFO run queue of ready thread IDs. Backed by `RunQueue` from jos-core.
-static RUN_QUEUE: Mutex<RunQueue<MAX_THREADS>> = Mutex::new(RunQueue::new());
+/// Active scheduling policy. Change the alias to swap in a different policy.
+type Policy = RoundRobin<MAX_THREADS>;
+static POLICY: Mutex<Policy> = Mutex::new(RoundRobin::new());
 
 /// Scheduler thread ID of the thread currently on the CPU, or `NO_THREAD`.
 static CURRENT: AtomicUsize = AtomicUsize::new(NO_THREAD);
@@ -149,31 +150,39 @@ impl IrqFrame {
     }
 }
 
-/// Register a TCB with the scheduler and enqueue it as runnable.
+/// Register a TCB with the scheduler. Returns its thread ID.
 ///
-/// Returns the scheduler thread ID (index into the internal thread table).
-/// Must be called before any thread runs, with interrupts disabled.
+/// Only adds the TCB to the thread table; does NOT enqueue it as ready. Call
+/// [`mark_ready`] for threads that should run immediately, and [`set_current`]
+/// for the thread about to be switched to.
 ///
 /// # Safety
 ///
 /// `tcb` must point to a live, initialized [`Tcb`] that will remain valid for
-/// the lifetime of the kernel. Must be called from ring 0 with interrupts
-/// disabled or before the timer is running.
+/// the kernel's lifetime. Must be called with interrupts disabled.
 pub unsafe fn register_thread(tcb: *mut Tcb) -> usize {
-    // SAFETY: single-CPU; caller ensures interrupts are off at registration time.
+    // SAFETY: single-CPU; caller ensures interrupts are off.
     unsafe {
         let id = THREAD_COUNT;
         assert!(id < MAX_THREADS, "scheduler thread table full");
         THREAD_TABLE[id] = tcb;
         THREAD_COUNT += 1;
-        RUN_QUEUE.lock().enqueue(id);
         id
     }
 }
 
-/// Inform the scheduler which thread is currently executing.
+/// Add a registered thread to the ready set so the scheduler can pick it.
 ///
-/// Call after `register_thread` and before the first `iretq` to ring 3.
+/// Call after [`register_thread`] for every thread that is not the initial
+/// running thread (the initial thread uses [`set_current`] instead).
+pub fn mark_ready(id: usize) {
+    POLICY.lock().enqueue(id);
+}
+
+/// Inform the scheduler which thread is currently on the CPU.
+///
+/// Call after [`register_thread`] and before the first `iretq` to ring 3.
+/// The thread must NOT be in the ready set (it is on the CPU, not waiting).
 pub fn set_current(id: usize) {
     CURRENT.store(id, Ordering::Relaxed);
 }
@@ -221,11 +230,11 @@ unsafe extern "C" fn timer_irq_handler(frame: *mut IrqFrame) {
         return;
     }
 
-    // round-robin: re-enqueue the current thread, pick the next.
+    // re-enqueue current, pick next via the active policy.
     let next = {
-        let mut q = RUN_QUEUE.lock();
-        q.enqueue(cur);
-        q.dequeue()
+        let mut p = POLICY.lock();
+        p.enqueue(cur);
+        p.dequeue()
     };
 
     let Some(next_id) = next else { return };
@@ -275,10 +284,6 @@ unsafe extern "C" fn timer_irq_handler(frame: *mut IrqFrame) {
 /// - the `call` leaves the stack System V ABI-aligned at callee entry
 #[unsafe(naked)]
 pub extern "x86-interrupt" fn timer_preempt_entry(_frame: InterruptStackFrame) {
-    // SAFETY: this is a naked function; the body is pure assembly. the
-    // conditional swapgs pairs are correct (see module doc). the call to
-    // timer_irq_handler satisfies the extern "C" ABI (rdi = frame pointer,
-    // stack 16-aligned at callee entry). the epilogue mirrors the prologue.
     core::arch::naked_asm!(
             // conditional swapgs: kernel CS (RPL=0) is 0x08; ring-3 CS has
             // RPL=3, so any value != 0x08 means we came from user space.

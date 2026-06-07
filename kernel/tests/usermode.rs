@@ -24,8 +24,9 @@
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use jos::interrupts::{InterruptIndex, PICS};
 use jos::memory::BootstrapFrameAllocator;
-use jos::{QemuExitCode, exit_qemu, gdt, serial_print, serial_println};
+use jos::{QemuExitCode, exit_qemu, gdt, interrupts, serial_print, serial_println};
 use x86_64::PrivilegeLevel;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
@@ -45,6 +46,11 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     // a test idt whose breakpoint handler checks CPL and exits qemu.
     gdt::init_gdt();
     init_test_idt();
+    // init_pics remaps IRQ0 (timer) from the PIC's default vector 8 (which
+    // overlaps the double-fault handler) to vector 32. now that enter_user_mode
+    // sets IF=1, the timer can fire in ring 3; without the remap it would hit
+    // the double-fault handler and fail the test.
+    interrupts::init_pics();
 
     // set up paging + a frame allocator so we can map the user pages. heap is
     // not needed for this test, so we only build the mapper + allocator.
@@ -88,8 +94,19 @@ fn init_test_idt() {
         idt.double_fault
             .set_handler_fn(test_double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+        // timer handler at vector 32 (after init_pics remaps IRQ0 from default
+        // vector 8 to 32). since enter_user_mode sets IF=1, the timer can fire
+        // while the user payload runs; sending EOI keeps the PIC happy.
+        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(noop_timer_handler);
         idt.load();
     }
+}
+
+// sends EOI so the PIC delivers further timer ticks; the test completes before
+// a second tick fires (int3 is the first instruction of the payload).
+extern "x86-interrupt" fn noop_timer_handler(_frame: InterruptStackFrame) {
+    // SAFETY: timer is IRQ0 mapped to PIC_1_OFFSET after init_pics; correct vector.
+    unsafe { PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8()); }
 }
 
 // the breakpoint handler the ring-3 int3 traps into. the saved code segment in

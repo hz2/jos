@@ -54,6 +54,12 @@ harness = false
 name = "two_thread_cspace"
 harness = false
 
+# sched_preempt enters thread A (spin loop) then lets the timer preempt it and
+# context-switch to thread B, which calls SYS_EXIT(success). exits from ring 3.
+[[test]]
+name = "sched_preempt"
+harness = false
+
 [dependencies]
 # the `postcard` feature pulls in serde + postcard for off-box trace capture
 # (kernel/src/trace.rs dump_trace_hex). jos-core's default build stays

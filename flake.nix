@@ -103,8 +103,12 @@
           ];
           shellHook = commonShellHook + ''
             echo "jos verify shell -- adds verus + kani on top of the default toolchain"
-            echo "  note: verus expects a rustup-managed toolchain 1.95.0; if missing, run:"
-            echo "        rustup install 1.95.0-x86_64-unknown-linux-gnu"
+            # expose the verus lib dir so invocation helpers can find it.
+            export VERUS_LIB_DIR="${verus}/libexec/verus"
+            echo "  cargo kani -p jos-core                     (bounded proofs)"
+            echo "  verus --crate-type lib --edition 2024 \\"
+            echo "    -L \$VERUS_LIB_DIR --verify-module proof \\"
+            echo "    jos-core/src/lib.rs                      (verus proof module)"
           '';
         };
 

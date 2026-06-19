@@ -1,6 +1,6 @@
 # jos workspace.
 #
-# layout rationale (see .claude/VISION.md and .claude/memory):
+# layout rationale (see docs/VISION.md):
 #   kernel/    the bootable kernel binary. builds bare-metal via its own
 #              kernel/.cargo/config.toml (custom target + build-std). asm, MMIO.
 #   jos-core/  pure no_std logic with NO hardware deps (cap table, ring buffers,

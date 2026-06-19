@@ -74,7 +74,7 @@ jos-core/   pure no_std logic with no hardware dependencies. builds for the host
 kernel/     the bootable kernel: assembly, MMIO, and the hardware glue around jos-core.
             builds bare-metal via kernel/.cargo/config.toml (a custom x86_64 target).
 docs/       formal technical docs (see below).
-.claude/    planning and notes (git-ignored); VISION.md is the rationale.
+docs/VISION.md  design rationale and roadmap (also in docs/ below).
 ```
 
 The split is load-bearing: the verifiable logic lives in `jos-core` because Miri cannot

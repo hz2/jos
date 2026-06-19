@@ -105,6 +105,7 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     let mut untyped =
         unsafe { UntypedRegion::new(&mut (*core::ptr::addr_of_mut!(UNTYPED)).0) };
 
+    // SAFETY: untyped region is freshly initialized; called once before mappings.
     let mut vspace = unsafe { VSpace::new(&mut untyped).expect("vspace") };
 
     let code_a = frame_allocator.allocate_frame().expect("code frame a");
@@ -112,6 +113,7 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     let code_b = frame_allocator.allocate_frame().expect("code frame b");
     let stack_b = frame_allocator.allocate_frame().expect("stack frame b");
 
+    // SAFETY: identity-mapped frames; src is a static byte slice; len fits the frame.
     unsafe {
         core::ptr::copy_nonoverlapping(
             THREAD_A_PROGRAM.as_ptr(),
@@ -126,6 +128,7 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     }
 
     let rw_user = PteFlags::PRESENT | PteFlags::WRITABLE | PteFlags::USER;
+    // SAFETY: frames allocated above; virtual addresses are distinct user-space slots.
     unsafe {
         vspace
             .map_page(&mut untyped, usermode::USER_CODE_ADDR, code_a.start_address().as_u64(), rw_user)
@@ -185,6 +188,7 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     };
 
     x86_64::instructions::interrupts::disable();
+    // SAFETY: TCB pointers are live statics; interrupts are disabled above.
     let id_a = unsafe { sched::register_thread(tcb_a_ptr) };
     let id_b = unsafe { sched::register_thread(tcb_b_ptr) };
     sched::mark_ready(id_b); // B waits in the ready set; A runs first

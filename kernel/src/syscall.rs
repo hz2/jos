@@ -709,6 +709,8 @@ fn sys_ipc_recv_blocking(cap_slot: u64) -> u64 {
                     *entry = None;
                     drop(sends);
                     // wake the sender (it returns 0 = success from the send).
+                    // SAFETY: send_tid came from register_thread; TCB lives for the
+                    // kernel lifetime; single-CPU, interrupts disabled on syscall path.
                     unsafe {
                         let tcb = crate::sched::thread_table_entry(send_tid);
                         if !tcb.is_null() {
@@ -744,6 +746,8 @@ fn sys_ipc_recv_blocking(cap_slot: u64) -> u64 {
     // rax = 0 initially; the sender overwrites it with the message word before
     // re-enqueueing us, so the resumed thread sees the correct return value.
     save_blocking_context(0);
+    // SAFETY: ring-0, single-CPU; need_yield is read by the syscall stub after
+    // dispatch_syscall returns and before the sysretq decision.
     unsafe {
         (*cpu_local::cpu_local_ptr()).need_yield = 1;
     }

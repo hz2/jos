@@ -150,6 +150,28 @@ impl IrqFrame {
     }
 }
 
+/// Returns the TCB pointer for `id`, or null if `id` is out of range.
+///
+/// # Safety
+///
+/// `id` must be a value previously returned by [`register_thread`]. The
+/// returned pointer is valid for the kernel's lifetime.
+pub unsafe fn thread_table_entry(id: usize) -> *mut Tcb {
+    // SAFETY: caller ensures id is valid; THREAD_TABLE[id] was set by
+    // register_thread and is never modified after that.
+    if id < MAX_THREADS {
+        unsafe { THREAD_TABLE[id] }
+    } else {
+        core::ptr::null_mut()
+    }
+}
+
+/// Returns the scheduler ID of the thread currently on the CPU, or `usize::MAX`
+/// if no thread is running (idle state).
+pub fn current_thread_id() -> usize {
+    CURRENT.load(Ordering::Relaxed)
+}
+
 /// Register a TCB with the scheduler. Returns its thread ID.
 ///
 /// Only adds the TCB to the thread table; does NOT enqueue it as ready. Call
@@ -219,9 +241,32 @@ unsafe extern "C" fn timer_irq_handler(frame: *mut IrqFrame) {
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 
-    // only preempt when we interrupted ring-3 code. ring-0 timer ticks just
-    // update counters and return.
+    // ring-0 timer tick: the only interesting ring-0 case is the blocking-IPC
+    // idle loop (CURRENT == NO_THREAD). check for a ready thread to wake.
     if frame.cs & 3 != 3 {
+        let cur = CURRENT.load(Ordering::Relaxed);
+        if cur != NO_THREAD {
+            // nested ring-0 interrupt, nothing to do.
+            return;
+        }
+        // idle: try to pick the next ready thread and switch to it. when
+        // load_context overwrites the frame, the epilogue's iretq returns to
+        // ring-3 with the exit swapgs handling the GS transition correctly
+        // (entry was from ring-0 so no entry swapgs ran, but the exit swapgs
+        // is conditional on the OUTGOING cs -- ring-3 -- so one swap happens).
+        let next = { POLICY.lock().dequeue() };
+        if let Some(next_id) = next {
+            // SAFETY: THREAD_TABLE[next_id] set by register_thread, lives for
+            // kernel lifetime; ring-0, interrupts disabled.
+            unsafe {
+                let next_tcb = THREAD_TABLE[next_id];
+                if !next_tcb.is_null() {
+                    frame.load_context(&(*next_tcb).context);
+                    crate::cpu_local::switch_to(next_tcb);
+                }
+            }
+            CURRENT.store(next_id, Ordering::Relaxed);
+        }
         return;
     }
 
@@ -269,6 +314,37 @@ unsafe extern "C" fn timer_irq_handler(frame: *mut IrqFrame) {
     }
 
     CURRENT.store(next_id, Ordering::Relaxed);
+}
+
+/// Parks the current thread and enters the kernel idle loop.
+///
+/// Called from the `syscall_entry` stub when a blocking syscall sets the
+/// `need_yield` flag. Sets [`CURRENT`] to `NO_THREAD` (the blocked thread is
+/// removed from the active slot), resets `RSP` to this thread's kernel stack
+/// top, then spins on `sti; hlt` until the timer picks the next ready thread
+/// and `iretq`s away from the `hlt`.
+///
+/// # Safety
+///
+/// Must only be called from the `syscall_entry` assembly path, from ring-0
+/// with GS pointing at the per-CPU block. The current thread's `SavedContext`
+/// must already be saved to its `Tcb` before calling this.
+pub extern "C" fn enter_idle_from_syscall() -> ! {
+    CURRENT.store(NO_THREAD, Ordering::Relaxed);
+    // SAFETY: ring-0, GS = CpuLocal; kernel_rsp holds this thread's stack top.
+    // sti enables the timer IRQ so the next tick can switch to a ready thread.
+    // the hlt/jmp loop is abandoned by the timer handler's iretq.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, gs:[{off}]",
+            "2:",
+            "sti",
+            "hlt",
+            "jmp 2b",
+            off = const crate::cpu_local::OFF_KERNEL_RSP,
+            options(noreturn),
+        );
+    }
 }
 
 /// IDT entry point for the timer IRQ (replaces the plain `extern "x86-interrupt"`

@@ -60,6 +60,12 @@ harness = false
 name = "sched_preempt"
 harness = false
 
+# blocking_ipc: thread A calls SYS_IPC_RECV_BLOCKING and parks; the timer
+# switches to thread B which sends 0x42 and wakes A; A resumes and exits.
+[[test]]
+name = "blocking_ipc"
+harness = false
+
 [dependencies]
 # the `postcard` feature pulls in serde + postcard for off-box trace capture
 # (kernel/src/trace.rs dump_trace_hex). jos-core's default build stays

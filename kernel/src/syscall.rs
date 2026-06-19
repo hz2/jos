@@ -52,7 +52,11 @@ use x86_64::registers::rflags::RFlags;
 use crate::cap::{
     cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectKind, RetypeError,
 };
-use crate::cpu_local::{self, OFF_KERNEL_RSP, OFF_USER_RSP_SCRATCH};
+use crate::cpu_local::{
+    self, OFF_KERNEL_RSP, OFF_NEED_YIELD, OFF_SAVED_USER_RFLAGS, OFF_SAVED_USER_RBP,
+    OFF_SAVED_USER_RBX, OFF_SAVED_USER_RIP, OFF_SAVED_USER_R12, OFF_SAVED_USER_R13,
+    OFF_SAVED_USER_R14, OFF_SAVED_USER_R15, OFF_USER_RSP_SCRATCH,
+};
 use crate::gdt;
 use jos_core::cap_rights::Rights;
 use jos_core::cap_space::InsertAtError;
@@ -96,6 +100,14 @@ pub enum Syscall {
     /// send/recv (the same primitives [`Syscall::IpcSend`]/[`Syscall::IpcRecv`]
     /// expose directly). Errors carry [`IPC_ERR_FLAG`].
     Invoke = 5,
+    /// `ipc_send_blocking(cap_slot, word) -> 0 | errno`. Like [`IpcSend`] but
+    /// parks the calling thread until a receiver is ready rather than returning
+    /// [`IpcSyscallError::WouldBlock`]. The thread is woken by the timer
+    /// interrupt when a matching recv arrives.
+    IpcSendBlocking = 6,
+    /// `ipc_recv_blocking(cap_slot) -> word | (errno | ERR_FLAG)`. Like
+    /// [`IpcRecv`] but parks the calling thread until a sender is ready.
+    IpcRecvBlocking = 7,
 }
 
 impl Syscall {
@@ -108,6 +120,8 @@ impl Syscall {
             3 => Some(Self::IpcRecv),
             4 => Some(Self::Retype),
             5 => Some(Self::Invoke),
+            6 => Some(Self::IpcSendBlocking),
+            7 => Some(Self::IpcRecvBlocking),
             _ => None,
         }
     }
@@ -344,6 +358,10 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 
         Some(Syscall::Retype) => sys_retype(arg0, arg1, arg2),
         // invoke(cap_slot = arg0, method = arg1, arg0_word = arg2).
         Some(Syscall::Invoke) => sys_invoke(arg0, arg1, arg2),
+        // ipc_send_blocking(cap_slot = arg0, word = arg1).
+        Some(Syscall::IpcSendBlocking) => sys_ipc_send_blocking(arg0, arg1),
+        // ipc_recv_blocking(cap_slot = arg0).
+        Some(Syscall::IpcRecvBlocking) => sys_ipc_recv_blocking(arg0),
         None => ENOSYS,
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -512,6 +530,226 @@ fn sys_retype(untyped_slot: u64, type_word: u64, dest_slot: u64) -> u64 {
     }
 }
 
+// --- blocking IPC -----------------------------------------------------------
+
+use spin::Mutex;
+
+const MAX_THREADS: usize = crate::sched::MAX_THREADS;
+
+// a parked thread waiting to send on a specific endpoint.
+#[derive(Clone, Copy)]
+struct BlockedSend {
+    endpoint_addr: u64, // endpoint identity (phys_addr of the ObjectId)
+    thread_id: usize,
+    word: u64,
+}
+
+// a parked thread waiting to receive on a specific endpoint.
+#[derive(Clone, Copy)]
+struct BlockedRecv {
+    endpoint_addr: u64,
+    thread_id: usize,
+}
+
+static BLOCKED_SENDS: Mutex<[Option<BlockedSend>; MAX_THREADS]> =
+    Mutex::new([None; MAX_THREADS]);
+static BLOCKED_RECVS: Mutex<[Option<BlockedRecv>; MAX_THREADS]> =
+    Mutex::new([None; MAX_THREADS]);
+
+// saves the current thread's user-space context into its Tcb so it can be
+// resumed via iretq when woken. `wake_rax` is placed in rax (the syscall
+// return value the thread will see when it resumes). called from a blocking
+// syscall handler before setting need_yield.
+fn save_blocking_context(wake_rax: u64) {
+    // SAFETY: ring-0, interrupts disabled on syscall path; single access.
+    unsafe {
+        let local = &*cpu_local::cpu_local_ptr();
+        let tcb = local.current_tcb;
+        if tcb.is_null() {
+            return;
+        }
+        let sel = crate::gdt::selectors();
+        (*tcb).context = crate::cap::SavedContext {
+            rip: local.saved_user_rip,
+            rsp: local.user_rsp_scratch,
+            rflags: local.saved_user_rflags,
+            cs: u64::from(sel.user_code.0),
+            ss: u64::from(sel.user_data.0),
+            rax: wake_rax,
+            rbx: local.saved_user_rbx,
+            rbp: local.saved_user_rbp,
+            // rcx/r11 are clobbered by SYSCALL; zero is safe (iretq restores
+            // rip/rflags from the frame, not from rcx/r11).
+            rcx: 0,
+            r11: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r12: local.saved_user_r12,
+            r13: local.saved_user_r13,
+            r14: local.saved_user_r14,
+            r15: local.saved_user_r15,
+        };
+    }
+}
+
+// ipc_send_blocking: try to rendezvous with a waiting receiver; if none is
+// present, park this thread in the BLOCKED_SENDS table and signal the syscall
+// stub to yield via need_yield.
+fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
+    let Some(space) = current_cspace() else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    let Ok(slot) = usize::try_from(cap_slot) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    let Some(cap_ref) = space.ref_at(slot) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    let Some(cap) = space.lookup(cap_ref) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    if cap.object.kind() != ObjectKind::Endpoint {
+        return IpcSyscallError::NotEndpoint as u64;
+    }
+    if !cap.rights.contains(Rights::WRITE) {
+        return IpcSyscallError::Denied as u64;
+    }
+    let endpoint_addr = cap.object.phys_addr();
+
+    // check for a waiting receiver and deliver directly (bypassing the endpoint
+    // buffer so we don't deposit a message that the parked receiver will miss).
+    {
+        let mut recvs = BLOCKED_RECVS.lock();
+        for entry in recvs.iter_mut() {
+            if let Some(recv) = entry {
+                if recv.endpoint_addr == endpoint_addr {
+                    let recv_tid = recv.thread_id;
+                    *entry = None;
+                    drop(recvs);
+                    // write the message word into the receiver's saved rax so
+                    // when the timer resumes it, the syscall return value = word.
+                    // SAFETY: recv_tid came from register_thread; live for lifetime.
+                    unsafe {
+                        let tcb = crate::sched::thread_table_entry(recv_tid);
+                        if !tcb.is_null() {
+                            (*tcb).context.rax = word;
+                        }
+                    }
+                    crate::sched::mark_ready(recv_tid);
+                    return 0; // send succeeded immediately
+                }
+            }
+        }
+    }
+
+    // no receiver waiting: try the non-blocking deposit path (handles the case
+    // where a receiver already called cap_recv and left a message slot open).
+    let nb = sys_ipc_send(cap_slot, word);
+    if nb != IpcSyscallError::WouldBlock as u64 {
+        return nb;
+    }
+
+    // still would-block: park ourselves.
+    let cur = crate::sched::current_thread_id();
+    if cur == usize::MAX {
+        return IpcSyscallError::WouldBlock as u64;
+    }
+    {
+        let mut sends = BLOCKED_SENDS.lock();
+        if let Some(entry) = sends.iter_mut().find(|e| e.is_none()) {
+            *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word });
+        } else {
+            return IpcSyscallError::WouldBlock as u64; // table full
+        }
+    }
+    save_blocking_context(0); // rax = 0 when woken (send returned success)
+    // SAFETY: ring-0, single-CPU; need_yield is read by the syscall stub after
+    // dispatch_syscall returns.
+    unsafe {
+        (*cpu_local::cpu_local_ptr()).need_yield = 1;
+    }
+    0 // ignored: the stub yields instead of sysretq'ing
+}
+
+// ipc_recv_blocking: try to rendezvous with a waiting sender; if none is
+// present, park this thread in the BLOCKED_RECVS table and yield.
+fn sys_ipc_recv_blocking(cap_slot: u64) -> u64 {
+    let Some(space) = current_cspace() else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    let Ok(slot) = usize::try_from(cap_slot) else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    let Some(cap_ref) = space.ref_at(slot) else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    let Some(cap) = space.lookup(cap_ref) else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    if cap.object.kind() != ObjectKind::Endpoint {
+        return IpcSyscallError::NotEndpoint as u64 | IPC_ERR_FLAG;
+    }
+    if !cap.rights.contains(Rights::READ) {
+        return IpcSyscallError::Denied as u64 | IPC_ERR_FLAG;
+    }
+    let endpoint_addr = cap.object.phys_addr();
+
+    // check for a waiting sender.
+    {
+        let mut sends = BLOCKED_SENDS.lock();
+        for entry in sends.iter_mut() {
+            if let Some(send) = entry {
+                if send.endpoint_addr == endpoint_addr {
+                    let word = send.word;
+                    let send_tid = send.thread_id;
+                    *entry = None;
+                    drop(sends);
+                    // wake the sender (it returns 0 = success from the send).
+                    unsafe {
+                        let tcb = crate::sched::thread_table_entry(send_tid);
+                        if !tcb.is_null() {
+                            (*tcb).context.rax = 0;
+                        }
+                    }
+                    crate::sched::mark_ready(send_tid);
+                    return word; // return message word to this receiver immediately
+                }
+            }
+        }
+    }
+
+    // no sender waiting: try cap_recv in case a message was already deposited.
+    let nb = sys_ipc_recv(cap_slot);
+    if nb & IPC_ERR_FLAG == 0 || nb != (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG) {
+        return nb;
+    }
+
+    // park ourselves.
+    let cur = crate::sched::current_thread_id();
+    if cur == usize::MAX {
+        return IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG;
+    }
+    {
+        let mut recvs = BLOCKED_RECVS.lock();
+        if let Some(entry) = recvs.iter_mut().find(|e| e.is_none()) {
+            *entry = Some(BlockedRecv { endpoint_addr, thread_id: cur });
+        } else {
+            return IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG;
+        }
+    }
+    // rax = 0 initially; the sender overwrites it with the message word before
+    // re-enqueueing us, so the resumed thread sees the correct return value.
+    save_blocking_context(0);
+    unsafe {
+        (*cpu_local::cpu_local_ptr()).need_yield = 1;
+    }
+    0 // ignored
+}
+
 // invoke: a generic capability invocation routed by the named object's kind.
 // today only Endpoint methods (Send/Recv) are defined; they reuse the IPC
 // primitives, so SYS_INVOKE(Endpoint, Send/Recv) is equivalent to the dedicated
@@ -597,40 +835,65 @@ fn invoke_errno(e: IpcError) -> u64 {
 core::arch::global_asm!(
     ".global syscall_entry",
     "syscall_entry:",
-    // swapgs: KernelGsBase (the CpuLocal ptr) <-> GsBase. now gs: addresses the
-    // per-CPU block.
+    // swapgs: KernelGsBase (CpuLocal ptr) <-> GsBase. now gs: = CpuLocal.
     "swapgs",
-    // stash the user rsp in the per-CPU scratch slot (we cannot push to the user
-    // stack from ring 0), then load this thread's kernel stack top.
+    // stash user rsp before the stack switch.
     "mov gs:[{user_rsp_scratch}], rsp",
-    "mov rsp, gs:[{kernel_rsp}]",   // rsp = kernel stack top (16-aligned)
-    // preserve the values sysretq depends on, plus the user rsp, on the kernel
-    // stack across the dispatcher call.
-    "push gs:[{user_rsp_scratch}]", // [kernel stack] user rsp        rsp%16=8
-    "push rcx",                     // user return RIP (sysretq uses)  rsp%16=0
-    "push r11",                     // user RFLAGS (sysretq uses)      rsp%16=8
-    "sub rsp, 8",                   // align to 16 for the call        rsp%16=0
-    // marshal the jos ABI (nr in rax, args in rdi/rsi/rdx) into the C ABI the
-    // dispatcher expects: dispatch_syscall(nr, arg0, arg1, arg2) lands in
-    // rdi, rsi, rdx, rcx. this is a register rotation; the move order is chosen
-    // so each source is read before it is overwritten, and it runs AFTER the
-    // pushes so rcx's user value is already safe on the stack.
-    "mov rcx, rdx",                 // arg2 -> 4th C arg (rcx)
-    "mov rdx, rsi",                 // arg1 -> 3rd C arg (rdx)
-    "mov rsi, rdi",                 // arg0 -> 2nd C arg (rsi)
-    "mov rdi, rax",                 // nr   -> 1st C arg (rdi)
-    "call {dispatch}",              // rax = return value
-    // tear down: drop the alignment pad, restore the syscall-return state and
-    // the user stack, then swapgs back and return to ring 3.
+    // save user-return registers to CpuLocal BEFORE anything clobbers them.
+    // rcx = user RIP (set by syscall), r11 = user RFLAGS (set by syscall).
+    // callee-saved GPRs (rbx, rbp, r12-r15) must be preserved across the
+    // syscall ABI; for blocking IPC the thread is resumed via iretq rather
+    // than sysretq, so we capture them here for the resume context.
+    "mov gs:[{saved_rip}], rcx",
+    "mov gs:[{saved_rflags}], r11",
+    "mov gs:[{saved_rbx}], rbx",
+    "mov gs:[{saved_rbp}], rbp",
+    "mov gs:[{saved_r12}], r12",
+    "mov gs:[{saved_r13}], r13",
+    "mov gs:[{saved_r14}], r14",
+    "mov gs:[{saved_r15}], r15",
+    // clear need_yield before dispatch (a blocking syscall sets it to 1).
+    "mov qword ptr gs:[{need_yield}], 0",
+    // switch to this thread's kernel stack.
+    "mov rsp, gs:[{kernel_rsp}]",
+    // push user return state for the sysretq path.
+    "push gs:[{user_rsp_scratch}]", // [+24] user rsp
+    "push rcx",                     // [+16] user rip
+    "push r11",                     // [+8]  user rflags
+    "sub rsp, 8",                   // [+0]  align to 16 for call
+    // rotate jos ABI args into C ABI registers.
+    "mov rcx, rdx",                 // arg2 -> 4th C arg
+    "mov rdx, rsi",                 // arg1 -> 3rd C arg
+    "mov rsi, rdi",                 // arg0 -> 2nd C arg
+    "mov rdi, rax",                 // nr   -> 1st C arg
+    "call {dispatch}",
     "add rsp, 8",                   // drop alignment pad
-    "pop r11",                      // user RFLAGS
-    "pop rcx",                      // user return RIP
-    "pop rsp",                      // restore user rsp directly
-    "swapgs",                       // restore user GS, park CpuLocal in KernelGsBase
-    "sysretq",                      // -> ring 3 at rcx, RFLAGS = r11
+    // check need_yield: if a blocking syscall parked this thread, jump to the
+    // idle entry (sets CURRENT=NO_THREAD, resets rsp, enters sti;hlt loop).
+    "cmp qword ptr gs:[{need_yield}], 0",
+    "je 1f",
+    "call {idle}",                  // -> ! (never returns)
+    "ud2",                          // unreachable
+    // normal sysretq path.
+    "1:",
+    "pop r11",
+    "pop rcx",
+    "pop rsp",
+    "swapgs",
+    "sysretq",
     user_rsp_scratch = const OFF_USER_RSP_SCRATCH,
     kernel_rsp = const OFF_KERNEL_RSP,
+    saved_rip = const OFF_SAVED_USER_RIP,
+    saved_rflags = const OFF_SAVED_USER_RFLAGS,
+    need_yield = const OFF_NEED_YIELD,
+    saved_rbx = const OFF_SAVED_USER_RBX,
+    saved_rbp = const OFF_SAVED_USER_RBP,
+    saved_r12 = const OFF_SAVED_USER_R12,
+    saved_r13 = const OFF_SAVED_USER_R13,
+    saved_r14 = const OFF_SAVED_USER_R14,
+    saved_r15 = const OFF_SAVED_USER_R15,
     dispatch = sym dispatch_syscall,
+    idle = sym crate::sched::enter_idle_from_syscall,
 );
 
 unsafe extern "C" {

@@ -1,10 +1,9 @@
 # jos (Jason's Operating System)
 
 A capability-based microkernel in Rust that aims to be **verified by construction**
-and **deterministically simulable**. jos began as a walk through Philipp Oppermann's
-blog_os tutorial[^1][^2] and has since branched into something a tutorial clone does
-not reach: a small, security-first kernel where capabilities, formal verification, and
-simulation testing are the same architectural decision seen from different angles.
+and **deterministically simulable** -- a small, security-first kernel where
+capabilities, formal verification, and simulation testing are the same architectural
+decision seen from different angles.
 
 It runs on `x86_64` under QEMU today.
 
@@ -43,8 +42,8 @@ The formal docs are under [`docs/`](docs/).
 
 ## Status
 
-**Phase 2 (the capability microkernel core) is complete**, and Phase 3 (traceability and
-simulation) is underway.
+**Phase 3 (ring-3 userspace, per-thread kernel stacks, preemptive scheduling) is
+complete.** Phase 4 (blocking IPC, formal verification layers) is in progress.
 
 What works today:
 
@@ -54,15 +53,19 @@ What works today:
   from untyped memory with no post-boot kernel allocation.
 - Capabilities with phantom-typed rights, monotone attenuation, and O(1)
   generation-counted revocation.
-- A cooperative async executor as the scheduler; synchronous IPC over endpoints that
-  blocks and wakes through the executor.
-- Userspace: ring 3 via `iretq`, a `SYSCALL`/`SYSRET` boundary, per-process address
-  spaces, capability-mediated IPC syscalls, and `retype`/`invoke` syscalls.
+- Userspace: ring-3 via `iretq`, `SYSCALL`/`SYSRET` boundary, per-thread kernel stacks
+  and capability spaces, IPC and `retype`/`invoke` syscalls, W^X page permissions.
+- Preemptive round-robin scheduler: a naked timer stub saves the full GPR set as an
+  `IrqFrame`, the Rust handler context-switches by overwriting the frame in-place.
+  Pluggable via the `SchedPolicy` trait in `jos-core`.
+- Blocking IPC syscalls (send/recv rendezvous): parked threads sleep in a kernel hlt
+  loop and are woken by the timer when a partner arrives.
 - Deterministic simulation testing of the verified core: a seeded RNG, a spec-as-oracle
   capability-space harness, TigerBeetle-style fault regimes, and IPC message-conservation
   testing, all reproducible from a seed.
-- In-kernel structured tracing: every syscall is recorded into a ring buffer and can be
-  captured off-box as postcard records over serial.
+- Kani bounded proofs: untyped spatial non-overlap (MEM-1), run-queue invariants,
+  clock monotonicity, and round-robin starvation-freedom.
+- In-kernel structured tracing: every syscall recorded into a ring buffer.
 
 ## Layout
 
@@ -121,7 +124,5 @@ nix develop --command bash -c 'cd kernel && cargo test' # boot each test under Q
 
 ## References
 
-[^1]: https://os.phil-opp.com/
-[^2]: https://github.com/phil-opp/blog_os
 [^3]: https://wiki.osdev.org/Expanded_Main_Page
 [^4]: seL4 (capabilities, untyped memory): https://sel4.systems/

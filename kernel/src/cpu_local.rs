@@ -37,35 +37,66 @@ use crate::cap::{KernelCapSpace, Tcb};
 /// Per-CPU kernel data, addressed via `gs:` after the entry stub's `swapgs`.
 ///
 /// `repr(C)` so the field offsets are stable and match the assembly-visible
-/// [`OFF_KERNEL_RSP`] / [`OFF_USER_RSP_SCRATCH`] constants (compile-time
-/// asserted below).
+/// `OFF_*` constants (compile-time asserted below).
 #[repr(C)]
 pub struct CpuLocal {
     /// Top of the kernel stack the running thread switches to on `syscall`
     /// entry. The entry stub loads `rsp` from here (offset 0).
     pub kernel_rsp: u64,
     /// Scratch slot where the entry stub stashes the user `rsp` before it has
-    /// switched to the kernel stack (it cannot push to the user stack from ring
-    /// 0). Offset 8.
+    /// switched to the kernel stack. Offset 8.
     pub user_rsp_scratch: u64,
-    /// Pointer to the current thread's capability space, resolved per IPC
-    /// syscall. Null until [`switch_to`] (or the compat setter) installs one.
+    /// Pointer to the current thread's capability space. Null until [`switch_to`]
+    /// installs one.
     pub current_cspace: *mut KernelCapSpace,
-    /// Pointer to the currently-scheduled TCB, or null. Bookkeeping for a future
-    /// preemptive scheduler; not read by the syscall dispatch itself.
+    /// Pointer to the currently-scheduled TCB, or null.
     pub current_tcb: *mut Tcb,
+    // --- user context saved at syscall entry (for blocking IPC resume) ---
+    /// User RIP (rcx on syscall entry, before argument marshaling clobbers it).
+    pub saved_user_rip: u64,
+    /// User RFLAGS (r11 on syscall entry).
+    pub saved_user_rflags: u64,
+    /// Set to 1 by a blocking syscall to signal the entry stub to yield the CPU
+    /// instead of returning via sysretq.
+    pub need_yield: u64,
+    /// User callee-saved registers -- the SYSCALL ABI requires these are
+    /// preserved across syscalls; when a syscall blocks and the thread is
+    /// later resumed via iretq, these are loaded from the saved TCB context.
+    pub saved_user_rbx: u64,
+    pub saved_user_rbp: u64,
+    pub saved_user_r12: u64,
+    pub saved_user_r13: u64,
+    pub saved_user_r14: u64,
+    pub saved_user_r15: u64,
 }
 
-/// Offset of [`CpuLocal::kernel_rsp`], for the `gs:`-relative entry stub.
+/// Offsets of [`CpuLocal`] fields, for the `gs:`-relative assembly stubs.
 pub const OFF_KERNEL_RSP: usize = 0;
-/// Offset of [`CpuLocal::user_rsp_scratch`], for the entry stub.
 pub const OFF_USER_RSP_SCRATCH: usize = 8;
+pub const OFF_SAVED_USER_RIP: usize = 32;
+pub const OFF_SAVED_USER_RFLAGS: usize = 40;
+pub const OFF_NEED_YIELD: usize = 48;
+pub const OFF_SAVED_USER_RBX: usize = 56;
+pub const OFF_SAVED_USER_RBP: usize = 64;
+pub const OFF_SAVED_USER_R12: usize = 72;
+pub const OFF_SAVED_USER_R13: usize = 80;
+pub const OFF_SAVED_USER_R14: usize = 88;
+pub const OFF_SAVED_USER_R15: usize = 96;
 
 // the assembly hard-codes these offsets via `const` operands; assert they match
 // the actual field layout so a field reorder fails the build rather than
 // silently corrupting the stack switch.
 const _: () = assert!(core::mem::offset_of!(CpuLocal, kernel_rsp) == OFF_KERNEL_RSP);
 const _: () = assert!(core::mem::offset_of!(CpuLocal, user_rsp_scratch) == OFF_USER_RSP_SCRATCH);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_rip) == OFF_SAVED_USER_RIP);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_rflags) == OFF_SAVED_USER_RFLAGS);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, need_yield) == OFF_NEED_YIELD);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_rbx) == OFF_SAVED_USER_RBX);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_rbp) == OFF_SAVED_USER_RBP);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_r12) == OFF_SAVED_USER_R12);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_r13) == OFF_SAVED_USER_R13);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_r14) == OFF_SAVED_USER_R14);
+const _: () = assert!(core::mem::offset_of!(CpuLocal, saved_user_r15) == OFF_SAVED_USER_R15);
 
 // SAFETY: CpuLocal holds raw pointers, so it is not Sync/Send by default. It is
 // only ever accessed from ring-0 code with interrupts disabled (SFMASK clears
@@ -82,6 +113,15 @@ static mut CPU_LOCAL: CpuLocal = CpuLocal {
     user_rsp_scratch: 0,
     current_cspace: core::ptr::null_mut(),
     current_tcb: core::ptr::null_mut(),
+    saved_user_rip: 0,
+    saved_user_rflags: 0,
+    need_yield: 0,
+    saved_user_rbx: 0,
+    saved_user_rbp: 0,
+    saved_user_r12: 0,
+    saved_user_r13: 0,
+    saved_user_r14: 0,
+    saved_user_r15: 0,
 };
 
 /// Returns a raw pointer to the bootstrap CPU's [`CpuLocal`] block.

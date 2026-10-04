@@ -40,6 +40,7 @@ pub mod clock;
 pub mod endpoint;
 pub mod fault;
 pub mod frame_allocator;
+pub mod ipc_buffer;
 pub mod notification;
 pub mod page_table;
 pub mod placement;

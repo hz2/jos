@@ -59,6 +59,8 @@ pub fn init() {
     #[cfg(target_arch = "x86_64")]
     {
         gdt::init_gdt();
+        // no-execute pages, so W^X user mappings are well-formed.
+        arch::x86_64::enable_nx();
         // hardware guards against the kernel following a user pointer.
         arch::x86_64::enable_smep_smap();
         interrupts::init_idt();

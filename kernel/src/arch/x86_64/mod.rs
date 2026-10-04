@@ -3,6 +3,7 @@
 pub mod multiboot2;
 
 use x86_64::registers::control::{Cr4, Cr4Flags};
+use x86_64::registers::model_specific::{Efer, EferFlags};
 
 // the multiboot2 header + 32->64 bit long-mode trampoline. it lives in the
 // library so every binary that links jos (the kernel and each test binary)
@@ -42,6 +43,30 @@ pub fn enable_smep_smap() -> (bool, bool) {
         Cr4::update(|f| f.insert(flags));
     }
     (smep, smap)
+}
+
+/// Enables no-execute pages (`EFER.NXE`) when the CPU supports them, returning
+/// whether it was turned on.
+///
+/// Without NXE, bit 63 of a page-table entry is reserved: any access through
+/// an entry that sets it faults with a reserved-bit (malformed table) error.
+/// W^X user mappings set `NO_EXECUTE` on stacks and data, so this must run
+/// before any of them is touched.
+pub fn enable_nx() -> bool {
+    // leaf 0x8000_0001 is only valid if the max extended leaf reaches it.
+    if core::arch::x86_64::__cpuid(0x8000_0000).eax < 0x8000_0001 {
+        return false;
+    }
+    if core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 20) == 0 {
+        return false;
+    }
+    // SAFETY: ring 0; NXE is only set when CPUID reports NX support, so the
+    // write cannot #GP. it only changes how bit 63 of a PTE is interpreted,
+    // from reserved to no-execute, and every other EFER bit is preserved.
+    unsafe {
+        Efer::update(|f| f.insert(EferFlags::NO_EXECUTE_ENABLE));
+    }
+    true
 }
 
 /// Runs `f` with the SMAP user-access window open, the one sanctioned way for

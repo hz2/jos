@@ -38,3 +38,10 @@ fn enable_is_idempotent() {
     assert_eq!(jos::arch::x86_64::enable_smep_smap(), (true, true));
     assert!(Cr4::read().contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION));
 }
+
+#[test_case]
+fn nx_enabled() {
+    // W^X user mappings set bit 63; without NXE that bit is reserved.
+    use x86_64::registers::model_specific::{Efer, EferFlags};
+    assert!(Efer::read().contains(EferFlags::NO_EXECUTE_ENABLE));
+}

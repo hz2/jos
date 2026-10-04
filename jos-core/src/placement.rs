@@ -109,9 +109,9 @@ mod kani_proofs {
     use super::*;
     use crate::untyped::{ObjectType, ENDPOINT_ALIGN, ENDPOINT_SIZE};
 
-    // a concrete type whose layout matches ObjectType::Endpoint (128 bytes, 64-byte align).
-    // the untyped kani proofs cover retype_fits arithmetic; these harnesses cover
-    // the ptr::write path inside place() itself.
+    /// A concrete type whose layout matches ObjectType::Endpoint (128 bytes, 64-byte align).
+    /// The untyped kani proofs cover retype_fits arithmetic; these harnesses cover
+    /// the ptr::write path inside place() itself.
     #[repr(C, align(64))]
     #[derive(Clone, Copy)]
     struct FakeEp {
@@ -119,8 +119,8 @@ mod kani_proofs {
         _rest: [u8; 120],
     }
 
-    // 384 bytes holds three endpoints with full alignment; repr(align(64)) ensures
-    // the base pointer is 64-byte aligned so place() does not hit RegionMisaligned.
+    /// 384 bytes holds three endpoints with full alignment; repr(align(64)) ensures
+    /// the base pointer is 64-byte aligned so place() does not hit RegionMisaligned.
     #[repr(C, align(64))]
     struct Buf([u8; 384]);
 
@@ -203,7 +203,7 @@ mod tests {
     extern crate std;
     use std::boxed::Box;
 
-    // a stand-in object whose layout matches ObjectType::Endpoint (128/64).
+    /// A stand-in object whose layout matches `ObjectType::Endpoint` (128/64).
     #[repr(C, align(64))]
     #[derive(Debug, PartialEq, Eq)]
     struct FakeEndpoint {
@@ -217,8 +217,8 @@ mod tests {
         }
     }
 
-    // returns a heap-backed byte buffer whose start is `align`-aligned, so the
-    // slice has real provenance (for Miri) and a known-aligned base.
+    /// Returns a heap-backed byte buffer whose start is `align`-aligned, so the
+    /// slice has real provenance (for Miri) and a known-aligned base.
     fn aligned_buf(len: usize, align: usize) -> (Box<[u8]>, usize) {
         // over-allocate, then report the offset to the first aligned byte.
         let buf = std::vec![0u8; len + align].into_boxed_slice();

@@ -34,9 +34,9 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// a statically-allocated untyped region. 64-byte aligned so placed objects meet
-// their alignment; backed by a real static so all derived pointers have valid
-// provenance. UnsafeCell + a Sync wrapper let us hand out one &'static mut to it.
+/// A statically-allocated untyped region. 64-byte aligned so placed objects meet
+/// their alignment; backed by a real static so all derived pointers have valid
+/// provenance. UnsafeCell + a Sync wrapper let us hand out one &'static mut to it.
 #[repr(align(64))]
 struct UntypedBacking {
     bytes: UnsafeCell<[u8; 4096]>,
@@ -49,7 +49,7 @@ static UNTYPED: UntypedBacking = UntypedBacking {
     bytes: UnsafeCell::new([0u8; 4096]),
 };
 
-// builds an UntypedRegion over the static backing. must be called at most once.
+/// Builds an UntypedRegion over the static backing. Must be called at most once.
 fn take_untyped() -> UntypedRegion {
     // SAFETY: called exactly once per test binary, before any other reference to
     // UNTYPED exists, so the &'static mut is unique. the array is 64-byte aligned
@@ -110,8 +110,8 @@ fn revoke_makes_capability_stale() {
     assert!(cap_send(&space, child, Message { label: 0, words: [0; 4] }).is_err());
 }
 
-// a second static region so the two tests do not share watermark state (each
-// #[test_case] runs in the same binary/boot sequentially).
+/// A second static region so the two tests do not share watermark state (each
+/// #[test_case] runs in the same binary/boot sequentially).
 #[repr(align(64))]
 struct UntypedBacking2 {
     bytes: UnsafeCell<[u8; 4096]>,

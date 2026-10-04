@@ -68,7 +68,7 @@ static CURRENT: AtomicUsize = AtomicUsize::new(NO_THREAD);
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct IrqFrame {
-    // gpr saves (in push order r15..rax, so rax is at lowest address)
+    /// Gpr saves (in push order r15..rax, so rax is at lowest address).
     pub rax: u64,
     pub rbx: u64,
     pub rcx: u64,
@@ -84,7 +84,7 @@ pub struct IrqFrame {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
-    // cpu-pushed interrupt frame
+    /// Cpu-pushed interrupt frame.
     pub rip: u64,
     pub cs: u64,
     pub rflags: u64,

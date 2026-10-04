@@ -107,7 +107,7 @@ unsafe impl Sync for CpuLocal {}
 // access only, so no cross-thread sharing hazard despite the raw pointers.
 unsafe impl Send for CpuLocal {}
 
-// the bootstrap CPU's per-CPU block. SMP would index this by APIC id.
+/// The bootstrap CPU's per-CPU block. SMP would index this by APIC id.
 static mut CPU_LOCAL: CpuLocal = CpuLocal {
     kernel_rsp: 0,
     user_rsp_scratch: 0,

@@ -77,8 +77,8 @@ pub enum VSpaceError {
 
 /// A virtual address space rooted at a carved `PML4` page table.
 pub struct VSpace {
-    // the PML4 object handle. the mapper dereferences it (and the tables it
-    // points at) exclusively; jos is single-threaded during these operations.
+    /// The PML4 object handle. The mapper dereferences it (and the tables it
+    /// points at) exclusively; jos is single-threaded during these operations.
     pml4: ObjectId,
 }
 

@@ -38,8 +38,8 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// drains the whole trace buffer into a small fixed array (no heap in these
-// tests). returns the count drained; events[..count] are in record order.
+/// Drains the whole trace buffer into a small fixed array (no heap in these
+/// tests). Returns the count drained; events[..count] are in record order.
 fn drain_all(events: &mut [SyscallEvent]) -> usize {
     trace::with_buffer(|buf| {
         let mut n = 0;
@@ -56,14 +56,14 @@ fn drain_all(events: &mut [SyscallEvent]) -> usize {
     })
 }
 
-// clears any events left by a prior test so each test sees only its own. the
-// trace buffer is a single global, and the test_runner runs cases in sequence.
+/// Clears any events left by a prior test so each test sees only its own. The
+/// trace buffer is a single global, and the test_runner runs cases in sequence.
 fn clear_trace() {
     trace::with_buffer(|buf| while buf.drain_oldest().is_some() {});
 }
 
-// a real, dispatched SYS_ADD is recorded with its number, args, and result.
-// SYS_ADD is a pure probe (no capability state), so it isolates the trace tap.
+/// A real, dispatched SYS_ADD is recorded with its number, args, and result.
+/// SYS_ADD is a pure probe (no capability state), so it isolates the trace tap.
 #[test_case]
 fn dispatched_add_is_recorded() {
     clear_trace();
@@ -80,8 +80,8 @@ fn dispatched_add_is_recorded() {
     serial_println!("[trace] recorded SYS_ADD seq={} result={:#x}", ev.seq, ev.result);
 }
 
-// several dispatched syscalls are recorded in order, with strictly increasing
-// sequence numbers (the total order replay relies on).
+/// Several dispatched syscalls are recorded in order, with strictly increasing
+/// sequence numbers (the total order replay relies on).
 #[test_case]
 fn dispatch_order_and_monotone_seq() {
     clear_trace();
@@ -106,8 +106,8 @@ fn dispatch_order_and_monotone_seq() {
     );
 }
 
-// once the buffer fills, the oldest events are overwritten and counted, so a
-// busy syscall stream keeps the most recent window rather than going deaf.
+/// Once the buffer fills, the oldest events are overwritten and counted, so a
+/// busy syscall stream keeps the most recent window rather than going deaf.
 #[test_case]
 fn full_buffer_overwrites_oldest() {
     clear_trace();
@@ -128,10 +128,10 @@ fn full_buffer_overwrites_oldest() {
     assert_eq!(oldest.args[0], 5, "the five oldest events should have been dropped");
 }
 
-// off-box capture: events recorded on the real dispatch path survive a postcard
-// COBS-frame encode and decode unchanged. this is the round trip a host capture
-// tool performs (drain -> frame -> serial -> decode), proving the serialized
-// form is a faithful, reconstructable record of what crossed the boundary.
+/// Off-box capture: events recorded on the real dispatch path survive a postcard
+/// COBS-frame encode and decode unchanged. This is the round trip a host capture
+/// tool performs (drain -> frame -> serial -> decode), proving the serialized
+/// form is a faithful, reconstructable record of what crossed the boundary.
 #[test_case]
 fn recorded_events_survive_postcard_round_trip() {
     use jos_core::trace::codec::{self, MAX_FRAMED_EVENT_LEN};
@@ -158,9 +158,9 @@ fn recorded_events_survive_postcard_round_trip() {
     serial_println!("[trace] {} events survived the postcard round trip", n);
 }
 
-// dump_trace_hex drains the buffer and reports how many events it emitted; an
-// empty buffer dumps nothing. (the hex output itself goes to the serial log for
-// a host tool; here we just confirm the drain count and that it empties.)
+/// dump_trace_hex drains the buffer and reports how many events it emitted; an
+/// empty buffer dumps nothing. (the hex output itself goes to the serial log for
+/// a host tool; here we just confirm the drain count and that it empties.).
 #[test_case]
 fn dump_trace_hex_drains_and_counts() {
     clear_trace();

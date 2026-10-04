@@ -102,12 +102,12 @@ pub enum RecvOutcome {
 /// counterpart was woken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Endpoint {
-    // the single message slot. None means empty, Some means an undelivered
-    // message is parked. capacity-1: a second deposit is refused, not queued.
+    /// The single message slot. None means empty, Some means an undelivered
+    /// message is parked. Capacity-1: a second deposit is refused, not queued.
     slot: Option<(Message, Badge)>,
-    // a sender is parked (the slot was full when it tried to send).
+    /// A sender is parked (the slot was full when it tried to send).
     sender_parked: bool,
-    // a receiver is parked (the slot was empty when it tried to receive).
+    /// A receiver is parked (the slot was empty when it tried to receive).
     receiver_parked: bool,
 }
 
@@ -483,11 +483,11 @@ mod tests {
 mod kani_proofs {
     use super::{Badge, Endpoint, Message, RecvOutcome, SendOutcome};
 
-    // an arbitrary endpoint state, used to prove the invariants hold from ANY
-    // reachable starting point, not just a fresh one. the parking flags are
-    // constrained to the reachable combinations (never both, each implying its
-    // slot condition) exactly as the operations maintain them; this models "some
-    // valid state" rather than fabricating an unreachable one.
+    /// An arbitrary endpoint state, used to prove the invariants hold from ANY
+    /// reachable starting point, not just a fresh one. The parking flags are
+    /// constrained to the reachable combinations (never both, each implying its
+    /// slot condition) exactly as the operations maintain them; this models "some
+    /// valid state" rather than fabricating an unreachable one.
     fn any_valid_endpoint() -> Endpoint {
         let loaded: bool = kani::any();
         let slot = if loaded {
@@ -509,8 +509,8 @@ mod kani_proofs {
         ep
     }
 
-    // the core mutual-exclusion invariant, plus its two halves, hold after a
-    // send applied to any valid state.
+    /// The core mutual-exclusion invariant, plus its two halves, hold after a
+    /// send applied to any valid state.
     #[kani::proof]
     fn send_preserves_invariant() {
         let mut ep = any_valid_endpoint();
@@ -521,7 +521,7 @@ mod kani_proofs {
         assert!(!ep.receiver_parked() || !ep.is_loaded());
     }
 
-    // the same after a recv applied to any valid state.
+    /// The same after a recv applied to any valid state.
     #[kani::proof]
     fn recv_preserves_invariant() {
         let mut ep = any_valid_endpoint();
@@ -531,8 +531,8 @@ mod kani_proofs {
         assert!(!ep.receiver_parked() || !ep.is_loaded());
     }
 
-    // a deposit into an empty endpoint, then a take, returns exactly the
-    // deposited message: no fabrication, drop, or corruption of the payload.
+    /// A deposit into an empty endpoint, then a take, returns exactly the
+    /// deposited message: no fabrication, drop, or corruption of the payload.
     #[kani::proof]
     fn deposit_then_take_returns_same_message() {
         let mut ep = Endpoint::new();
@@ -546,8 +546,8 @@ mod kani_proofs {
         }
     }
 
-    // park_sender only takes effect on a full slot; park_receiver only on an
-    // empty slot. these are the self-guarding properties the invariant rests on.
+    /// park_sender only takes effect on a full slot; park_receiver only on an
+    /// empty slot. These are the self-guarding properties the invariant rests on.
     #[kani::proof]
     fn parking_is_self_guarding() {
         let mut ep = any_valid_endpoint();
@@ -563,9 +563,9 @@ mod kani_proofs {
         }
     }
 
-    // cancelling a parked peer (the timeout mechanism) only clears, so it
-    // preserves every state invariant from any valid state, and leaves the slot
-    // and the other peer untouched.
+    /// Cancelling a parked peer (the timeout mechanism) only clears, so it
+    /// preserves every state invariant from any valid state, and leaves the slot
+    /// and the other peer untouched.
     #[kani::proof]
     fn cancel_preserves_invariant() {
         let mut ep = any_valid_endpoint();

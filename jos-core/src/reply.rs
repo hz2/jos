@@ -189,8 +189,8 @@ mod tests {
     }
 }
 
-// bounded proofs: the state space is three states, so a short arbitrary op
-// sequence from a fresh object covers every reachable transition.
+/// Bounded proofs: the state space is three states, so a short arbitrary op
+/// sequence from a fresh object covers every reachable transition.
 #[cfg(kani)]
 mod kani_proofs {
     use super::{Message, Reply};
@@ -199,8 +199,8 @@ mod kani_proofs {
         Message::new(kani::any(), [kani::any(); 4])
     }
 
-    // one shot: after a bind, at most one reply is accepted, whatever ops follow
-    // (short of take/cancel, which end the binding).
+    /// One shot: after a bind, at most one reply is accepted, whatever ops follow
+    /// (short of take/cancel, which end the binding).
     #[kani::proof]
     fn at_most_one_reply_per_bind() {
         let mut r = Reply::new();
@@ -211,7 +211,7 @@ mod kani_proofs {
         assert!(second.is_err());
     }
 
-    // the caller takes exactly the answer the server gave.
+    /// The caller takes exactly the answer the server gave.
     #[kani::proof]
     fn take_returns_the_reply() {
         let mut r = Reply::new();
@@ -222,8 +222,8 @@ mod kani_proofs {
         assert!(r.is_idle());
     }
 
-    // over an arbitrary 4-op sequence, a message is only ever taken after a
-    // reply was accepted while a caller was bound.
+    /// Over an arbitrary 4-op sequence, a message is only ever taken after a
+    /// reply was accepted while a caller was bound.
     #[kani::proof]
     #[kani::unwind(5)]
     fn no_answer_without_bound_caller() {

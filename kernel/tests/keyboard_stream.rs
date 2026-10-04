@@ -49,8 +49,8 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// scancodes pushed BEFORE the consumer runs are buffered and then drained in
-// fifo order: the stream yields them oldest-first. (set-1 make codes for keys.)
+/// Scancodes pushed BEFORE the consumer runs are buffered and then drained in
+/// fifo order: the stream yields them oldest-first. (set-1 make codes for keys.).
 #[test_case]
 fn buffered_scancodes_drain_in_order() {
     // 0x1E,0x30,0x2E = make codes for 'a','b','c' in scancode set 1.
@@ -79,10 +79,10 @@ fn buffered_scancodes_drain_in_order() {
     assert_eq!(&got.borrow()[..], &codes[..]);
 }
 
-// a consumer parked on the empty queue is woken by a later add_scancode: spawn a
-// task that awaits one byte (parks, since the queue is empty), drive the
-// executor to quiescence, then feed a byte and drive again. the byte must be
-// delivered, proving the IRQ-side wake reaches the parked stream.
+/// A consumer parked on the empty queue is woken by a later add_scancode: spawn a
+/// task that awaits one byte (parks, since the queue is empty), drive the
+/// executor to quiescence, then feed a byte and drive again. The byte must be
+/// delivered, proving the IRQ-side wake reaches the parked stream.
 #[test_case]
 fn parked_consumer_is_woken_by_later_scancode() {
     let got: Rc<RefCell<Option<u8>>> = Rc::new(RefCell::new(None));
@@ -107,10 +107,10 @@ fn parked_consumer_is_woken_by_later_scancode() {
     assert_eq!(*got.borrow(), Some(0x1E));
 }
 
-// the decode path (pc-keyboard) run on the executor turns scancode bytes into
-// characters: feed the make/break sequence for "ok" and assert the decoder task
-// produced exactly those characters. this is print_keypresses' logic, capturing
-// the output instead of printing it.
+/// The decode path (pc-keyboard) run on the executor turns scancode bytes into
+/// characters: feed the make/break sequence for "ok" and assert the decoder task
+/// produced exactly those characters. This is print_keypresses' logic, capturing
+/// the output instead of printing it.
 #[test_case]
 fn decoder_task_turns_scancodes_into_characters() {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};

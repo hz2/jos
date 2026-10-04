@@ -67,22 +67,22 @@ const STEPS: usize = 800;
 // sweep the clock well past it, so the final phase always crosses every deadline.
 const HORIZON: u64 = 400;
 
-// a multiset of message labels: what entered the pipeline vs what came out.
+/// A multiset of message labels: what entered the pipeline vs what came out.
 type LabelBag = BTreeMap<u64, usize>;
 
 fn bag_insert(bag: &mut LabelBag, label: u64) {
     *bag.entry(label).or_insert(0) += 1;
 }
 
-// a receiver's lifecycle. Waiting receivers hold an armed timer id and a
-// deadline; terminal receivers are done.
+/// A receiver's lifecycle. Waiting receivers hold an armed timer id and a
+/// deadline; terminal receivers are done.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Receiver {
-    // parked on endpoint `ep`, timer `timer` armed for `deadline`.
+    /// Parked on endpoint `ep`, timer `timer` armed for `deadline`.
     Waiting { ep: usize, deadline: Instant, timer: TimerId },
-    // collected a message at the recorded label.
+    /// Collected a message at the recorded label.
     Received { label: u64 },
-    // gave up at its deadline (no message arrived in time).
+    /// Gave up at its deadline (no message arrived in time).
     TimedOut,
 }
 
@@ -92,7 +92,7 @@ impl Receiver {
     }
 }
 
-// one recorded event, enough to prove two same-seed runs are identical.
+/// One recorded event, enough to prove two same-seed runs are identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ev {
     Realized { ep: usize, label: u64 },
@@ -112,18 +112,18 @@ struct Sim {
     endpoints: [Endpoint; E],
     timers: TimerQueue<CAP>,
 
-    // the receivers under test.
+    /// The receivers under test.
     receivers: [Receiver; R],
 
-    // an independent slot shadow per endpoint (capacity-1 + anti-corruption),
-    // and per-endpoint outboxes of realized-but-undeposited messages.
+    /// An independent slot shadow per endpoint (capacity-1 + anti-corruption),
+    /// and per-endpoint outboxes of realized-but-undeposited messages.
     slot_shadow: [Option<Message>; E],
     outbox: [Vec<Message>; E],
 
     next_label: u64,
     budget: usize,
 
-    // conservation accounting (mirrors dst_ipc).
+    /// Conservation accounting (mirrors dst_ipc).
     realized: LabelBag,
     received: LabelBag,
     realized_total: usize,
@@ -180,7 +180,7 @@ impl Sim {
         usize::try_from(self.rng.below(u64::try_from(E).unwrap())).unwrap()
     }
 
-    // records that a message entered the pipeline for endpoint `ep`.
+    /// Records that a message entered the pipeline for endpoint `ep`.
     fn realize(&mut self, message: Message, ep: usize) {
         bag_insert(&mut self.realized, message.label);
         self.realized_total += 1;
@@ -188,10 +188,10 @@ impl Sim {
         self.log.push(Ev::Realized { ep, label: message.label });
     }
 
-    // generates one fresh message for `ep`, applying drop/dup faults (delay is
-    // modeled coarsely as a drop here; the message layer's full delay behavior is
-    // covered by dst_ipc). drops are what make a sender miss a receiver's
-    // deadline, the interesting case for timeouts.
+    /// Generates one fresh message for `ep`, applying drop/dup faults (delay is
+    /// modeled coarsely as a drop here; the message layer's full delay behavior is
+    /// covered by dst_ipc). Drops are what make a sender miss a receiver's
+    /// deadline, the interesting case for timeouts.
     fn generate(&mut self, ep: usize) {
         if self.budget == 0 {
             return;
@@ -214,7 +214,7 @@ impl Sim {
         }
     }
 
-    // tries to deposit the front of endpoint `ep`'s outbox into its slot.
+    /// Tries to deposit the front of endpoint `ep`'s outbox into its slot.
     fn deposit(&mut self, ep: usize) {
         let Some(&message) = self.outbox[ep].first() else {
             return;
@@ -236,9 +236,9 @@ impl Sim {
         }
     }
 
-    // a waiting receiver on endpoint `ep` tries to collect a message. on success
-    // it becomes Received and cancels its armed timer (the message won the race);
-    // on empty it stays Waiting (its timer is still armed).
+    /// A waiting receiver on endpoint `ep` tries to collect a message. On success
+    /// it becomes Received and cancels its armed timer (the message won the race);
+    /// on empty it stays Waiting (its timer is still armed).
     fn try_receive(&mut self, r: usize) {
         let Receiver::Waiting { ep, timer, .. } = self.receivers[r] else {
             return;
@@ -265,10 +265,10 @@ impl Sim {
         }
     }
 
-    // advance the clock by a random step, then fire every timer the new time has
-    // reached: each fired timer times out its receiver (which cancels its
-    // endpoint park, the cancel_receiver mechanism). this is where progress comes
-    // from: a parked receiver whose deadline passes is forced terminal.
+    /// Advance the clock by a random step, then fire every timer the new time has
+    /// reached: each fired timer times out its receiver (which cancels its
+    /// endpoint park, the cancel_receiver mechanism). This is where progress comes
+    /// from: a parked receiver whose deadline passes is forced terminal.
     fn advance_and_fire(&mut self, by: u64) {
         self.clock.advance(Duration::new(by));
         let now = self.clock.now();
@@ -324,9 +324,9 @@ impl Sim {
         self.check_conservation();
     }
 
-    // conservation: realized == received + in-slots + in-outboxes, every step.
-    // a timeout consumes nothing, so it does not appear here; the message a
-    // timed-out receiver would have taken is still accounted in a slot or outbox.
+    /// Conservation: realized == received + in-slots + in-outboxes, every step.
+    /// A timeout consumes nothing, so it does not appear here; the message a
+    /// timed-out receiver would have taken is still accounted in a slot or outbox.
     fn check_conservation(&self) {
         let in_slots = self.slot_shadow.iter().filter(|s| s.is_some()).count();
         let in_outboxes: usize = self.outbox.iter().map(Vec::len).sum();
@@ -394,24 +394,24 @@ impl Sim {
         }
     }
 
-    // counts of each terminal outcome, for the anti-vacuous guard.
+    /// Counts of each terminal outcome, for the anti-vacuous guard.
     fn outcome_counts(&self) -> (usize, usize) {
         let received = self.receivers.iter().filter(|r| matches!(r, Receiver::Received { .. })).count();
         let timed_out = self.receivers.iter().filter(|r| matches!(r, Receiver::TimedOut)).count();
         (received, timed_out)
     }
 
-    // how many messages were generated vs realized; the gap is what the drop
-    // fault removed (the direct, low-noise signal that faults fired, the same
-    // measure dst_ipc uses). generated = BUDGET - remaining.
+    /// How many messages were generated vs realized; the gap is what the drop
+    /// fault removed (the direct, low-noise signal that faults fired, the same
+    /// measure dst_ipc uses). Generated = BUDGET - remaining.
     fn generated_and_realized(&self) -> (usize, usize) {
         (BUDGET - self.budget, self.realized_total)
     }
 
-    // starves the run of all messages: no sender ever has anything to deposit, so
-    // EVERY receiver must reach its terminal state via timeout. used by the
-    // starved test, where the timeout-termination path is the only route to
-    // progress (so the progress assertion directly exercises it).
+    /// Starves the run of all messages: no sender ever has anything to deposit, so
+    /// EVERY receiver must reach its terminal state via timeout. Used by the
+    /// starved test, where the timeout-termination path is the only route to
+    /// progress (so the progress assertion directly exercises it).
     fn starve(&mut self) {
         self.budget = 0;
     }
@@ -449,8 +449,8 @@ fn sweep(regime: &'static str, config: FaultConfig) {
 // tests
 // ---------------------------------------------------------------------------
 
-// ClearSky: no faults. Receivers mostly receive (some still time out if no
-// sender targets their endpoint in time), and every one reaches a terminal state.
+/// ClearSky: no faults. Receivers mostly receive (some still time out if no
+/// sender targets their endpoint in time), and every one reaches a terminal state.
 #[test]
 fn clear_sky_every_receiver_terminates() {
     if regime_selected("clear_sky") {
@@ -458,8 +458,8 @@ fn clear_sky_every_receiver_terminates() {
     }
 }
 
-// Stormy: drops and duplicates. Dropped sends make more receivers time out;
-// deadlock-freedom and conservation still hold.
+/// Stormy: drops and duplicates. Dropped sends make more receivers time out;
+/// deadlock-freedom and conservation still hold.
 #[test]
 fn stormy_every_receiver_terminates() {
     if regime_selected("stormy") {
@@ -467,8 +467,8 @@ fn stormy_every_receiver_terminates() {
     }
 }
 
-// Apocalyptic: the most aggressive regime. The progress guarantee is unchanged:
-// no receiver is ever stuck, however hostile the transport.
+/// Apocalyptic: the most aggressive regime. The progress guarantee is unchanged:
+/// no receiver is ever stuck, however hostile the transport.
 #[test]
 fn apocalyptic_every_receiver_terminates() {
     if regime_selected("apocalyptic") {
@@ -476,12 +476,12 @@ fn apocalyptic_every_receiver_terminates() {
     }
 }
 
-// the starved case: no message is ever generated, so EVERY receiver reaches its
-// terminal state by TIMING OUT. this makes the timeout-termination path the only
-// route to progress, so the deadlock-freedom assertion directly exercises it (in
-// the regime sweeps a receiver usually receives, so timeouts are comparatively
-// rare; here they are universal). it is the sharpest test of the property the
-// whole consumer exists for: a recv with no sender always terminates, never hangs.
+/// The starved case: no message is ever generated, so EVERY receiver reaches its
+/// terminal state by TIMING OUT. This makes the timeout-termination path the only
+/// route to progress, so the deadlock-freedom assertion directly exercises it (in
+/// the regime sweeps a receiver usually receives, so timeouts are comparatively
+/// rare; here they are universal). It is the sharpest test of the property the
+/// whole consumer exists for: a recv with no sender always terminates, never hangs.
 #[test]
 fn starved_receivers_all_time_out() {
     let seeds = if cfg!(miri) { 2 } else { 64 };
@@ -497,7 +497,7 @@ fn starved_receivers_all_time_out() {
     }
 }
 
-// the harness is a pure function of (seed, regime): two runs log identically.
+/// The harness is a pure function of (seed, regime): two runs log identically.
 #[test]
 fn harness_is_deterministic() {
     let seeds = if cfg!(miri) { 2 } else { 24 };
@@ -516,15 +516,15 @@ fn harness_is_deterministic() {
     }
 }
 
-// anti-vacuous, two independent checks. (1) BOTH terminal outcomes actually
-// occur across the sweep, so the progress assertion is not trivially satisfied
-// by everyone always timing out (or always receiving): the deadlock-freedom
-// check genuinely sees a mix. (2) the fault regimes genuinely fire: under
-// ClearSky every generated message is realized, while under Stormy drops make
-// fewer realized than generated. (2) is the direct low-noise fault signal, the
-// same measure dst_ipc::regimes_differ_in_realized_count uses; the
-// terminal-outcome counts are too noisy to compare across regimes here, since a
-// receiver whose endpoint simply never got a timely sender times out regardless.
+/// Anti-vacuous, two independent checks. (1) BOTH terminal outcomes actually
+/// occur across the sweep, so the progress assertion is not trivially satisfied
+/// by everyone always timing out (or always receiving): the deadlock-freedom
+/// check genuinely sees a mix. (2) the fault regimes genuinely fire: under
+/// ClearSky every generated message is realized, while under Stormy drops make
+/// fewer realized than generated. (2) is the direct low-noise fault signal, the
+/// same measure dst_ipc::regimes_differ_in_realized_count uses; the
+/// terminal-outcome counts are too noisy to compare across regimes here, since a
+/// receiver whose endpoint simply never got a timely sender times out regardless.
 #[test]
 fn both_outcomes_occur_and_faults_fire() {
     if cfg!(miri) {

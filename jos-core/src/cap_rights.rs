@@ -381,7 +381,7 @@ mod tests {
 mod kani_proofs {
     use super::Rights;
 
-    // helper: produce an arbitrary Rights with the invariant enforced.
+    /// Helper: produce an arbitrary Rights with the invariant enforced.
     fn any_rights() -> Rights {
         Rights::from_bits_truncate(kani::any::<u8>())
     }

@@ -497,16 +497,16 @@ mod kani_proofs {
         pd_index, pdpt_index, pml4_index, pt_index, page_offset,
     };
 
-    // for any u64 address, page_offset is always strictly less than PAGE_SIZE.
+    /// For any u64 address, page_offset is always strictly less than PAGE_SIZE.
     #[kani::proof]
     fn offset_always_in_range() {
         let v: u64 = kani::any();
         assert!(page_offset(v) < PAGE_SIZE);
     }
 
-    // for any u64 address, every 9-bit index is always strictly less than
-    // TABLE_ENTRIES (512). these four harnesses discharge the core arithmetic
-    // bounds that the Verus `integer_ring` proofs would express as lemmas.
+    /// For any u64 address, every 9-bit index is always strictly less than
+    /// TABLE_ENTRIES (512). These four harnesses discharge the core arithmetic
+    /// bounds that the Verus `integer_ring` proofs would express as lemmas.
     #[kani::proof]
     fn pt_index_always_in_range() {
         let v: u64 = kani::any();
@@ -531,8 +531,8 @@ mod kani_proofs {
         assert!(pml4_index(v) < TABLE_ENTRIES);
     }
 
-    // for any canonical address, from_parts(indices(v), page_offset(v)) == v.
-    // kani::assume narrows the symbolic input to the canonical subset.
+    /// For any canonical address, from_parts(indices(v), page_offset(v)) == v.
+    /// Kani::assume narrows the symbolic input to the canonical subset.
     #[kani::proof]
     fn roundtrip_for_canonical_addresses() {
         let v: u64 = kani::any();
@@ -540,8 +540,8 @@ mod kani_proofs {
         assert_eq!(from_parts(indices(v), page_offset(v)), v);
     }
 
-    // from_parts always produces a canonical result (sign-extension is
-    // unconditional in the implementation).
+    /// from_parts always produces a canonical result (sign-extension is
+    /// unconditional in the implementation).
     #[kani::proof]
     fn from_parts_always_canonical() {
         let idx0: usize = kani::any();

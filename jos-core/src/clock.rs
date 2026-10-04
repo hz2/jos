@@ -404,9 +404,9 @@ mod tests {
 mod kani_proofs {
     use super::{Duration, Instant, KernelClock, SimClock};
 
-    // a freshly computed deadline is never in the past: for any base instant and
-    // any span, now + d is at or after now. this is what lets the kernel arm a
-    // timeout without separately checking it did not wrap to the past.
+    /// A freshly computed deadline is never in the past: for any base instant and
+    /// any span, now + d is at or after now. This is what lets the kernel arm a
+    /// timeout without separately checking it did not wrap to the past.
     #[kani::proof]
     fn deadline_never_in_the_past() {
         let now = Instant::new(kani::any());
@@ -415,9 +415,9 @@ mod kani_proofs {
         assert!(deadline.reached(now));
     }
 
-    // reached is monotone in the current time: once an instant has reached a
-    // deadline, every later instant has too. this is why a timeout, once fired,
-    // stays fired as the clock keeps advancing.
+    /// Reached is monotone in the current time: once an instant has reached a
+    /// deadline, every later instant has too. This is why a timeout, once fired,
+    /// stays fired as the clock keeps advancing.
     #[kani::proof]
     fn reached_is_monotone_in_now() {
         let now1 = Instant::new(kani::any());
@@ -428,8 +428,8 @@ mod kani_proofs {
         assert!(now2.reached(deadline));
     }
 
-    // advancing a clock never moves it backward: now after advance is at or
-    // after now before, for any starting tick and any span (saturation included).
+    /// Advancing a clock never moves it backward: now after advance is at or
+    /// after now before, for any starting tick and any span (saturation included).
     #[kani::proof]
     fn advance_is_monotone() {
         let mut clock = SimClock::at(kani::any());
@@ -438,8 +438,8 @@ mod kani_proofs {
         assert!(clock.now() >= before);
     }
 
-    // setting a clock never moves it backward: the monotonic guard clamps a
-    // backward set, so now after set is at or after now before, for any target.
+    /// Setting a clock never moves it backward: the monotonic guard clamps a
+    /// backward set, so now after set is at or after now before, for any target.
     #[kani::proof]
     fn set_is_monotone() {
         let mut clock = SimClock::at(kani::any());

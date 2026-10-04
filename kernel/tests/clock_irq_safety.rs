@@ -46,10 +46,10 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// hammering the timer-queue lock while the PIT fires must not deadlock. each
-// iteration arms a timer and cancels it, holding TIMERS twice; the loop runs
-// long enough to span many timer IRQs, so an unguarded lock would be caught
-// mid-hold by on_timer_tick and wedge.
+/// Hammering the timer-queue lock while the PIT fires must not deadlock. Each
+/// iteration arms a timer and cancels it, holding TIMERS twice; the loop runs
+/// long enough to span many timer IRQs, so an unguarded lock would be caught
+/// mid-hold by on_timer_tick and wedge.
 #[test_case]
 fn arm_cancel_loop_does_not_deadlock_against_timer_irq() {
     // kernel_main already ran jos::init(), so the PIT is firing. wait until the
@@ -85,9 +85,9 @@ fn arm_cancel_loop_does_not_deadlock_against_timer_irq() {
     );
 }
 
-// the waker-registry lock (TIMER_WAKERS) is the other IRQ-shared lock; exercise
-// it directly under live interrupts. register + take in a loop spanning ticks:
-// on_timer_tick also takes this lock, so an unguarded version deadlocks here too.
+/// The waker-registry lock (TIMER_WAKERS) is the other IRQ-shared lock; exercise
+/// it directly under live interrupts. Register + take in a loop spanning ticks:
+/// on_timer_tick also takes this lock, so an unguarded version deadlocks here too.
 #[test_case]
 fn waker_registry_loop_does_not_deadlock_against_timer_irq() {
     // jos::init() already ran in the first test case (test_runner runs all cases
@@ -117,7 +117,7 @@ fn waker_registry_loop_does_not_deadlock_against_timer_irq() {
     assert!(end > start, "timer did not advance during the registry hammer loop");
 }
 
-// reads the TSC clock without needing the KernelClock trait in scope.
+/// Reads the TSC clock without needing the KernelClock trait in scope.
 fn clock_now() -> Instant {
     jos::clock::now()
 }

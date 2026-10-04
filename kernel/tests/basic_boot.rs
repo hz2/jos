@@ -9,7 +9,7 @@
 use jos::println;
 use core::panic::PanicInfo;
 
-// the trampoline in the jos library calls kernel_main; run the test harness.
+/// The trampoline in the jos library calls kernel_main; run the test harness.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
     test_main();

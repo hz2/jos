@@ -1,10 +1,10 @@
 use spin::Mutex;
 use uart_16550::SerialPort;
 
-// COM1 lives at the standard 0x3F8 i/o port base. SerialPort::new is a const fn,
-// so this static is built at compile time, with no lazy_static first-access
-// path (which hung the boot sequence elsewhere). the port still needs a runtime
-// init() before use; that happens once in init_serial() during kernel init.
+/// COM1 lives at the standard 0x3F8 i/o port base. SerialPort::new is a const fn,
+/// so this static is built at compile time, with no lazy_static first-access
+/// path (which hung the boot sequence elsewhere). The port still needs a runtime
+/// init() before use; that happens once in init_serial() during kernel init.
 pub static SERIAL1: Mutex<SerialPort> = Mutex::new(
     // SAFETY: 0x3F8 is the fixed COM1 base on x86; qemu always emulates a 16550
     // uart there, and this is the only SerialPort constructed for that base.

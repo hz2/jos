@@ -78,7 +78,7 @@ fn fresh_untyped() -> UntypedRegion {
     UntypedRegion::new(&mut backing[off..off + 512])
 }
 
-// builds a space with one endpoint; returns (space, root_cap, recv_cap).
+/// Builds a space with one endpoint; returns (space, root_cap, recv_cap).
 fn space_with_endpoint() -> (KernelCapSpace, CapRef, CapRef) {
     let mut untyped = fresh_untyped();
     let mut space = KernelCapSpace::new();
@@ -88,14 +88,14 @@ fn space_with_endpoint() -> (KernelCapSpace, CapRef, CapRef) {
     (space, full, recv_cap)
 }
 
-// a stable pointer to the space inside the Rc<RefCell<..>>. the recv_resolving
-// future re-derives a transient &KernelCapSpace from this on each poll; the
-// pointer stays valid because the Rc keeps the cell alive for the whole test.
+/// A stable pointer to the space inside the Rc<RefCell<..>>. The recv_resolving
+/// future re-derives a transient &KernelCapSpace from this on each poll; the
+/// pointer stays valid because the Rc keeps the cell alive for the whole test.
 fn space_ptr(space: &Rc<RefCell<KernelCapSpace>>) -> *const KernelCapSpace {
     space.as_ptr()
 }
 
-// task A blocks on recv; task B revokes the cap; A wakes with InvalidCap.
+/// Task A blocks on recv; task B revokes the cap; A wakes with InvalidCap.
 #[test_case]
 fn parked_receiver_is_cancelled_by_revoke() {
     let (space, root_cap, recv_cap) = space_with_endpoint();
@@ -143,9 +143,9 @@ fn parked_receiver_is_cancelled_by_revoke() {
     assert_eq!(*result.borrow(), Some(Err(IpcError::InvalidCap)));
 }
 
-// negative control: with NO revoke, the parked receiver never completes. proves
-// task A genuinely parked (did not resolve eagerly) and that the cancellation in
-// the test above is caused by the revoke, not by something incidental.
+/// Negative control: with NO revoke, the parked receiver never completes. Proves
+/// task A genuinely parked (did not resolve eagerly) and that the cancellation in
+/// the test above is caused by the revoke, not by something incidental.
 #[test_case]
 fn parked_receiver_without_revoke_stays_blocked() {
     let (space, _root_cap, recv_cap) = space_with_endpoint();

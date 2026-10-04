@@ -665,8 +665,8 @@ mod kani_proofs {
     // bound: keep region_size small so Kani's state space stays tractable.
     const MAX_REGION: usize = 0x10_0000; // 1 MiB
 
-    // helper: produce a bounded, valid ObjectType for Kani.
-    // we use a tag byte to pick the variant and bound size_bits tightly.
+    /// Helper: produce a bounded, valid ObjectType for Kani.
+    /// We use a tag byte to pick the variant and bound size_bits tightly.
     fn any_object_type() -> ObjectType {
         let tag: u8 = kani::any();
         let size_bits: u8 = kani::any();

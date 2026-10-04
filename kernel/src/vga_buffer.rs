@@ -73,9 +73,9 @@ struct Buffer {
 pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
-    // raw pointer to the fixed vga buffer rather than &'static mut, so Writer
-    // is const-constructible. it is only dereferenced inside &mut self methods
-    // (behind the WRITER mutex), so no aliasing &mut ever exists.
+    /// Raw pointer to the fixed vga buffer rather than &'static mut, so Writer
+    /// is const-constructible. It is only dereferenced inside &mut self methods
+    /// (behind the WRITER mutex), so no aliasing &mut ever exists.
     buffer: *mut Buffer,
 }
 
@@ -94,7 +94,7 @@ impl Writer {
         }
     }
 
-    // borrows the vga buffer mutably for the duration of a write.
+    /// Borrows the vga buffer mutably for the duration of a write.
     fn buffer(&mut self) -> &mut Buffer {
         // SAFETY: buffer points at the fixed, identity-mapped vga mmio region,
         // live under the multiboot/grub bios path. &mut self plus the WRITER
@@ -216,10 +216,10 @@ pub fn _print(args: fmt::Arguments) {
 
 // tests
 
-// printing far more lines than the buffer is tall must scroll without panicking
-// AND leave the most recent line readable at the bottom. the bare "call println!
-// 200 times and assert nothing" version could not catch a scroll that corrupted
-// or blanked the visible line, so read the last written line back and check it.
+/// Printing far more lines than the buffer is tall must scroll without panicking
+/// AND leave the most recent line readable at the bottom. The bare "call println!
+/// 200 times and assert nothing" version could not catch a scroll that corrupted
+/// or blanked the visible line, so read the last written line back and check it.
 #[test_case]
 fn test_println_scrolls_and_keeps_last_line() {
     use core::fmt::Write;

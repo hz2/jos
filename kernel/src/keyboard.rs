@@ -79,8 +79,8 @@ pub fn add_scancode(scancode: u8) {
 /// Single-consumer: at most one `ScancodeStream` should exist, because the
 /// shared [`WAKER`] holds exactly one consumer. Constructed via [`new`](Self::new).
 pub struct ScancodeStream {
-    // private field so the only way to build one is `new`, which asserts the
-    // queue is initialized; keeps a stream from existing before init().
+    /// Private field so the only way to build one is `new`, which asserts the
+    /// queue is initialized; keeps a stream from existing before init().
     _private: (),
 }
 

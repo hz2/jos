@@ -68,8 +68,8 @@ impl Task {
         }
     }
 
-    // polls the inner future. `Pin::as_mut` reborrows the pinned box so the
-    // future is never moved out of its pinned location.
+    /// Polls the inner future. `Pin::as_mut` reborrows the pinned box so the
+    /// future is never moved out of its pinned location.
     fn poll(&mut self, context: &mut Context) -> Poll<()> {
         self.future.as_mut().poll(context)
     }
@@ -93,19 +93,19 @@ impl core::fmt::Debug for Task {
 /// task, whose `wake` pushes the slot into the inbox.
 struct TaskWaker {
     slot: usize,
-    // "this slot is in flight toward a poll": set by wake, cleared by the
-    // executor just before it polls the task. gates inbox pushes so the inbox
-    // holds at most one entry per slot.
+    /// "this slot is in flight toward a poll": set by wake, cleared by the
+    /// executor just before it polls the task. Gates inbox pushes so the inbox
+    /// holds at most one entry per slot.
     queued: AtomicBool,
     wake_inbox: Arc<ArrayQueue<usize>>,
 }
 
 impl TaskWaker {
-    // records a wake: if this slot is not already in flight, claim it and push
-    // it to the inbox. lock-free, so this is safe to call from an interrupt
-    // handler. a push failure is impossible here (the flag bounds the inbox to
-    // one entry per slot, and the inbox has MAX_TASKS capacity), but the result
-    // is discarded rather than unwrapped so a wake can never panic.
+    /// Records a wake: if this slot is not already in flight, claim it and push
+    /// it to the inbox. Lock-free, so this is safe to call from an interrupt
+    /// handler. A push failure is impossible here (the flag bounds the inbox to
+    /// one entry per slot, and the inbox has MAX_TASKS capacity), but the result
+    /// is discarded rather than unwrapped so a wake can never panic.
     fn schedule(&self) {
         if !self.queued.swap(true, Ordering::AcqRel) {
             let _ = self.wake_inbox.push(self.slot);
@@ -129,15 +129,15 @@ impl Wake for TaskWaker {
 
 /// The cooperative executor: owns the task slab and drives ready tasks.
 pub struct Executor {
-    // slot-indexed task slab; `None` is a free slot. not `Box<[..]>` so the
-    // whole executor can be a value the kernel holds on its stack/static.
+    /// Slot-indexed task slab; `None` is a free slot. Not `Box<[..]>` so the
+    /// whole executor can be a value the kernel holds on its stack/static.
     tasks: [Option<Task>; MAX_TASKS],
-    // the wake target per slot, kept alive while the task is live so its
-    // `queued` flag persists across polls.
+    /// The wake target per slot, kept alive while the task is live so its
+    /// `queued` flag persists across polls.
     wakers: [Option<Arc<TaskWaker>>; MAX_TASKS],
-    // the verified scheduling model: which slots are ready, in FIFO order.
+    /// The verified scheduling model: which slots are ready, in FIFO order.
     ready: RunQueue<MAX_TASKS>,
-    // lock-free inbox wakers push into; drained into `ready` by the executor.
+    /// Lock-free inbox wakers push into; drained into `ready` by the executor.
     wake_inbox: Arc<ArrayQueue<usize>>,
 }
 
@@ -180,14 +180,14 @@ impl Executor {
         Ok(slot)
     }
 
-    // index of the first free task slot, if any.
+    /// Index of the first free task slot, if any.
     fn free_slot(&self) -> Option<usize> {
         self.tasks.iter().position(Option::is_none)
     }
 
-    // moves every pending wake from the lock-free inbox into the verified ready
-    // queue. a wake for a slot whose task has since completed (now `None`) is
-    // dropped; the run queue dedups the rest.
+    /// Moves every pending wake from the lock-free inbox into the verified ready
+    /// queue. A wake for a slot whose task has since completed (now `None`) is
+    /// dropped; the run queue dedups the rest.
     fn drain_inbox(&mut self) {
         while let Ok(slot) = self.wake_inbox.pop() {
             if slot < MAX_TASKS && self.tasks[slot].is_some() {
@@ -196,9 +196,9 @@ impl Executor {
         }
     }
 
-    // polls every currently-ready task once, in FIFO order. a task that
-    // completes frees its slot; a task that wakes itself or another during its
-    // poll lands back in the inbox for the next drain.
+    /// Polls every currently-ready task once, in FIFO order. A task that
+    /// completes frees its slot; a task that wakes itself or another during its
+    /// poll lands back in the inbox for the next drain.
     fn run_ready(&mut self) {
         while let Some(slot) = self.ready.dequeue() {
             // clone the Arc so no borrow of `self.wakers` is held while we
@@ -250,8 +250,8 @@ impl Executor {
         }
     }
 
-    // halts the cpu if there is no pending work, closing the race against an
-    // interrupt that arrives between the emptiness check and the halt.
+    /// Halts the cpu if there is no pending work, closing the race against an
+    /// interrupt that arrives between the emptiness check and the halt.
     fn sleep_if_idle(&self) {
         use x86_64::instructions::interrupts;
         // disable interrupts so the check below and the halt are atomic with

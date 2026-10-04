@@ -287,30 +287,30 @@ mod tests {
 mod kani_proofs {
     use super::{ADDR_MASK, FLAGS_MASK, encode, flags, frame_addr};
 
-    // the two masks partition all 64 bits: complementary and exhaustive.
+    /// The two masks partition all 64 bits: complementary and exhaustive.
     #[kani::proof]
     fn masks_partition_all_bits() {
         assert_eq!(ADDR_MASK & FLAGS_MASK, 0);
         assert_eq!(ADDR_MASK | FLAGS_MASK, u64::MAX);
     }
 
-    // for any entry, the extracted frame address has no bits outside ADDR_MASK
-    // (it is always 4 KiB-aligned and within the 52-bit physical range).
+    /// For any entry, the extracted frame address has no bits outside ADDR_MASK
+    /// (it is always 4 KiB-aligned and within the 52-bit physical range).
     #[kani::proof]
     fn frame_addr_always_in_range() {
         let entry: u64 = kani::any();
         assert_eq!(frame_addr(entry) & !ADDR_MASK, 0);
     }
 
-    // for any entry, the extracted flags have no bits inside ADDR_MASK.
+    /// For any entry, the extracted flags have no bits inside ADDR_MASK.
     #[kani::proof]
     fn flags_never_touch_address() {
         let entry: u64 = kani::any();
         assert_eq!(flags(entry) & ADDR_MASK, 0);
     }
 
-    // round-trip: for a well-formed (aligned, in-range) address and flags
-    // confined to the flag bits, encode then decode is the identity on both.
+    /// Round-trip: for a well-formed (aligned, in-range) address and flags
+    /// confined to the flag bits, encode then decode is the identity on both.
     #[kani::proof]
     fn encode_decode_roundtrip() {
         let addr: u64 = kani::any();
@@ -322,9 +322,9 @@ mod kani_proofs {
         assert_eq!(flags(entry), f);
     }
 
-    // encode never lets one field bleed into the other, even for adversarial
-    // (overlapping) inputs: the address field of the result depends only on
-    // addr's in-range bits, and the flag field only on f's flag bits.
+    /// Encode never lets one field bleed into the other, even for adversarial
+    /// (overlapping) inputs: the address field of the result depends only on
+    /// addr's in-range bits, and the flag field only on f's flag bits.
     #[kani::proof]
     fn encode_isolates_fields() {
         let addr: u64 = kani::any();

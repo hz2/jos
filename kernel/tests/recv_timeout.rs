@@ -81,10 +81,10 @@ fn space_with_endpoint() -> (KernelCapSpace, CapRef, CapRef) {
     (space, send_cap, recv_cap)
 }
 
-// drives the executor until `done` is set, sleeping the cpu (hlt) between turns
-// so the periodic PIT timer IRQ advances and fires due timers. a bounded outer
-// cap (TICK_COUNT-based) keeps a buggy never-completing future from hanging the
-// test forever: it asserts progress within a generous tick budget.
+/// Drives the executor until `done` is set, sleeping the cpu (hlt) between turns
+/// so the periodic PIT timer IRQ advances and fires due timers. A bounded outer
+/// cap (TICK_COUNT-based) keeps a buggy never-completing future from hanging the
+/// test forever: it asserts progress within a generous tick budget.
 fn run_until(executor: &mut Executor, done: &RefCell<bool>) {
     use jos::interrupts::TICK_COUNT;
     let start = TICK_COUNT.load(Ordering::Relaxed);
@@ -104,9 +104,9 @@ fn run_until(executor: &mut Executor, done: &RefCell<bool>) {
     }
 }
 
-// a sender that deposits before the deadline delivers the message: the receiver
-// returns RecvTimeout::Message, not a timeout. the deadline is far in the future
-// (a large TSC delta), so the sender always wins.
+/// A sender that deposits before the deadline delivers the message: the receiver
+/// returns RecvTimeout::Message, not a timeout. The deadline is far in the future
+/// (a large TSC delta), so the sender always wins.
 #[test_case]
 fn message_arrives_before_deadline() {
     let (space, send_cap, recv_cap) = space_with_endpoint();
@@ -144,9 +144,9 @@ fn message_arrives_before_deadline() {
     assert_eq!(*got.borrow(), Some(RecvTimeout::Message(sent)));
 }
 
-// a receiver with no sender times out: once the TSC passes the (near) deadline,
-// the PIT timer IRQ fires the armed timer's waker, the receiver re-polls, sees
-// the deadline passed, and returns RecvTimeout::TimedOut instead of hanging.
+/// A receiver with no sender times out: once the TSC passes the (near) deadline,
+/// the PIT timer IRQ fires the armed timer's waker, the receiver re-polls, sees
+/// the deadline passed, and returns RecvTimeout::TimedOut instead of hanging.
 #[test_case]
 fn no_sender_times_out() {
     let (space, _send_cap, recv_cap) = space_with_endpoint();

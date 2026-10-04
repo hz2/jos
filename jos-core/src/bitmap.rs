@@ -300,7 +300,7 @@ mod tests {
     // library itself is no_std
     extern crate std;
 
-    // helper: allocate backing storage for a small bitmap
+    /// Helper: allocate backing storage for a small bitmap.
     fn make_words(n_words: usize) -> std::vec::Vec<u64> {
         std::vec![0u64; n_words]
     }

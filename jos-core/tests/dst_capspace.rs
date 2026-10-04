@@ -66,35 +66,35 @@ fn as_u32(x: usize) -> u32 {
 // the shadow model
 // ---------------------------------------------------------------------------
 
-// one live capability as the model tracks it. deliberately a different shape
-// from the implementation's `Slot` (no generation counter; the parent is the
-// full `CapRef` we passed at mint, resolved later by search), so the model is an
-// independent oracle rather than a copy of the code under test.
+/// One live capability as the model tracks it. Deliberately a different shape
+/// from the implementation's `Slot` (no generation counter; the parent is the
+/// full `CapRef` we passed at mint, resolved later by search), so the model is an
+/// independent oracle rather than a copy of the code under test.
 #[derive(Clone, Copy, Debug)]
 struct ModelCap {
-    // the CapRef the implementation handed back when this cap was created. while
-    // the cap is live this equals `space.ref_at(slot)`, which the invariants check.
+    /// The CapRef the implementation handed back when this cap was created. While
+    /// the cap is live this equals `space.ref_at(slot)`, which the invariants check.
     own_ref: CapRef,
     object: ObjectToken,
     rights: Rights,
-    // the source CapRef this cap was minted from (None for an original). a
-    // generation-bearing ref, so a removed-and-reused parent slot does not
-    // silently re-parent this cap.
+    /// The source CapRef this cap was minted from (None for an original). A
+    /// generation-bearing ref, so a removed-and-reused parent slot does not
+    /// silently re-parent this cap.
     parent: Option<CapRef>,
 }
 
-// the simulation: the implementation under test, the independent model, and the
-// bookkeeping that makes failures reproducible.
+/// The simulation: the implementation under test, the independent model, and the
+/// bookkeeping that makes failures reproducible.
 struct Sim {
     seed: u64,
     rng: SimRng,
     space: CapSpace<ObjectToken, N>,
     model: [Option<ModelCap>; N],
-    // monotone source of fresh object identities, so every Insert names a
-    // distinct object and the model can tell objects apart.
+    /// Monotone source of fresh object identities, so every Insert names a
+    /// distinct object and the model can tell objects apart.
     next_object: u64,
-    // every CapRef ever removed (by remove or revoke). none may ever resolve
-    // again: the global staleness invariant checks this each step.
+    /// Every CapRef ever removed (by remove or revoke). None may ever resolve
+    /// again: the global staleness invariant checks this each step.
     retired: Vec<CapRef>,
     seq: u64,
     log: Vec<TraceEvent>,
@@ -116,26 +116,26 @@ impl Sim {
 
     // -- model queries (independent of the implementation) ------------------
 
-    // the lowest free slot, as the model sees occupancy. the implementation's
-    // insert/mint pick the lowest free slot too, so this predicts the
-    // destination, and the invariants prove the two free-sets stay identical.
+    /// The lowest free slot, as the model sees occupancy. The implementation's
+    /// insert/mint pick the lowest free slot too, so this predicts the
+    /// destination, and the invariants prove the two free-sets stay identical.
     fn model_lowest_free(&self) -> Option<usize> {
         (0..N).find(|&s| self.model[s].is_none())
     }
 
-    // the live slot whose capability's own_ref equals `r`, if any. the model's
-    // way of resolving a CapRef to a slot: a linear search by stored ref, where
-    // the implementation indexes by slot and checks the generation. a stale ref
-    // (its slot reused, generation advanced) matches nothing, exactly as it
-    // resolves to nothing in the implementation.
+    /// The live slot whose capability's own_ref equals `r`, if any. The model's
+    /// way of resolving a CapRef to a slot: a linear search by stored ref, where
+    /// the implementation indexes by slot and checks the generation. A stale ref
+    /// (its slot reused, generation advanced) matches nothing, exactly as it
+    /// resolves to nothing in the implementation.
     fn live_slot_with_ref(&self, r: CapRef) -> Option<usize> {
         (0..N).find(|&s| self.model[s].is_some_and(|c| c.own_ref == r))
     }
 
-    // does the live cap in `leaf` descend from (or equal) the cap named by
-    // `root_ref`? an independent reimplementation of CapSpace::descends_from:
-    // walk parent CapRefs, resolving each to a slot by search, bounded by N so a
-    // corrupt cycle cannot hang.
+    /// Does the live cap in `leaf` descend from (or equal) the cap named by
+    /// `root_ref`? An independent reimplementation of CapSpace::descends_from:
+    /// walk parent CapRefs, resolving each to a slot by search, bounded by N so a
+    /// corrupt cycle cannot hang.
     fn model_descends_from(&self, leaf: usize, root_ref: CapRef) -> bool {
         let mut cur = leaf;
         for _ in 0..=N {
@@ -156,9 +156,9 @@ impl Sim {
         false
     }
 
-    // the set of slots a revoke rooted at `root_slot` should remove: every live
-    // cap that descends from the root (including the root). empty if the root
-    // slot is itself empty.
+    /// The set of slots a revoke rooted at `root_slot` should remove: every live
+    /// cap that descends from the root (including the root). Empty if the root
+    /// slot is itself empty.
     fn model_revoke_set(&self, root_slot: usize) -> Vec<usize> {
         let Some(root) = self.model[root_slot] else {
             return Vec::new();
@@ -189,10 +189,10 @@ impl Sim {
         as_u32(usize::try_from(self.rng.below(N as u64)).expect("below(N) < N"))
     }
 
-    // draws the next operation. the weighting builds derivation trees (insert +
-    // mint dominate) while still tearing them down (remove + revoke) and reading
-    // them back (check), so the space is constantly filling, churning, and
-    // reusing slots.
+    /// Draws the next operation. The weighting builds derivation trees (insert +
+    /// mint dominate) while still tearing them down (remove + revoke) and reading
+    /// them back (check), so the space is constantly filling, churning, and
+    /// reusing slots.
     fn gen_op(&mut self) -> CapOp {
         let roll = self.rng.below(100);
         if roll < 35 {
@@ -340,7 +340,7 @@ impl Sim {
         );
     }
 
-    // the spec-as-oracle assertions, run after every step.
+    /// The spec-as-oracle assertions, run after every step.
     fn check_invariants(&self) {
         // 1. occupied-count agreement and the N bound.
         let model_len = self.model.iter().filter(|c| c.is_some()).count();
@@ -423,11 +423,11 @@ impl Sim {
     }
 }
 
-// the implementation side of one operation, shared by recording and replay so
-// there is a single source of truth for "what the kernel does with this op".
-// resolves a slot index to a live CapRef the way the syscall boundary does
-// (ref_at per call), then invokes the verified CapSpace and maps the result to a
-// CapOutcome.
+/// The implementation side of one operation, shared by recording and replay so
+/// there is a single source of truth for "what the kernel does with this op".
+/// Resolves a slot index to a live CapRef the way the syscall boundary does
+/// (ref_at per call), then invokes the verified CapSpace and maps the result to a
+/// CapOutcome.
 fn apply_op(space: &mut CapSpace<ObjectToken, N>, op: CapOp) -> CapOutcome {
     match op {
         CapOp::Insert { object, rights } => match space.insert(object, rights) {
@@ -466,10 +466,10 @@ fn apply_op(space: &mut CapSpace<ObjectToken, N>, op: CapOp) -> CapOutcome {
     }
 }
 
-// a cross-space-comparable view of a capability space: per slot, the live
-// capability's object, rights, and parent SLOT (not CapRef: generations differ
-// between an original run and a replay, but slot indices are reproduced exactly
-// by the same op sequence, so the slot is the stable identity to compare).
+/// A cross-space-comparable view of a capability space: per slot, the live
+/// capability's object, rights, and parent SLOT (not CapRef: generations differ
+/// between an original run and a replay, but slot indices are reproduced exactly
+/// by the same op sequence, so the slot is the stable identity to compare).
 fn snapshot(
     space: &CapSpace<ObjectToken, N>,
 ) -> Vec<Option<(ObjectToken, Rights, Option<usize>)>> {
@@ -487,10 +487,10 @@ fn snapshot(
 // tests
 // ---------------------------------------------------------------------------
 
-// the main event: a seed sweep, each seed driving the verified CapSpace against
-// the independent model for STEPS operations. DST_SEED=<n> runs just that seed
-// (for reproducing a reported failure). A failure panics with the seed and the
-// sequence number, which together pin the exact operation.
+/// The main event: a seed sweep, each seed driving the verified CapSpace against
+/// the independent model for STEPS operations. DST_SEED=<n> runs just that seed
+/// (for reproducing a reported failure). A failure panics with the seed and the
+/// sequence number, which together pin the exact operation.
 #[test]
 fn spec_as_oracle_seed_sweep() {
     if let Ok(s) = std::env::var("DST_SEED") {
@@ -505,9 +505,9 @@ fn spec_as_oracle_seed_sweep() {
     }
 }
 
-// the harness is itself deterministic: the same seed yields the identical trace.
-// this is what makes a reported seed a faithful reproduction (and guards against
-// accidental nondeterminism creeping into the harness, e.g. iteration order).
+/// The harness is itself deterministic: the same seed yields the identical trace.
+/// This is what makes a reported seed a faithful reproduction (and guards against
+/// accidental nondeterminism creeping into the harness, e.g. iteration order).
 #[test]
 fn harness_is_deterministic() {
     let seeds = if cfg!(miri) { 2 } else { 32 };
@@ -520,10 +520,10 @@ fn harness_is_deterministic() {
     }
 }
 
-// record/replay (north star 5): the recorded op stream, replayed onto a fresh
-// space, reproduces every recorded outcome and the identical final state. this
-// is "reset to the initial state and replay the log" made concrete on the
-// capability table, the simplest piece of the deterministic core.
+/// Record/replay (north star 5): the recorded op stream, replayed onto a fresh
+/// space, reproduces every recorded outcome and the identical final state. This
+/// is "reset to the initial state and replay the log" made concrete on the
+/// capability table, the simplest piece of the deterministic core.
 #[test]
 fn record_replay_reconstructs_state() {
     let seeds = if cfg!(miri) { 2 } else { 64 };

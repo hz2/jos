@@ -83,13 +83,13 @@ pub struct Timer {
 /// documentation for the state invariant.
 #[derive(Debug, Clone)]
 pub struct TimerQueue<const CAP: usize> {
-    // live timers occupy slots[0..len] (all Some); slots[len..] are None. order
-    // within the prefix is arbitrary: the earliest is found by scan, not by
-    // position, so removal can swap-fill the hole without resorting.
+    /// Live timers occupy slots[0..len] (all Some); slots[len..] are None. Order
+    /// within the prefix is arbitrary: the earliest is found by scan, not by
+    /// position, so removal can swap-fill the hole without resorting.
     slots: [Option<Timer>; CAP],
     len: usize,
-    // the next id to hand out. strictly increasing, never reset, so ids are
-    // unique for the queue's whole lifetime (no reuse, no ABA on cancel).
+    /// The next id to hand out. Strictly increasing, never reset, so ids are
+    /// unique for the queue's whole lifetime (no reuse, no ABA on cancel).
     next_id: u64,
 }
 
@@ -231,9 +231,9 @@ impl<const CAP: usize> TimerQueue<CAP> {
         self.slots[..self.len].iter().filter_map(|slot| *slot)
     }
 
-    // returns the index of the earliest-deadline live timer, ties broken by the
-    // smaller id (so the choice is a total order and fully deterministic), or
-    // None when empty. the single place the firing order is decided.
+    /// Returns the index of the earliest-deadline live timer, ties broken by the
+    /// smaller id (so the choice is a total order and fully deterministic), or
+    /// None when empty. The single place the firing order is decided.
     fn next_index(&self) -> Option<usize> {
         let mut best: Option<usize> = None;
         let mut i = 0;
@@ -257,9 +257,9 @@ impl<const CAP: usize> TimerQueue<CAP> {
         best
     }
 
-    // removes the timer at index `i` and returns it, keeping slots[0..len]
-    // packed by moving the last live entry into the hole. preserves the packing
-    // invariant for any i < len.
+    /// Removes the timer at index `i` and returns it, keeping slots[0..len]
+    /// packed by moving the last live entry into the hole. Preserves the packing
+    /// invariant for any i < len.
     fn remove_at(&mut self, i: usize) -> Timer {
         let removed = self.slots[i].take().expect("removing a live slot");
         self.len -= 1;
@@ -272,12 +272,12 @@ impl<const CAP: usize> TimerQueue<CAP> {
         removed
     }
 
-    // checks the packing invariant in debug builds: slots[0..len] are all Some
-    // and slots[len..] are all None. compiled out of release, this is the
-    // machine-checked statement of the invariant the panic-free `?` in peek_next
-    // / expire_next and the `iter().count() == len()` proofs rely on. it mirrors
-    // the bitmap's debug_assert bounds guards: a guarantee the code maintains by
-    // construction, cheaply re-checked where it could be broken.
+    /// Checks the packing invariant in debug builds: slots[0..len] are all Some
+    /// and slots[len..] are all None. Compiled out of release, this is the
+    /// machine-checked statement of the invariant the panic-free `?` in `peek_next`
+    /// / `expire_next` and the `iter().count() == len()` proofs rely on. It mirrors
+    /// the bitmap's `debug_assert` bounds guards: a guarantee the code maintains by
+    /// construction, cheaply re-checked where it could be broken.
     #[inline]
     fn debug_assert_packed(&self) {
         debug_assert!(self.len <= CAP, "timer queue len exceeds capacity");
@@ -529,10 +529,10 @@ mod kani_proofs {
     // earliest-of-many and swap-remove paths are exercised.
     const CAP: usize = 4;
 
-    // an arbitrary reachable queue: 0..=CAP timers armed with symbolic deadlines
-    // and payloads. built only through arm, so it satisfies the packing and id
-    // invariants by construction (modelling "some reachable state", not a
-    // fabricated one), exactly as any_valid_endpoint does.
+    /// An arbitrary reachable queue: 0..=CAP timers armed with symbolic deadlines
+    /// and payloads. Built only through arm, so it satisfies the packing and id
+    /// invariants by construction (modelling "some reachable state", not a
+    /// fabricated one), exactly as any_valid_endpoint does.
     fn any_queue() -> TimerQueue<CAP> {
         let mut q = TimerQueue::new();
         let n: usize = kani::any();
@@ -545,8 +545,8 @@ mod kani_proofs {
         q
     }
 
-    // arm succeeds iff the queue is not full; a success grows len by one, a
-    // refusal leaves it unchanged. covers invariant 1.
+    /// Arm succeeds iff the queue is not full; a success grows len by one, a
+    /// refusal leaves it unchanged. Covers invariant 1.
     #[kani::proof]
     #[kani::unwind(6)]
     fn arm_respects_capacity() {
@@ -565,8 +565,8 @@ mod kani_proofs {
         assert!(q.iter().count() == q.len());
     }
 
-    // expire_next never fires a timer that is not yet due. covers invariant 2
-    // (no early fire).
+    /// expire_next never fires a timer that is not yet due. Covers invariant 2
+    /// (no early fire).
     #[kani::proof]
     #[kani::unwind(6)]
     fn no_early_fire() {
@@ -577,8 +577,8 @@ mod kani_proofs {
         }
     }
 
-    // when expire_next fires, the fired timer's deadline is <= every timer left
-    // in the queue: it really was the earliest. covers invariant 3.
+    /// When expire_next fires, the fired timer's deadline is <= every timer left
+    /// in the queue: it really was the earliest. Covers invariant 3.
     #[kani::proof]
     #[kani::unwind(6)]
     fn fires_the_earliest() {
@@ -591,9 +591,9 @@ mod kani_proofs {
         }
     }
 
-    // the converse of no_early_fire: if the earliest timer is due, expire_next
-    // fires it (and exactly it), rather than reporting nothing. covers invariant
-    // 4 (progress). together with no_early_fire this pins firing down exactly.
+    /// The converse of no_early_fire: if the earliest timer is due, expire_next
+    /// fires it (and exactly it), rather than reporting nothing. Covers invariant
+    /// 4 (progress). Together with no_early_fire this pins firing down exactly.
     #[kani::proof]
     #[kani::unwind(6)]
     fn fires_when_a_due_timer_exists() {
@@ -609,9 +609,9 @@ mod kani_proofs {
         }
     }
 
-    // cancel removes exactly the named timer if present, and nothing otherwise:
-    // the return value equals presence, len drops by one iff it was present, and
-    // the id is gone afterward. covers invariant 5.
+    /// Cancel removes exactly the named timer if present, and nothing otherwise:
+    /// the return value equals presence, len drops by one iff it was present, and
+    /// the id is gone afterward. Covers invariant 5.
     #[kani::proof]
     #[kani::unwind(6)]
     fn cancel_removes_at_most_one() {

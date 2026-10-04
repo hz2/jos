@@ -134,7 +134,7 @@ pub enum Syscall {
 }
 
 impl Syscall {
-    // maps a raw syscall number to its enum form, or None if unknown.
+    /// Maps a raw syscall number to its enum form, or None if unknown.
     fn from_u64(n: u64) -> Option<Self> {
         match n {
             0 => Some(Self::Add),
@@ -253,10 +253,10 @@ pub mod object_type_id {
     pub const TCB: u8 = 4;
 }
 
-// decodes a retype `type_word` into an ObjectType. bits [7:0] are the type
-// discriminant (object_type_id), bits [15:8] are size_bits (for CNode/Untyped;
-// must be 0 for fixed-size types), bits [63:16] must be zero. returns None for
-// an unknown discriminant or malformed reserved/size bits.
+/// Decodes a retype `type_word` into an ObjectType. Bits [7:0] are the type
+/// discriminant (object_type_id), bits [15:8] are size_bits (for CNode/Untyped;
+/// must be 0 for fixed-size types), bits [63:16] must be zero. Returns None for
+/// an unknown discriminant or malformed reserved/size bits.
 fn decode_object_type(type_word: u64) -> Option<ObjectType> {
     if type_word >> 16 != 0 {
         return None; // reserved bits must be zero
@@ -385,7 +385,7 @@ pub fn dispatch_for_test(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 struct SyscallRet {
     /// Primary result, or an error code.
     rax: u64,
-    // secondary result: the sender badge on a receive, else 0.
+    /// Secondary result: the sender badge on a receive, otherwise 0.
     rdx: u64,
 }
 
@@ -450,21 +450,21 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
     result
 }
 
-// the current task's CSpace pointer, read from the per-CPU block. this is the
-// thread the entry stub's swapgs + switch_to selected; it is the heart of
-// per-thread isolation (each thread resolves capabilities in ITS OWN space).
+/// The current task's CSpace pointer, read from the per-CPU block. This is the
+/// thread the entry stub's swapgs + switch_to selected; it is the heart of
+/// per-thread isolation (each thread resolves capabilities in ITS OWN space).
 fn current_cspace_ptr() -> *mut KernelCapSpace {
     // SAFETY: single-CPU, interrupts disabled on the syscall path; reading the
     // per-CPU block does not alias another access.
     unsafe { (*cpu_local::cpu_local_ptr()).current_cspace }
 }
 
-// resolves the current task's CSpace for MUTATION (retype installs a capability
-// via insert_at). same pointer as current_cspace, but exclusive.
-//
-// SAFETY note: returns an exclusive reference to the kernel-owned CapSpace the
-// per-CPU block points at; sound on the single-threaded syscall path where the
-// pointer is live and unaliased, and no other reference is taken for the call.
+/// Resolves the current task's CSpace for MUTATION (retype installs a capability
+/// via insert_at). Same pointer as current_cspace, but exclusive.
+///
+/// SAFETY note: returns an exclusive reference to the kernel-owned CapSpace the
+/// per-CPU block points at; sound on the single-threaded syscall path where the
+/// pointer is live and unaliased, and no other reference is taken for the call.
 fn current_cspace_mut() -> Option<&'static mut KernelCapSpace> {
     let ptr = current_cspace_ptr();
     if ptr.is_null() {
@@ -475,13 +475,13 @@ fn current_cspace_mut() -> Option<&'static mut KernelCapSpace> {
     Some(unsafe { &mut *ptr })
 }
 
-// resolves the current task's CSpace, the one IPC syscalls address capabilities
-// in. returns None if no CSpace is installed (a kernel setup bug).
-//
-// SAFETY note: the returned reference borrows the kernel-owned CapSpace the
-// per-CPU block points at; the caller (an IPC syscall handler) uses it only
-// within the single-threaded syscall path, where the pointer is live and
-// unaliased.
+/// Resolves the current task's CSpace, the one IPC syscalls address capabilities
+/// in. Returns None if no CSpace is installed (a kernel setup bug).
+///
+/// SAFETY note: the returned reference borrows the kernel-owned CapSpace the
+/// per-CPU block points at; the caller (an IPC syscall handler) uses it only
+/// within the single-threaded syscall path, where the pointer is live and
+/// unaliased.
 fn current_cspace() -> Option<&'static KernelCapSpace> {
     let ptr = current_cspace_ptr();
     if ptr.is_null() {
@@ -493,8 +493,8 @@ fn current_cspace() -> Option<&'static KernelCapSpace> {
     Some(unsafe { &*ptr })
 }
 
-// maps an IpcError from the cap layer to the userspace-visible errno. the cap
-// layer distinguishes more cases than userspace needs, so several collapse.
+/// Maps an IpcError from the cap layer to the userspace-visible errno. The cap
+/// layer distinguishes more cases than userspace needs, so several collapse.
 fn ipc_errno(e: IpcError) -> u64 {
     let code = match e {
         IpcError::InvalidCap => IpcSyscallError::BadCap,
@@ -505,10 +505,10 @@ fn ipc_errno(e: IpcError) -> u64 {
     code as u64
 }
 
-// ipc_send: resolve cap_slot in the current CSpace per call, then send a
-// one-word message. the per-call resolution (ref_at reconstructs the
-// generation-checked CapRef) is what makes a revoked capability fail here
-// rather than the borrow being held across the block.
+/// ipc_send: resolve cap_slot in the current CSpace per call, then send a
+/// one-word message. The per-call resolution (ref_at reconstructs the
+/// generation-checked CapRef) is what makes a revoked capability fail here
+/// rather than the borrow being held across the block.
 fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
     let Some(space) = current_cspace() else {
         return IpcSyscallError::BadCap as u64;
@@ -531,10 +531,10 @@ fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
     }
 }
 
-// ipc_recv: resolve cap_slot per call, then receive a one-word message. returns
-// the message's first word on success, or (errno | IPC_ERR_FLAG) on failure so
-// userspace can distinguish a real word from an error. the sender badge goes
-// back in rdx.
+/// ipc_recv: resolve cap_slot per call, then receive a one-word message. Returns
+/// the message's first word on success, or (errno | IPC_ERR_FLAG) on failure so
+/// userspace can distinguish a real word from an error. The sender badge goes
+/// back in rdx.
 fn sys_ipc_recv(cap_slot: u64) -> SyscallRet {
     let bad_cap = (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
     let Some(space) = current_cspace() else {
@@ -552,9 +552,9 @@ fn sys_ipc_recv(cap_slot: u64) -> SyscallRet {
     }
 }
 
-// mint: derive a capability from src_slot into the lowest free slot, with
-// rights attenuated by the low byte of `rights` and an optional badge. the new
-// slot index is returned so userspace can hand it to a client.
+/// Implements [`Syscall::Mint`]: derives a capability from `src_slot` into the
+/// lowest free slot, with rights attenuated by the low byte of `rights` and an
+/// optional badge. Returns the new slot index so userspace can hand it out.
 fn sys_mint(src_slot: u64, rights: u64, badge: u64) -> u64 {
     let err = |e: MintSyscallError| e as u64 | IPC_ERR_FLAG;
     let Some(space) = current_cspace_mut() else {
@@ -581,10 +581,10 @@ fn sys_mint(src_slot: u64, rights: u64, badge: u64) -> u64 {
     }
 }
 
-// retype: carve a typed object from the untyped cap in `untyped_slot` and
-// install a full-rights capability to it at `dest_slot`. the seL4 Retype, with
-// the source untyped and the destination both named by CSpace slots (resolved
-// per call), so userspace can only create objects from untyped it was handed.
+/// Retype: carve a typed object from the untyped cap in `untyped_slot` and
+/// install a full-rights capability to it at `dest_slot`. The seL4 Retype, with
+/// the source untyped and the destination both named by CSpace slots (resolved
+/// per call), so userspace can only create objects from untyped it was handed.
 fn sys_retype(untyped_slot: u64, type_word: u64, dest_slot: u64) -> u64 {
     use crate::cap::CSPACE_SLOTS;
     let err = |e: RetypeSyscallError| e as u64;
@@ -646,7 +646,7 @@ use spin::Mutex;
 
 const MAX_THREADS: usize = crate::sched::MAX_THREADS;
 
-// a parked thread waiting to send on a specific endpoint.
+/// A parked thread waiting to send on a specific endpoint.
 #[derive(Clone, Copy)]
 struct BlockedSend {
     /// Endpoint identity (the `phys_addr` of its `ObjectId`).
@@ -661,7 +661,7 @@ struct BlockedSend {
     call: bool,
 }
 
-// a parked thread waiting to receive on a specific endpoint.
+/// A parked thread waiting to receive on a specific endpoint.
 #[derive(Clone, Copy)]
 struct BlockedRecv {
     /// Endpoint identity (the `phys_addr` of its `ObjectId`).
@@ -677,10 +677,10 @@ static BLOCKED_SENDS: Mutex<[Option<BlockedSend>; MAX_THREADS]> =
 static BLOCKED_RECVS: Mutex<[Option<BlockedRecv>; MAX_THREADS]> =
     Mutex::new([None; MAX_THREADS]);
 
-// saves the current thread's user-space context into its Tcb so it can be
-// resumed via iretq when woken. `wake_rax` is placed in rax (the syscall
-// return value the thread will see when it resumes). called from a blocking
-// syscall handler before setting need_yield.
+/// Saves the current thread's user-space context into its Tcb so it can be
+/// resumed via iretq when woken. `wake_rax` is placed in rax (the syscall
+/// return value the thread will see when it resumes). Called from a blocking
+/// syscall handler before setting need_yield.
 fn save_blocking_context(wake_rax: u64) {
     // SAFETY: ring-0, interrupts disabled on syscall path; single access.
     unsafe {
@@ -717,9 +717,9 @@ fn save_blocking_context(wake_rax: u64) {
     }
 }
 
-// ipc_send_blocking: try to rendezvous with a waiting receiver; if none is
-// present, park this thread in the BLOCKED_SENDS table and signal the syscall
-// stub to yield via need_yield.
+/// ipc_send_blocking: try to rendezvous with a waiting receiver; if none is
+/// present, park this thread in the BLOCKED_SENDS table and signal the syscall
+/// stub to yield via need_yield.
 fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
     let Some(space) = current_cspace() else {
         return IpcSyscallError::BadCap as u64;
@@ -1068,7 +1068,7 @@ fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
     }
 }
 
-// maps an IpcError to an Invoke return value (errno OR'd with IPC_ERR_FLAG).
+/// Maps an IpcError to an Invoke return value (errno OR'd with IPC_ERR_FLAG).
 fn invoke_errno(e: IpcError) -> u64 {
     let code = match e {
         IpcError::InvalidCap => InvokeError::BadCap,

@@ -50,22 +50,22 @@ const BUDGET: usize = 12;
 #[cfg(not(miri))]
 const BUDGET: usize = 200;
 
-// a multiset of message labels, used to compare what entered the pipeline
-// against what came out.
+/// A multiset of message labels, used to compare what entered the pipeline
+/// against what came out.
 type LabelBag = BTreeMap<u64, usize>;
 
 fn bag_insert(bag: &mut LabelBag, label: u64) {
     *bag.entry(label).or_insert(0) += 1;
 }
 
-// a message awaiting delayed release: its target endpoint and steps remaining.
+/// A message awaiting delayed release: its target endpoint and steps remaining.
 struct Delayed {
     message: Message,
     target: usize,
     remaining: u8,
 }
 
-// one recorded pipeline event, enough to prove two same-seed runs are identical.
+/// One recorded pipeline event, enough to prove two same-seed runs are identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ev {
     Realized { target: usize, label: u64 },
@@ -79,24 +79,24 @@ struct IpcSim {
     rng: SimRng,
     config: FaultConfig,
 
-    // the systems under test: E verified endpoints.
+    /// The systems under test: E verified endpoints.
     endpoints: [Endpoint; E],
-    // an INDEPENDENT shadow of each endpoint's slot: what the harness believes
-    // is parked there. cross-checked against every outcome (capacity-1 and
-    // anti-corruption), and the source of the "in slots" conservation bucket.
+    /// An INDEPENDENT shadow of each endpoint's slot: what the harness believes
+    /// is parked there. Cross-checked against every outcome (capacity-1 and
+    /// anti-corruption), and the source of the "in slots" conservation bucket.
     slot_shadow: [Option<Message>; E],
-    // per-endpoint outbox: realized messages awaiting deposit (the "in flight at
-    // a sender" bucket; a message lands here when a deposit returns Full).
+    /// Per-endpoint outbox: realized messages awaiting deposit (the "in flight at
+    /// a sender" bucket; a message lands here when a deposit returns Full).
     outbox: [Vec<Message>; E],
-    // messages held back by the delay fault, not yet realized.
+    /// Messages held back by the delay fault, not yet realized.
     delay_buf: Vec<Delayed>,
 
     next_label: u64,
     budget: usize,
 
-    // conservation accounting. realized = entered the pipeline; received = came
-    // out. the multisets prove per-label conservation; the scalars are an O(1)
-    // per-step cross-check.
+    /// Conservation accounting. Realized = entered the pipeline; received = came
+    /// out. The multisets prove per-label conservation; the scalars are an O(1)
+    /// per-step cross-check.
     realized: LabelBag,
     received: LabelBag,
     realized_total: usize,
@@ -130,9 +130,9 @@ impl IpcSim {
         usize::try_from(self.rng.below(u64::try_from(E).unwrap())).unwrap()
     }
 
-    // records that `message` has entered the pipeline bound for endpoint
-    // `target`: it joins the realized multiset and that endpoint's outbox. the
-    // single place realized is incremented, so the accounting cannot drift.
+    /// Records that `message` has entered the pipeline bound for endpoint
+    /// `target`: it joins the realized multiset and that endpoint's outbox. The
+    /// single place realized is incremented, so the accounting cannot drift.
     fn realize(&mut self, message: Message, target: usize) {
         bag_insert(&mut self.realized, message.label);
         self.realized_total += 1;
@@ -140,9 +140,9 @@ impl IpcSim {
         self.log.push(Ev::Realized { target, label: message.label });
     }
 
-    // matures the delay buffer by one step, realizing any message whose
-    // countdown reached zero. called at the start of every step so a delayed
-    // message is realized exactly when released, never lost.
+    /// Matures the delay buffer by one step, realizing any message whose
+    /// countdown reached zero. Called at the start of every step so a delayed
+    /// message is realized exactly when released, never lost.
     fn mature_delays(&mut self) {
         let mut due = Vec::new();
         let mut i = 0;
@@ -160,10 +160,10 @@ impl IpcSim {
         }
     }
 
-    // generates one fresh message for `target` and applies the message-layer
-    // faults drawn from the regime config: drop (never realized), delay
-    // (realized later), duplicate (realized twice), corrupt (realized mangled),
-    // or normal (realized once).
+    /// Generates one fresh message for `target` and applies the message-layer
+    /// faults drawn from the regime config: drop (never realized), delay
+    /// (realized later), duplicate (realized twice), corrupt (realized mangled),
+    /// or normal (realized once).
     fn generate(&mut self, target: usize) {
         if self.budget == 0 {
             return;
@@ -198,9 +198,9 @@ impl IpcSim {
         }
     }
 
-    // tries to deposit the front of endpoint `e`'s outbox. on success the
-    // message moves outbox -> slot; on Full it stays in the outbox (in flight)
-    // and the sender parks. cross-checks the slot shadow against the endpoint.
+    /// Tries to deposit the front of endpoint `e`'s outbox. On success the
+    /// message moves outbox -> slot; on Full it stays in the outbox (in flight)
+    /// and the sender parks. Cross-checks the slot shadow against the endpoint.
     fn deposit(&mut self, e: usize) {
         let Some(&message) = self.outbox[e].first() else {
             return;
@@ -230,9 +230,9 @@ impl IpcSim {
         self.assert_endpoint_invariant(e);
     }
 
-    // tries to take a message from endpoint `e`. on success it joins the
-    // received multiset; the taken message must equal what the shadow says was
-    // deposited (the anti-corruption / anti-fabrication check at the endpoint).
+    /// Tries to take a message from endpoint `e`. On success it joins the
+    /// received multiset; the taken message must equal what the shadow says was
+    /// deposited (the anti-corruption / anti-fabrication check at the endpoint).
     fn recv(&mut self, e: usize) {
         match self.endpoints[e].try_recv() {
             RecvOutcome::Took { message, .. } => {
@@ -284,9 +284,9 @@ impl IpcSim {
         self.check_conservation();
     }
 
-    // the conservation invariant, checked after every step: the multiset of
-    // realized labels equals received, plus those still in endpoint slots, plus
-    // those waiting in outboxes. nothing is lost, duplicated, or corrupted.
+    /// The conservation invariant, checked after every step: the multiset of
+    /// realized labels equals received, plus those still in endpoint slots, plus
+    /// those waiting in outboxes. Nothing is lost, duplicated, or corrupted.
     fn check_conservation(&self) {
         // scalar cross-check (O(1)): totals must balance.
         let in_slots = self.slot_shadow.iter().filter(|s| s.is_some()).count();
@@ -315,10 +315,10 @@ impl IpcSim {
         );
     }
 
-    // drains every realized message to a receiver: force-mature all delays, then
-    // alternately recv and deposit each endpoint until nothing moves. because
-    // this is exhaustive and deterministic, afterwards EVERYTHING realized has
-    // been received, the strongest conservation statement.
+    /// Drains every realized message to a receiver: force-mature all delays, then
+    /// alternately recv and deposit each endpoint until nothing moves. Because
+    /// this is exhaustive and deterministic, afterwards EVERYTHING realized has
+    /// been received, the strongest conservation statement.
     fn drain(&mut self) {
         // force every delayed message into the pipeline.
         let pending: Vec<Delayed> = self.delay_buf.drain(..).collect();
@@ -369,9 +369,9 @@ impl IpcSim {
     }
 }
 
-// mangles a message: flips label bits and perturbs the words. the corrupted
-// message is what gets realized, so the harness expects the endpoint to
-// transport it verbatim (corruption happens before the endpoint sees it).
+/// Mangles a message: flips label bits and perturbs the words. The corrupted
+/// message is what gets realized, so the harness expects the endpoint to
+/// transport it verbatim (corruption happens before the endpoint sees it).
 fn corrupt(m: Message, rng: &mut impl KernelRng) -> Message {
     let label = m.label ^ (rng.next_u64() | 1); // | 1 guarantees a change
     Message::new(label, [m.words[0], m.words[1] ^ rng.next_u64(), m.words[2], m.words[3]])
@@ -409,8 +409,8 @@ fn sweep(regime: &'static str, config: FaultConfig) {
 // tests
 // ---------------------------------------------------------------------------
 
-// ClearSky: no faults. Every generated message is realized exactly once, so
-// after draining the received multiset equals the generated one.
+/// ClearSky: no faults. Every generated message is realized exactly once, so
+/// after draining the received multiset equals the generated one.
 #[test]
 fn clear_sky_conserves_every_message() {
     if regime_selected("clear_sky") {
@@ -418,8 +418,8 @@ fn clear_sky_conserves_every_message() {
     }
 }
 
-// Stormy: drops, delays, reorders, duplicates. Conservation holds on the
-// realized stream (drops are never realized; duplicates are realized twice).
+/// Stormy: drops, delays, reorders, duplicates. Conservation holds on the
+/// realized stream (drops are never realized; duplicates are realized twice).
 #[test]
 fn stormy_conserves_the_realized_stream() {
     if regime_selected("stormy") {
@@ -427,9 +427,9 @@ fn stormy_conserves_the_realized_stream() {
     }
 }
 
-// Apocalyptic: adds corruption. The endpoint must transport each realized
-// (possibly corrupted) message verbatim; a taken message always equals the
-// deposited one, and the realized multiset is conserved.
+/// Apocalyptic: adds corruption. The endpoint must transport each realized
+/// (possibly corrupted) message verbatim; a taken message always equals the
+/// deposited one, and the realized multiset is conserved.
 #[test]
 fn apocalyptic_conserves_under_corruption() {
     if regime_selected("apocalyptic") {
@@ -437,8 +437,8 @@ fn apocalyptic_conserves_under_corruption() {
     }
 }
 
-// the harness is a pure function of (seed, regime): two runs log the identical
-// pipeline. guards against accidental nondeterminism (e.g. iteration order).
+/// The harness is a pure function of (seed, regime): two runs log the identical
+/// pipeline. Guards against accidental nondeterminism (e.g. iteration order).
 #[test]
 fn ipc_harness_is_deterministic() {
     let seeds = if cfg!(miri) { 2 } else { 24 };
@@ -457,10 +457,10 @@ fn ipc_harness_is_deterministic() {
     }
 }
 
-// sanity: the regimes actually behave differently. under ClearSky every
-// generated message is realized (no drops), so realized_total equals the number
-// generated; under Stormy drops and delays make the realized count diverge from
-// a fault-free run. guards against a vacuous (no-op) fault application.
+/// Sanity: the regimes actually behave differently. Under ClearSky every
+/// generated message is realized (no drops), so realized_total equals the number
+/// generated; under Stormy drops and delays make the realized count diverge from
+/// a fault-free run. Guards against a vacuous (no-op) fault application.
 #[test]
 fn regimes_differ_in_realized_count() {
     if cfg!(miri) {

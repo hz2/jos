@@ -310,8 +310,8 @@ pub struct EndpointInner {
 #[repr(C, align(64))]
 pub struct Endpoint {
     inner: Mutex<EndpointInner>,
-    // pad out to the full ENDPOINT_SIZE so the type's layout matches the
-    // untyped object size exactly (asserted below).
+    /// Pad out to the full ENDPOINT_SIZE so the type's layout matches the
+    /// untyped object size exactly (asserted below).
     _pad: [u8; Endpoint::PAD],
 }
 
@@ -380,8 +380,8 @@ pub struct NotificationInner {
 #[repr(C, align(64))]
 pub struct Notification {
     inner: Mutex<NotificationInner>,
-    // pad out to the full NOTIFICATION_SIZE so the type's layout matches the
-    // untyped object size exactly (asserted below).
+    /// Pad out to the full NOTIFICATION_SIZE so the type's layout matches the
+    /// untyped object size exactly (asserted below).
     _pad: [u8; Notification::PAD],
 }
 
@@ -643,7 +643,7 @@ pub struct Tcb {
     /// The thread's run state. Last of the real fields (a small type), before
     /// the padding, so it introduces no interior alignment gap.
     pub state: TcbState,
-    // pad to the full TCB_SIZE so the layout matches ObjectType::Tcb exactly.
+    /// Pad to the full TCB_SIZE so the layout matches ObjectType::Tcb exactly.
     _pad: [u8; Tcb::PAD],
 }
 
@@ -713,7 +713,7 @@ pub const KERNEL_CNODE_SIZE_BITS: u8 = 12;
 pub struct KernelCNode {
     /// The capability space this CNode backs.
     pub space: KernelCapSpace,
-    // pad out to the full CNODE_SIZE so the layout matches ObjectType::CNode.
+    /// Pad out to the full CNODE_SIZE so the layout matches ObjectType::CNode.
     _pad: [u8; KernelCNode::PAD],
 }
 
@@ -906,10 +906,10 @@ impl UntypedRegion {
         )
     }
 
-    // shared carving primitive: place `value` (whose layout must match `ty`)
-    // into the region at the watermark, advance the watermark, and return an
-    // ObjectId tagged `kind` whose address is the placement site. factors out
-    // the body retype_endpoint had so every object type carves identically.
+    /// Shared carving primitive: place `value` (whose layout must match `ty`)
+    /// into the region at the watermark, advance the watermark, and return an
+    /// ObjectId tagged `kind` whose address is the placement site. Factors out
+    /// the body retype_endpoint had so every object type carves identically.
     fn retype<T>(&mut self, ty: ObjectType, value: T, kind: ObjectKind) -> Option<ObjectId> {
         match place(self.bytes, self.watermark, ty, value) {
             Ok((start, new_watermark)) => {
@@ -969,9 +969,9 @@ pub enum RetypeError {
     BadType,
 }
 
-// resolves a capability ref to the endpoint it names, enforcing that it is
-// live, carries `required`, and is actually an endpoint. shared by the send and
-// receive paths so the three checks (and their error precedence) stay identical.
+/// Resolves a capability ref to the endpoint it names, enforcing that it is
+/// live, carries `required`, and is actually an endpoint. Shared by the send and
+/// receive paths so the three checks (and their error precedence) stay identical.
 fn resolve_endpoint(
     space: &KernelCapSpace,
     cap_ref: CapRef,
@@ -990,31 +990,31 @@ fn resolve_endpoint(
     Ok(unsafe { cap.object.as_endpoint() })
 }
 
-// the outcome of trying a non-blocking IPC op on a locked endpoint. on success
-// it carries the counterpart waker to wake (a deposit may free a parked
-// receiver; a take may free a parked sender) so the caller can wake AFTER
-// releasing the endpoint lock, keeping the wake off the locked path.
+/// The outcome of trying a non-blocking IPC op on a locked endpoint. On success
+/// it carries the counterpart waker to wake (a deposit may free a parked
+/// receiver; a take may free a parked sender) so the caller can wake AFTER
+/// releasing the endpoint lock, keeping the wake off the locked path.
 enum SendOutcome {
-    // message deposited; wake this receiver if present.
+    /// Message deposited; wake this receiver if present.
     Deposited(Option<Waker>),
-    // endpoint already held an undelivered message.
+    /// Endpoint already held an undelivered message.
     Full,
 }
 
 enum RecvOutcome {
-    // message taken with the sender badge; wake this sender if present.
+    /// Message taken with the sender badge; wake this sender if present.
     Took(Message, Badge, Option<Waker>),
-    // endpoint had no message.
+    /// Endpoint had no message.
     Empty,
 }
 
 impl EndpointInner {
-    // try to deposit a message without blocking, delegating the rendezvous to
-    // the verified state machine. the single locked primitive both cap_send and
-    // the CapSend future build on, so the deposit/wake logic lives in exactly one
-    // place and the take-or-park stays race-free (it all happens under one lock
-    // acquisition by the caller). when the model reports a receiver was released,
-    // its stored waker is taken so the caller can fire it after the lock drops.
+    /// Try to deposit a message without blocking, delegating the rendezvous to
+    /// the verified state machine. The single locked primitive both cap_send and
+    /// the CapSend future build on, so the deposit/wake logic lives in exactly one
+    /// place and the take-or-park stays race-free (it all happens under one lock
+    /// acquisition by the caller). When the model reports a receiver was released,
+    /// its stored waker is taken so the caller can fire it after the lock drops.
     fn try_deposit(&mut self, message: Message, badge: Badge) -> SendOutcome {
         match self.rendezvous.try_send_badged(message, badge) {
             endpoint::SendOutcome::Deposited { woke_receiver } => {
@@ -1027,7 +1027,7 @@ impl EndpointInner {
         }
     }
 
-    // try to take the parked message without blocking, delegating to the model.
+    /// Try to take the parked message without blocking, delegating to the model.
     fn try_take(&mut self) -> RecvOutcome {
         match self.rendezvous.try_recv() {
             endpoint::RecvOutcome::Took { message, badge, woke_sender } => {
@@ -1038,28 +1038,28 @@ impl EndpointInner {
         }
     }
 
-    // park the current task as the sender waiting for the slot to free, storing
-    // its waker. mirrors the model's self-guarding park_sender: the waker is kept
-    // iff the model actually records the sender as parked (slot full), so
-    // send_waiter.is_some() stays equal to rendezvous.sender_parked().
+    /// Park the current task as the sender waiting for the slot to free, storing
+    /// its waker. Mirrors the model's self-guarding park_sender: the waker is kept
+    /// iff the model actually records the sender as parked (slot full), so
+    /// send_waiter.is_some() stays equal to rendezvous.sender_parked().
     fn park_sender(&mut self, waker: Waker) {
         if self.rendezvous.park_sender() {
             self.send_waiter = Some(waker);
         }
     }
 
-    // park the current task as the receiver waiting for a message; mirror of
-    // park_sender.
+    /// Park the current task as the receiver waiting for a message; mirror of
+    /// park_sender.
     fn park_receiver(&mut self, waker: Waker) {
         if self.rendezvous.park_receiver() {
             self.recv_waiter = Some(waker);
         }
     }
 
-    // clear just the parked receiver (a receive-with-timeout abandoning its
-    // blocked recv when the deadline passes), returning its waker if any. mirrors
-    // the model's cancel_receiver: only the receiver is cleared, so send_waiter
-    // and the slot are untouched and the lockstep invariant holds.
+    /// Clear just the parked receiver (a receive-with-timeout abandoning its
+    /// blocked recv when the deadline passes), returning its waker if any. Mirrors
+    /// the model's cancel_receiver: only the receiver is cleared, so send_waiter
+    /// and the slot are untouched and the lockstep invariant holds.
     fn cancel_receiver(&mut self) -> Option<Waker> {
         if self.rendezvous.cancel_receiver() {
             self.recv_waiter.take()
@@ -1068,9 +1068,9 @@ impl EndpointInner {
         }
     }
 
-    // clear both parked peers (on revoke), returning their wakers to fire. the
-    // model clears its flags so its invariant holds; the wakers are returned so
-    // the blocked tasks observe the cancellation on their next poll.
+    /// Clear both parked peers (on revoke), returning their wakers to fire. The
+    /// model clears its flags so its invariant holds; the wakers are returned so
+    /// the blocked tasks observe the cancellation on their next poll.
     fn clear_parked(&mut self) -> (Option<Waker>, Option<Waker>) {
         let (had_sender, had_receiver) = self.rendezvous.clear_parked();
         let send_waiter = if had_sender { self.send_waiter.take() } else { None };
@@ -1262,8 +1262,8 @@ pub struct CapRecvTimeout<'a> {
     space: &'a KernelCapSpace,
     cap_ref: CapRef,
     deadline: Instant,
-    // the armed timer's id, set on the first poll that parks. used to cancel the
-    // timer if a message wins, and to avoid arming more than once.
+    /// The armed timer's id, set on the first poll that parks. Used to cancel the
+    /// timer if a message wins, and to avoid arming more than once.
     timer: Option<TimerId>,
 }
 
@@ -1384,9 +1384,9 @@ pub fn recv(space: &KernelCapSpace, cap_ref: CapRef) -> CapRecv<'_> {
 /// [`notification::Badge`].
 pub use jos_core::notification::Badge;
 
-// resolves a capability ref to the notification it names, enforcing that it is
-// live, carries `required`, and is actually a notification. the notification
-// mirror of resolve_endpoint.
+/// Resolves a capability ref to the notification it names, enforcing that it is
+/// live, carries `required`, and is actually a notification. The notification
+/// mirror of resolve_endpoint.
 fn resolve_notification(
     space: &KernelCapSpace,
     cap_ref: CapRef,
@@ -1406,10 +1406,10 @@ fn resolve_notification(
 }
 
 impl NotificationInner {
-    // signal the notification, delegating to the verified state machine. returns
-    // the waiter waker to fire (if the signal released a parked waiter) so the
-    // caller can wake it after the lock drops, keeping the wake off the locked
-    // path as the endpoint primitives do.
+    /// Signal the notification, delegating to the verified state machine. Returns
+    /// the waiter waker to fire (if the signal released a parked waiter) so the
+    /// caller can wake it after the lock drops, keeping the wake off the locked
+    /// path as the endpoint primitives do.
     fn signal(&mut self, badge: Badge) -> Option<Waker> {
         let outcome = self.state.signal(badge);
         // the model cleared its parked flag iff it released a waiter; keep our
@@ -1421,22 +1421,22 @@ impl NotificationInner {
         }
     }
 
-    // try to collect the pending badge without blocking, delegating to the model.
+    /// Try to collect the pending badge without blocking, delegating to the model.
     fn try_collect(&mut self) -> notification::PollOutcome {
         self.state.poll()
     }
 
-    // park the current task as the waiter, storing its waker. mirrors the model's
-    // self-guarding park: the waker is kept iff the model records the waiter as
-    // parked (nothing pending), so waiter.is_some() stays equal to
-    // state.waiter_parked().
+    /// Park the current task as the waiter, storing its waker. Mirrors the model's
+    /// self-guarding park: the waker is kept iff the model records the waiter as
+    /// parked (nothing pending), so waiter.is_some() stays equal to
+    /// state.waiter_parked().
     fn park(&mut self, waker: Waker) {
         if self.state.park() {
             self.waiter = Some(waker);
         }
     }
 
-    // clear the parked waiter (on revoke), returning its waker to fire.
+    /// Clear the parked waiter (on revoke), returning its waker to fire.
     fn clear_parked(&mut self) -> Option<Waker> {
         if self.state.clear_parked() {
             self.waiter.take()

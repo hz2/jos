@@ -26,13 +26,13 @@ use core::mem::MaybeUninit;
 /// on push and returned on pop. When the buffer is dropped, all live elements
 /// are dropped in tail-to-head order.
 pub struct RingBuffer<T, const N: usize> {
-    // backing storage; only indices in the live window are initialized.
+    /// Backing storage; only indices in the live window are initialized.
     storage: [MaybeUninit<T>; N],
-    // index of the slot that will be written on the next push.
+    /// Index of the slot that will be written on the next push.
     head: usize,
-    // index of the slot that will be read on the next pop.
+    /// Index of the slot that will be read on the next pop.
     tail: usize,
-    // number of initialized elements currently in the buffer.
+    /// Number of initialized elements currently in the buffer.
     len: usize,
 }
 
@@ -157,9 +157,9 @@ mod tests {
     use super::RingBuffer;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    // helper: a value that increments a shared counter when dropped.
-    // Debug is derived so that push(...).unwrap() compiles (unwrap requires
-    // E: Debug; the Err variant here is Dropper itself).
+    /// Helper: a value that increments a shared counter when dropped.
+    /// Debug is derived so that `push(...).unwrap()` compiles (unwrap requires
+    /// E: Debug; the Err variant here is Dropper itself).
     #[derive(Debug)]
     struct Dropper<'a> {
         counter: &'a AtomicUsize,
@@ -360,8 +360,8 @@ mod tests {
 mod kani_proofs {
     use super::RingBuffer;
 
-    // prove that push followed immediately by pop on a fresh buffer recovers
-    // the exact value that was pushed.
+    /// Prove that push followed immediately by pop on a fresh buffer recovers
+    /// the exact value that was pushed.
     #[kani::proof]
     fn push_then_pop_identity() {
         // kani will enumerate all u32 values symbolically.
@@ -374,8 +374,8 @@ mod kani_proofs {
         assert!(popped == Some(value));
     }
 
-    // prove that len is always <= capacity after a bounded sequence of
-    // alternating pushes and pops, with arbitrary values.
+    /// Prove that len is always <= capacity after a bounded sequence of
+    /// alternating pushes and pops, with arbitrary values.
     #[kani::proof]
     #[kani::unwind(9)] // 4 pushes + 4 pops + 1 extra check = 9 iterations max
     fn len_never_exceeds_capacity() {
@@ -394,7 +394,7 @@ mod kani_proofs {
         }
     }
 
-    // prove that an empty buffer always returns None from pop.
+    /// Prove that an empty buffer always returns None from pop.
     #[kani::proof]
     fn empty_pop_is_none() {
         let mut buf: RingBuffer<u32, 4> = RingBuffer::new();
@@ -402,7 +402,7 @@ mod kani_proofs {
         assert!(buf.pop().is_none());
     }
 
-    // prove that a full buffer always rejects push with the original value.
+    /// Prove that a full buffer always rejects push with the original value.
     #[kani::proof]
     fn full_push_returns_err() {
         let mut buf: RingBuffer<u32, 2> = RingBuffer::new();
@@ -414,7 +414,7 @@ mod kani_proofs {
         assert!(result == Err(v));
     }
 
-    // prove fifo ordering for a two-element sequence.
+    /// Prove fifo ordering for a two-element sequence.
     #[kani::proof]
     fn two_element_fifo_order() {
         let a: u32 = kani::any();

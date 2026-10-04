@@ -18,7 +18,7 @@ use core::panic::PanicInfo;
 use jos::{QemuExitCode, exit_qemu, gdt, serial_print, serial_println};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
-// the trampoline (in the jos library) calls kernel_main in long mode.
+/// The trampoline (in the jos library) calls kernel_main in long mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
     serial_print!("stack_overflow::stack_overflow...\t");
@@ -45,8 +45,8 @@ fn stack_overflow() {
     let _ = core::hint::black_box(0);
 }
 
-// a test-local idt whose double-fault handler exits qemu with Success, using
-// the same IST index the gdt module reserves for double faults.
+/// A test-local idt whose double-fault handler exits qemu with Success, using
+/// the same IST index the gdt module reserves for double faults.
 static mut TEST_IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
 fn init_test_idt() {

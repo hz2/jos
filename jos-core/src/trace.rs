@@ -427,8 +427,8 @@ mod tests {
     }
 }
 
-// postcard round-trip tests, compiled only when the feature (and so the codec)
-// is present. they link std via the test harness; the library stays no_std.
+/// Postcard round-trip tests, compiled only when the feature (and so the codec)
+/// is present. They link std via the test harness; the library stays no_std.
 #[cfg(all(test, feature = "postcard"))]
 mod codec_tests {
     use super::codec::{self, MAX_FRAMED_EVENT_LEN};

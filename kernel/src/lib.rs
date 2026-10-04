@@ -75,10 +75,10 @@ pub fn init() {
 // NOTE: the multiboot2 header + long-mode trampoline now live in
 // arch::x86_64 (it includes boot.s via global_asm).
 
-// a global allocator is required now that alloc is pulled into the build (the
-// async executor deps reference it). the heap starts empty; a real heap region
-// is mapped during kernel init (blog_os post 10, see the roadmap). allocating
-// before that region is installed faults loudly, which is intended pre-heap.
+/// A global allocator is required now that alloc is pulled into the build (the
+/// async executor deps reference it). The heap starts empty; a real heap region
+/// is mapped during kernel init (blog_os post 10, see the roadmap). Allocating
+/// before that region is installed faults loudly, which is intended pre-heap.
 #[global_allocator]
 static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
 
@@ -149,9 +149,9 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
     hlt_loop()
 }
 
-// entry for the library's own `cargo test` binary. the trampoline calls
-// kernel_main; for the test build we init the kernel (so the idt is loaded)
-// then run the generated test harness.
+/// Entry for the library's own `cargo test` binary. The trampoline calls
+/// kernel_main; for the test build we init the kernel (so the idt is loaded)
+/// then run the generated test harness.
 #[cfg(test)]
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {

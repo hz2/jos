@@ -44,7 +44,7 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// a single spawned task runs to completion when the executor is driven.
+/// A single spawned task runs to completion when the executor is driven.
 #[test_case]
 fn single_task_runs_to_completion() {
     let ran = Arc::new(AtomicU32::new(0));
@@ -64,8 +64,8 @@ fn single_task_runs_to_completion() {
     assert_eq!(ran.load(Ordering::SeqCst), 1);
 }
 
-// yield_now parks the task and resumes it: the body observes execution on both
-// sides of the yield, exercising the waker -> inbox -> ready-queue requeue path.
+/// yield_now parks the task and resumes it: the body observes execution on both
+/// sides of the yield, exercising the waker -> inbox -> ready-queue requeue path.
 #[test_case]
 fn yield_now_parks_and_resumes() {
     let stage = Arc::new(AtomicU32::new(0));
@@ -86,8 +86,8 @@ fn yield_now_parks_and_resumes() {
     assert_eq!(stage.load(Ordering::SeqCst), 2);
 }
 
-// many independent tasks all complete, and each runs exactly once. the shared
-// counter ends at the task count, proving none were dropped or double-run.
+/// Many independent tasks all complete, and each runs exactly once. The shared
+/// counter ends at the task count, proving none were dropped or double-run.
 #[test_case]
 fn many_tasks_all_complete() {
     const TASKS: u32 = 20;
@@ -110,9 +110,9 @@ fn many_tasks_all_complete() {
     assert_eq!(count.load(Ordering::SeqCst), TASKS);
 }
 
-// a completed task frees its slot, so the executor can be refilled to capacity
-// again afterward. this checks the slot-reclaim path (tasks[slot] = None on
-// completion) against the fixed MAX_TASKS bound.
+/// A completed task frees its slot, so the executor can be refilled to capacity
+/// again afterward. This checks the slot-reclaim path (tasks[slot] = None on
+/// completion) against the fixed MAX_TASKS bound.
 #[test_case]
 fn completed_tasks_free_their_slots() {
     let mut executor = Executor::new();
@@ -132,8 +132,8 @@ fn completed_tasks_free_their_slots() {
     executor.run_until_idle();
 }
 
-// spawning past capacity is rejected (the task is handed back), not a panic or
-// silent drop. confirms the Err path of spawn.
+/// Spawning past capacity is rejected (the task is handed back), not a panic or
+/// silent drop. Confirms the Err path of spawn.
 #[test_case]
 fn spawn_past_capacity_is_rejected() {
     let mut executor = Executor::new();

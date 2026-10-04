@@ -56,15 +56,15 @@ const MAX_STEP: u64 = 64;
 // may not be crossed, so both the flip path and the never-crossed path are hit.
 const HORIZON: u64 = 12_000;
 
-// one recorded event, enough to prove two same-seed runs are identical.
+/// One recorded event, enough to prove two same-seed runs are identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ev {
-    // the clock was advanced; `now` is the resulting time.
+    /// The clock was advanced; `now` is the resulting time.
     Advanced { now: u64 },
-    // a set was requested to `requested`; `now` is the resulting time (equal to
-    // `requested` if it took effect, the prior time if it was clamped backward).
+    /// A set was requested to `requested`; `now` is the resulting time (equal to
+    /// `requested` if it took effect, the prior time if it was clamped backward).
     Set { requested: u64, now: u64 },
-    // a deadline crossed from not-reached to reached at time `at`.
+    /// A deadline crossed from not-reached to reached at time `at`.
     Flip { deadline: usize, at: u64 },
 }
 
@@ -72,18 +72,18 @@ struct ClockSim {
     seed: u64,
     rng: SimRng,
 
-    // the system under test.
+    /// The system under test.
     clock: SimClock,
 
-    // armed deadlines, fixed for the run.
+    /// Armed deadlines, fixed for the run.
     deadlines: [Instant; D],
-    // last-observed reached state of each deadline, the flip tracker.
+    /// Last-observed reached state of each deadline, the flip tracker.
     reached: [bool; D],
-    // how many times each deadline flipped (must end 0 or 1).
+    /// How many times each deadline flipped (must end 0 or 1).
     flips: [u32; D],
 
-    // the time the clock started at, and the time at the previous step. used to
-    // state the "flipped exactly when crossed" property precisely.
+    /// The time the clock started at, and the time at the previous step. Used to
+    /// state the "flipped exactly when crossed" property precisely.
     start_now: Instant,
     prev_now: Instant,
 
@@ -146,7 +146,7 @@ impl ClockSim {
         self.check();
     }
 
-    // the per-step invariant battery.
+    /// The per-step invariant battery.
     fn check(&mut self) {
         let now = self.clock.now();
 
@@ -201,9 +201,9 @@ impl ClockSim {
         self.finish();
     }
 
-    // the end-of-run capstone: every deadline flipped at most once, the tracked
-    // reached state matches the final time, and a deadline flipped during the
-    // run precisely when the timeline started below it and ended at or past it.
+    /// The end-of-run capstone: every deadline flipped at most once, the tracked
+    /// reached state matches the final time, and a deadline flipped during the
+    /// run precisely when the timeline started below it and ended at or past it.
     fn finish(&self) {
         let now = self.clock.now();
         for i in 0..D {
@@ -236,7 +236,7 @@ impl ClockSim {
         }
     }
 
-    // total flips across all deadlines this run (used by the anti-vacuous test).
+    /// Total flips across all deadlines this run (used by the anti-vacuous test).
     fn total_flips(&self) -> u32 {
         self.flips.iter().sum()
     }
@@ -261,15 +261,15 @@ fn sweep() {
 // tests
 // ---------------------------------------------------------------------------
 
-// the main sweep: monotonicity, threshold correctness, and flip-exactly-once
-// hold for every seed.
+/// The main sweep: monotonicity, threshold correctness, and flip-exactly-once
+/// hold for every seed.
 #[test]
 fn clock_invariants_hold_across_the_sweep() {
     sweep();
 }
 
-// the harness is a pure function of its seed: two runs log the identical
-// timeline. guards against accidental nondeterminism.
+/// The harness is a pure function of its seed: two runs log the identical
+/// timeline. Guards against accidental nondeterminism.
 #[test]
 fn clock_harness_is_deterministic() {
     let seeds = if cfg!(miri) { 2 } else { 32 };
@@ -282,10 +282,10 @@ fn clock_harness_is_deterministic() {
     }
 }
 
-// anti-vacuous guard: the schedule actually moves the clock and actually crosses
-// deadlines, so the flip-tracking path is genuinely exercised. without this, a
-// clock that never advanced (a real bug) would satisfy every per-step assertion
-// vacuously, since nothing would ever flip and monotonicity would hold trivially.
+/// Anti-vacuous guard: the schedule actually moves the clock and actually crosses
+/// deadlines, so the flip-tracking path is genuinely exercised. Without this, a
+/// clock that never advanced (a real bug) would satisfy every per-step assertion
+/// vacuously, since nothing would ever flip and monotonicity would hold trivially.
 #[test]
 fn the_schedule_crosses_some_deadlines() {
     let mut total_flips = 0u64;
@@ -307,9 +307,9 @@ fn the_schedule_crosses_some_deadlines() {
     );
 }
 
-// a deadline guaranteed to be within reach always flips: a focused,
-// schedule-independent check that the flip machinery fires (complements the
-// statistical guard above). advancing well past a small deadline must reach it.
+/// A deadline guaranteed to be within reach always flips: a focused,
+/// schedule-independent check that the flip machinery fires (complements the
+/// statistical guard above). Advancing well past a small deadline must reach it.
 #[test]
 fn a_reachable_deadline_always_flips() {
     let deadline = Instant::new(100);

@@ -34,7 +34,7 @@ use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::FrameAllocator;
 
-// the assembled SYS_ADD/SYS_EXIT round-trip program (same bytes as the 3b test).
+/// The assembled SYS_ADD/SYS_EXIT round-trip program (same bytes as the 3b test).
 #[rustfmt::skip]
 static USER_PROGRAM: [u8; 46] = [
     0xb8, 0x00, 0x00, 0x00, 0x00,       // mov eax, 0      (SYS_ADD)

@@ -35,7 +35,7 @@ use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::FrameAllocator;
 
-// the assembled capability-IPC program (see the disassembly in the commit/notes).
+/// The assembled capability-IPC program (see the disassembly in the commit/notes).
 #[rustfmt::skip]
 static USER_PROGRAM: [u8; 85] = [
     0xb8, 0x02, 0x00, 0x00, 0x00,       // mov eax, 2     (SYS_IPC_SEND)
@@ -71,10 +71,10 @@ const UNTYPED_SIZE: usize = 64 * 1024;
 struct UntypedBacking([u8; UNTYPED_SIZE]);
 static mut VSPACE_UNTYPED: UntypedBacking = UntypedBacking([0; UNTYPED_SIZE]);
 
-// the current task's CSpace, kernel-owned and 'static so it outlives the
-// syscalls that resolve capabilities in it. KernelCapSpace::new is not const
-// (the cap table builds its slots with array::from_fn), so the space is created
-// at runtime in kernel_main and stashed here, handed out as a single *mut.
+/// The current task's CSpace, kernel-owned and 'static so it outlives the
+/// syscalls that resolve capabilities in it. KernelCapSpace::new is not const
+/// (the cap table builds its slots with array::from_fn), so the space is created
+/// at runtime in kernel_main and stashed here, handed out as a single *mut.
 static mut CSPACE: Option<KernelCapSpace> = None;
 
 // a dedicated kernel stack for the syscall entry path.

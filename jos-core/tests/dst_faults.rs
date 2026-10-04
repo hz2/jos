@@ -66,10 +66,10 @@ struct ModelCap {
     parent: Option<CapRef>,
 }
 
-// the implementation side of one already-realized operation, shared by the
-// harness and (conceptually) replay. resolves a slot index to a live CapRef the
-// way the syscall boundary does, then maps the verified CapSpace result to a
-// CapOutcome. A corrupted (out-of-range) slot simply fails to resolve.
+/// The implementation side of one already-realized operation, shared by the
+/// harness and (conceptually) replay. Resolves a slot index to a live CapRef the
+/// way the syscall boundary does, then maps the verified CapSpace result to a
+/// CapOutcome. A corrupted (out-of-range) slot simply fails to resolve.
 fn apply_op(space: &mut CapSpace<ObjectToken, N>, op: CapOp) -> CapOutcome {
     match op {
         CapOp::Insert { object, rights } => match space.insert(object, rights) {
@@ -103,9 +103,9 @@ fn apply_op(space: &mut CapSpace<ObjectToken, N>, op: CapOp) -> CapOutcome {
     }
 }
 
-// resolves a (possibly corrupted, possibly out-of-range) slot index to a live
-// CapRef. A slot >= N never resolves; this is where a corrupted slot index is
-// rejected at the boundary.
+/// Resolves a (possibly corrupted, possibly out-of-range) slot index to a live
+/// CapRef. A slot >= N never resolves; this is where a corrupted slot index is
+/// rejected at the boundary.
 fn resolve(space: &CapSpace<ObjectToken, N>, slot: u32) -> Option<CapRef> {
     let slot = usize::try_from(slot).ok()?;
     if slot >= N {
@@ -127,12 +127,12 @@ struct FaultSim {
     model: [Option<ModelCap>; N],
     next_object: u64,
     retired: Vec<CapRef>,
-    // per-slot generation floor: the generation never decreases, so this only
-    // rises. proves the anti-resurrection property at the data-structure level.
+    /// Per-slot generation floor: the generation never decreases, so this only
+    /// rises. Proves the anti-resurrection property at the data-structure level.
     generation_floor: [u32; N],
     seq: u64,
-    // a compact realized-op log: enough to prove the run is deterministic
-    // (same seed + regime => identical realized stream and outcomes).
+    /// A compact realized-op log: enough to prove the run is deterministic
+    /// (same seed + regime => identical realized stream and outcomes).
     log: Vec<TraceEvent>,
 }
 
@@ -207,10 +207,10 @@ impl FaultSim {
         self.unforgeability_probe();
     }
 
-    // applies one realized op to BOTH the implementation and the independent
-    // model, asserting they agree (the differential oracle) and that the safety
-    // invariants hold. structurally mirrors dst_capspace.rs::Sim::step, the
-    // proven slice-1 logic, but over a realized (post-fault) op.
+    /// Applies one realized op to BOTH the implementation and the independent
+    /// model, asserting they agree (the differential oracle) and that the safety
+    /// invariants hold. Structurally mirrors dst_capspace.rs::Sim::step, the
+    /// proven slice-1 logic, but over a realized (post-fault) op.
     fn step_realized(&mut self, op: CapOp) {
         let outcome = match op {
             CapOp::Insert { object, rights } => {
@@ -318,14 +318,14 @@ impl FaultSim {
         (0..N).find(|&s| self.model[s].is_none())
     }
 
-    // an in-range slot index, or None if the (possibly corrupted) index is out
-    // of range. the model's mirror of the implementation's bounds check.
+    /// An in-range slot index, or None if the (possibly corrupted) index is out
+    /// of range. The model's mirror of the implementation's bounds check.
     fn model_slot_in_range(&self, slot: u32) -> Option<usize> {
         let s = usize::try_from(slot).ok()?;
         (s < N).then_some(s)
     }
 
-    // resolves a slot index to the live model cap there, mirroring resolve().
+    /// Resolves a slot index to the live model cap there, mirroring resolve().
     fn model_resolve(&self, slot: u32) -> Option<ModelCap> {
         self.model_slot_in_range(slot).and_then(|s| self.model[s])
     }
@@ -369,9 +369,9 @@ impl FaultSim {
         );
     }
 
-    // the safety invariants, checked after every realized op. these are the
-    // intrinsic guarantees that must hold under ANY input, plus the differential
-    // structural agreement that holds because both sides see the same stream.
+    /// The safety invariants, checked after every realized op. These are the
+    /// intrinsic guarantees that must hold under ANY input, plus the differential
+    /// structural agreement that holds because both sides see the same stream.
     fn check_invariants(&mut self) {
         // I1: capacity bound, and len agreement with the model.
         let model_len = self.model.iter().filter(|c| c.is_some()).count();
@@ -441,12 +441,12 @@ impl FaultSim {
         }
     }
 
-    // I5: the unforgeability property. every retired CapRef, presented to the
-    // read paths, is rejected for ALL rights, even after its slot is reused by a
-    // live capability. A held-but-stale reference grants nothing. (CapRefs with
-    // novel slot/generation pairs cannot be constructed in safe code at all, so
-    // the reachable adversary input is exactly a once-valid, now-stale ref plus
-    // the corrupted slot indices CorruptOp already feeds through gen_op.)
+    /// I5: the unforgeability property. Every retired CapRef, presented to the
+    /// read paths, is rejected for ALL rights, even after its slot is reused by a
+    /// live capability. A held-but-stale reference grants nothing. (CapRefs with
+    /// novel slot/generation pairs cannot be constructed in safe code at all, so
+    /// the reachable adversary input is exactly a once-valid, now-stale ref plus
+    /// the corrupted slot indices CorruptOp already feeds through gen_op.).
     fn unforgeability_probe(&self) {
         for &r in &self.retired {
             assert!(
@@ -499,8 +499,8 @@ fn sweep(regime: &'static str, config: FaultConfig) {
     }
 }
 
-// honor DST_REGIME by skipping the other regimes' sweeps, so a reported
-// (regime, seed) pair reproduces in isolation.
+/// Honor DST_REGIME by skipping the other regimes' sweeps, so a reported
+/// (regime, seed) pair reproduces in isolation.
 fn regime_selected(regime: &str) -> bool {
     env::var("DST_REGIME").map_or(true, |r| r.eq_ignore_ascii_case(regime))
 }
@@ -509,9 +509,9 @@ fn regime_selected(regime: &str) -> bool {
 // tests
 // ---------------------------------------------------------------------------
 
-// ClearSky: no faults. The full differential oracle plus all safety invariants.
-// This is also the proof that the fault harness, with the injector configured to
-// do nothing, agrees with the fault-free slice-1 harness.
+/// ClearSky: no faults. The full differential oracle plus all safety invariants.
+/// This is also the proof that the fault harness, with the injector configured to
+/// do nothing, agrees with the fault-free slice-1 harness.
 #[test]
 fn clear_sky_full_oracle() {
     if regime_selected("clear_sky") {
@@ -519,8 +519,8 @@ fn clear_sky_full_oracle() {
     }
 }
 
-// Stormy: drop/delay/reorder/duplicate. The differential oracle holds on the
-// realized stream; the safety invariants hold throughout.
+/// Stormy: drop/delay/reorder/duplicate. The differential oracle holds on the
+/// realized stream; the safety invariants hold throughout.
 #[test]
 fn stormy_survives_lossy_transport() {
     if regime_selected("stormy") {
@@ -528,9 +528,9 @@ fn stormy_survives_lossy_transport() {
     }
 }
 
-// Apocalyptic: adds field corruption (mangled slot indices and rights). The
-// core must still uphold every invariant, and a corrupted/stale reference must
-// never be honored.
+/// Apocalyptic: adds field corruption (mangled slot indices and rights). The
+/// core must still uphold every invariant, and a corrupted/stale reference must
+/// never be honored.
 #[test]
 fn apocalyptic_survives_corruption() {
     if regime_selected("apocalyptic") {
@@ -538,9 +538,9 @@ fn apocalyptic_survives_corruption() {
     }
 }
 
-// the harness is a pure function of (seed, regime): two runs produce the
-// identical realized stream and outcomes. this is what makes a reported
-// (regime, seed) a faithful reproduction.
+/// The harness is a pure function of (seed, regime): two runs produce the
+/// identical realized stream and outcomes. This is what makes a reported
+/// (regime, seed) a faithful reproduction.
 #[test]
 fn fault_harness_is_deterministic() {
     let seeds = if cfg!(miri) { 2 } else { 24 };
@@ -559,10 +559,10 @@ fn fault_harness_is_deterministic() {
     }
 }
 
-// a sanity check that the regimes actually differ: under Stormy/Apocalyptic the
-// realized stream diverges from the generated stream (faults fire), whereas
-// under ClearSky it is identical. guards against the injector silently doing
-// nothing (which would make the fault tests vacuous).
+/// A sanity check that the regimes actually differ: under Stormy/Apocalyptic the
+/// realized stream diverges from the generated stream (faults fire), whereas
+/// under ClearSky it is identical. Guards against the injector silently doing
+/// nothing (which would make the fault tests vacuous).
 #[test]
 fn regimes_actually_inject_faults() {
     if cfg!(miri) {

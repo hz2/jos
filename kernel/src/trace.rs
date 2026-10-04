@@ -44,13 +44,13 @@ pub const TRACE_CAPACITY: usize = 64;
 /// overwrite-oldest policy lives here rather than in the buffer.
 pub struct TraceBuffer {
     events: RingBuffer<SyscallEvent, TRACE_CAPACITY>,
-    // sequence number assigned to the next recorded event. monotone for the
-    // life of the buffer (never reset on overwrite), so it is a total order over
-    // every event ever recorded, not just those still retained.
+    /// Sequence number assigned to the next recorded event. Monotone for the
+    /// life of the buffer (never reset on overwrite), so it is a total order over
+    /// every event ever recorded, not just those still retained.
     next_seq: u64,
-    // count of events dropped because the buffer was full when a newer event
-    // arrived. nonzero means the retained window does not start at seq 0, so a
-    // consumer knows the trace has gaps at the old end.
+    /// Count of events dropped because the buffer was full when a newer event
+    /// arrived. Nonzero means the retained window does not start at seq 0, so a
+    /// consumer knows the trace has gaps at the old end.
     dropped: u64,
 }
 
@@ -135,10 +135,10 @@ impl Default for TraceBuffer {
     }
 }
 
-// the single global trace buffer (conceptually CPU 0's). RingBuffer::new is a
-// const fn, so this initializes at compile time with no runtime setup. behind a
-// spin::Mutex because a syscall and a test-side drain both reach it; on
-// single-CPU jos the lock is uncontended.
+/// The single global trace buffer (conceptually CPU 0's). RingBuffer::new is a
+/// const fn, so this initializes at compile time with no runtime setup. Behind a
+/// spin::Mutex because a syscall and a test-side drain both reach it; on
+/// single-CPU jos the lock is uncontended.
 static TRACE: Mutex<TraceBuffer> = Mutex::new(TraceBuffer::new());
 
 /// Records a syscall event into the current CPU's trace buffer.

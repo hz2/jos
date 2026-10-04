@@ -34,9 +34,9 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// a page-aligned static untyped region (CNodes need 4096-byte alignment). 32 KiB
-// holds several CNodes + endpoints + a tcb. one shared region across the tests;
-// each test carves fresh objects so the watermark only advances.
+/// A page-aligned static untyped region (CNodes need 4096-byte alignment). 32 KiB
+/// holds several CNodes + endpoints + a tcb. One shared region across the tests;
+/// each test carves fresh objects so the watermark only advances.
 #[repr(align(4096))]
 struct UntypedBacking {
     bytes: UnsafeCell<[u8; 32 * 1024]>,
@@ -47,8 +47,8 @@ static UNTYPED: UntypedBacking = UntypedBacking {
     bytes: UnsafeCell::new([0u8; 32 * 1024]),
 };
 
-// the tests run sequentially in one boot; a single UntypedRegion is shared so
-// the watermark is monotonic and no object is double-carved. built on first use.
+/// The tests run sequentially in one boot; a single UntypedRegion is shared so
+/// the watermark is monotonic and no object is double-carved. Built on first use.
 static mut REGION: Option<UntypedRegion> = None;
 
 fn region() -> &'static mut UntypedRegion {
@@ -138,7 +138,7 @@ fn revoke_in_cnode_makes_ref_stale() {
 
 #[test_case]
 fn cnode_does_not_fit_when_region_exhausted() {
-    // negative control: a fresh tiny region cannot hold a CNode.
+    /// Negative control: a fresh tiny region cannot hold a CNode.
     #[repr(align(4096))]
     struct Tiny {
         bytes: UnsafeCell<[u8; 256]>,

@@ -36,7 +36,7 @@ use jos::memory::BootstrapFrameAllocator;
 use jos::{serial_print, syscall, usermode};
 use x86_64::VirtAddr;
 
-// the assembled SYS_ADD/SYS_EXIT round-trip program (see the disassembly above).
+/// The assembled SYS_ADD/SYS_EXIT round-trip program (see the disassembly above).
 #[rustfmt::skip]
 static USER_PROGRAM: [u8; 46] = [
     0xb8, 0x00, 0x00, 0x00, 0x00,       // mov eax, 0      (SYS_ADD)

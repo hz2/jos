@@ -46,27 +46,27 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 // it never needs to be large because the handler does minimal work.
 const STACK_SIZE: usize = 4096 * 5;
 
-// the double-fault stack itself. it lives in .bss as a mutable static byte
-// array; the TSS IST entry points at its top (stacks grow downward on x86).
+/// The double-fault stack itself. It lives in .bss as a mutable static byte
+/// array; the TSS IST entry points at its top (stacks grow downward on x86).
 static mut DOUBLE_FAULT_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-// the ring-0 stack the cpu switches to when a ring-3 thread enters the kernel
-// via an interrupt (the TSS rsp0 / privilege_stack_table[0] entry). it must be
-// distinct from the boot stack and from the IST stack: an interrupt taken in
-// ring 3 pushes its stack frame here, and the handler then runs on it. 20 KiB
-// matches the IST stack and is ample for the handlers we install.
-//
-// this is a single shared rsp0 because jos runs one userspace thread at a time
-// for now; a per-TCB rsp0 (reprogrammed on context switch) arrives with the
-// scheduler's userspace thread support (slice 3c).
+/// The ring-0 stack the cpu switches to when a ring-3 thread enters the kernel
+/// via an interrupt (the TSS rsp0 / privilege_stack_table[0] entry). It must be
+/// distinct from the boot stack and from the IST stack: an interrupt taken in
+/// ring 3 pushes its stack frame here, and the handler then runs on it. 20 KiB
+/// matches the IST stack and is ample for the handlers we install.
+///
+/// This is a single shared rsp0 because jos runs one userspace thread at a time
+/// for now; a per-TCB rsp0 (reprogrammed on context switch) arrives with the
+/// scheduler's userspace thread support (slice 3c).
 static mut PRIVILEGE_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-// the TSS holds the IST and the privilege stack table. like the IDT it must
-// outlive the load (the cpu keeps a pointer after ltr), so it is a static built
-// once during init.
+/// The TSS holds the IST and the privilege stack table. Like the IDT it must
+/// outlive the load (the cpu keeps a pointer after ltr), so it is a static built
+/// once during init.
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
-// the GDT, populated and loaded by init().
+/// The GDT, populated and loaded by init().
 static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
 
 /// The segment selectors this GDT defines, captured at load time so callers
@@ -86,7 +86,7 @@ pub struct Selectors {
     pub tss: SegmentSelector,
 }
 
-// the loaded selectors, filled in by init_gdt. None until init runs.
+/// The loaded selectors, filled in by init_gdt. None until init runs.
 static mut SELECTORS: Option<Selectors> = None;
 
 /// Returns the segment selectors established by [`init_gdt`].

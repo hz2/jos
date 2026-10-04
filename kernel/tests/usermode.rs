@@ -30,8 +30,8 @@ use jos::{QemuExitCode, exit_qemu, gdt, interrupts, serial_print, serial_println
 use x86_64::PrivilegeLevel;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
-// a ring-3 program: int3 (0xcc) then jmp-to-self (0xeb 0xfe) as a backstop in
-// case the breakpoint handler returns instead of exiting.
+/// A ring-3 program: int3 (0xcc) then jmp-to-self (0xeb 0xfe) as a backstop in
+/// case the breakpoint handler returns instead of exiting.
 static USER_PROGRAM: [u8; 3] = [0xCC, 0xEB, 0xFE];
 
 static INFO_PTR: AtomicU32 = AtomicU32::new(0);
@@ -102,16 +102,16 @@ fn init_test_idt() {
     }
 }
 
-// sends EOI so the PIC delivers further timer ticks; the test completes before
-// a second tick fires (int3 is the first instruction of the payload).
+/// Sends EOI so the PIC delivers further timer ticks; the test completes before
+/// a second tick fires (int3 is the first instruction of the payload).
 extern "x86-interrupt" fn noop_timer_handler(_frame: InterruptStackFrame) {
     // SAFETY: timer is IRQ0 mapped to PIC_1_OFFSET after init_pics; correct vector.
     unsafe { PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8()); }
 }
 
-// the breakpoint handler the ring-3 int3 traps into. the saved code segment in
-// the interrupt stack frame is the CS the cpu was running when int3 fired; its
-// RPL is the privilege level. RPL == 3 proves we were in ring 3.
+/// The breakpoint handler the ring-3 int3 traps into. The saved code segment in
+/// the interrupt stack frame is the CS the cpu was running when int3 fired; its
+/// RPL is the privilege level. RPL == 3 proves we were in ring 3.
 extern "x86-interrupt" fn test_breakpoint_handler(stack_frame: InterruptStackFrame) {
     let saved_cs = stack_frame.code_segment;
     let rpl = saved_cs & 0b11;

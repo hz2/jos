@@ -64,16 +64,16 @@ const BUDGET: usize = 240;
 // some are already due when armed (offset 0) and some are well in the future.
 const MAX_AHEAD: u64 = 200;
 
-// the schedule regime: how the workload is shaped. the queue is the same
-// verified code under both; the regime only changes the seeded action mix.
+/// The schedule regime: how the workload is shaped. The queue is the same
+/// verified code under both; the regime only changes the seeded action mix.
 #[derive(Clone, Copy)]
 struct Regime {
     name: &'static str,
-    // per-1000 weight of each action; the remainder is "advance the clock".
+    /// Per-1000 weight of each action; the remainder is "advance the clock".
     arm_ppm: u64,
     cancel_ppm: u64,
-    // the largest single clock advance, in ticks. bigger jumps fire more timers
-    // per drain (and stress liveness); smaller jumps fire them gradually.
+    /// The largest single clock advance, in ticks. Bigger jumps fire more timers
+    /// per drain (and stress liveness); smaller jumps fire them gradually.
     max_step: u64,
 }
 
@@ -98,7 +98,7 @@ impl Regime {
     };
 }
 
-// one recorded event, enough to prove two same-seed runs are identical.
+/// One recorded event, enough to prove two same-seed runs are identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ev {
     Armed { id: u64, deadline: u64, data: u64 },
@@ -114,29 +114,29 @@ struct TimeoutSim {
     regime: Regime,
     rng: SimRng,
 
-    // the system under test and the injected clock that drives it.
+    /// The system under test and the injected clock that drives it.
     queue: TimerQueue<CAP>,
     clock: SimClock,
 
-    // the INDEPENDENT shadow: a sorted map of live timers by id, carrying each
-    // timer's deadline and payload. different shape from the packed array, so a
-    // divergence is a real bug. the source of the earliest-first cross-check and
-    // the conservation buckets.
+    /// The INDEPENDENT shadow: a sorted map of live timers by id, carrying each
+    /// timer's deadline and payload. Different shape from the packed array, so a
+    /// divergence is a real bug. The source of the earliest-first cross-check and
+    /// the conservation buckets.
     shadow: BTreeMap<u64, (Instant, u64)>,
 
-    // conservation accounting, keyed by the payload (unique per armed timer).
-    // armed = entered; fired + cancelled + still-live must equal armed, always.
+    /// Conservation accounting, keyed by the payload (unique per armed timer).
+    /// Armed = entered; fired + cancelled + still-live must equal armed, always.
     armed_total: usize,
     fired_total: usize,
     cancelled_total: usize,
 
-    // the deadline of the most recently fired timer, to assert the global drain
-    // order is non-decreasing across the whole run, not just within one drain.
+    /// The deadline of the most recently fired timer, to assert the global drain
+    /// order is non-decreasing across the whole run, not just within one drain.
     last_fired_deadline: Option<Instant>,
 
     budget: usize,
-    // a monotone payload tag, so every armed timer is uniquely identifiable in
-    // the conservation accounting regardless of id reuse semantics.
+    /// A monotone payload tag, so every armed timer is uniquely identifiable in
+    /// the conservation accounting regardless of id reuse semantics.
     next_data: u64,
 
     log: Vec<Ev>,
@@ -161,8 +161,8 @@ impl TimeoutSim {
         }
     }
 
-    // the independent earliest computation: the live timer with the smallest
-    // (deadline, id), the same total order the queue uses. None when empty.
+    /// The independent earliest computation: the live timer with the smallest
+    /// (deadline, id), the same total order the queue uses. None when empty.
     fn shadow_earliest(&self) -> Option<(u64, Instant, u64)> {
         self.shadow
             .iter()
@@ -248,9 +248,9 @@ impl TimeoutSim {
         self.check_consistency();
     }
 
-    // fire every timer that is due at the current time, checking each fire
-    // against the shadow. this is the liveness step: after it, NO due timer
-    // remains (asserted by liveness_holds).
+    /// Fire every timer that is due at the current time, checking each fire
+    /// against the shadow. This is the liveness step: after it, NO due timer
+    /// remains (asserted by liveness_holds).
     fn drain_due(&mut self) {
         let now = self.clock.now();
         while let Some(fired) = self.queue.expire_next(now) {
@@ -298,9 +298,9 @@ impl TimeoutSim {
         self.liveness_holds(now);
     }
 
-    // after a drain, nothing due remains: the queue's earliest (if any) is
-    // strictly in the future. this is the liveness property, the converse of
-    // no-early-fire.
+    /// After a drain, nothing due remains: the queue's earliest (if any) is
+    /// strictly in the future. This is the liveness property, the converse of
+    /// no-early-fire.
     fn liveness_holds(&self, now: Instant) {
         if let Some(next) = self.queue.next_deadline() {
             assert!(
@@ -311,8 +311,8 @@ impl TimeoutSim {
         }
     }
 
-    // per-step structural agreement between the queue and the shadow, plus the
-    // running conservation identity.
+    /// Per-step structural agreement between the queue and the shadow, plus the
+    /// running conservation identity.
     fn check_consistency(&self) {
         // same population.
         assert_eq!(
@@ -363,9 +363,9 @@ impl TimeoutSim {
         }
     }
 
-    // drives the schedule, then jumps the clock to the end of time and drains:
-    // afterwards every armed timer has been fired or cancelled, the strongest
-    // conservation statement.
+    /// Drives the schedule, then jumps the clock to the end of time and drains:
+    /// afterwards every armed timer has been fired or cancelled, the strongest
+    /// conservation statement.
     fn run(&mut self, steps: usize) {
         for _ in 0..steps {
             self.step();
@@ -425,8 +425,8 @@ fn sweep(regime: Regime) {
 // tests
 // ---------------------------------------------------------------------------
 
-// Calm: light load, small clock steps. Timers fire gradually; conservation,
-// ordering, and liveness hold across the sweep.
+/// Calm: light load, small clock steps. Timers fire gradually; conservation,
+/// ordering, and liveness hold across the sweep.
 #[test]
 fn calm_conserves_and_orders() {
     if regime_selected("calm") {
@@ -434,8 +434,8 @@ fn calm_conserves_and_orders() {
     }
 }
 
-// Turbulent: heavy arm/cancel churn and large clock jumps, so the queue
-// repeatedly fills and drains in bursts. The same invariants must hold.
+/// Turbulent: heavy arm/cancel churn and large clock jumps, so the queue
+/// repeatedly fills and drains in bursts. The same invariants must hold.
 #[test]
 fn turbulent_conserves_and_orders() {
     if regime_selected("turbulent") {
@@ -443,9 +443,9 @@ fn turbulent_conserves_and_orders() {
     }
 }
 
-// the harness is a pure function of (seed, regime): two runs log the identical
-// timeline. guards against accidental nondeterminism (e.g. relying on the
-// queue's storage order, which swap-remove scrambles).
+/// The harness is a pure function of (seed, regime): two runs log the identical
+/// timeline. Guards against accidental nondeterminism (e.g. relying on the
+/// queue's storage order, which swap-remove scrambles).
 #[test]
 fn timeout_harness_is_deterministic() {
     let seeds = if cfg!(miri) { 2 } else { 24 };
@@ -463,10 +463,10 @@ fn timeout_harness_is_deterministic() {
     }
 }
 
-// anti-vacuous guard: the schedule genuinely fills the queue to capacity (so the
-// arm-refusal path fires), genuinely fires timers, and genuinely cancels some.
-// without this, a queue that silently dropped every arm would pass the
-// conservation identity vacuously (armed stays 0).
+/// Anti-vacuous guard: the schedule genuinely fills the queue to capacity (so the
+/// arm-refusal path fires), genuinely fires timers, and genuinely cancels some.
+/// Without this, a queue that silently dropped every arm would pass the
+/// conservation identity vacuously (armed stays 0).
 #[test]
 fn the_schedule_exercises_every_path() {
     if cfg!(miri) {

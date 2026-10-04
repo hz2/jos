@@ -56,9 +56,9 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// a statically-allocated, 64-byte-aligned untyped region with real provenance.
-// each test takes a fresh 512-byte slice via a bump cursor so their endpoints do
-// not alias (the tests run sequentially in one boot).
+/// A statically-allocated, 64-byte-aligned untyped region with real provenance.
+/// Each test takes a fresh 512-byte slice via a bump cursor so their endpoints do
+/// not alias (the tests run sequentially in one boot).
 #[repr(align(64))]
 struct UntypedBacking {
     bytes: core::cell::UnsafeCell<[u8; 4096]>,
@@ -70,7 +70,7 @@ static UNTYPED: UntypedBacking = UntypedBacking {
 };
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-// carves a fresh 512-byte untyped region out of the backing for one test.
+/// Carves a fresh 512-byte untyped region out of the backing for one test.
 fn fresh_untyped() -> UntypedRegion {
     let off = NEXT.fetch_add(512, Ordering::SeqCst);
     // form the whole-array &mut in one explicit deref (avoiding an implicit
@@ -83,7 +83,7 @@ fn fresh_untyped() -> UntypedRegion {
     UntypedRegion::new(&mut backing[off..off + 512])
 }
 
-// builds a space with one endpoint and returns (space, send_cap, recv_cap).
+/// Builds a space with one endpoint and returns (space, send_cap, recv_cap).
 fn space_with_endpoint() -> (KernelCapSpace, CapRef, CapRef) {
     let mut untyped = fresh_untyped();
     let mut space = KernelCapSpace::new();
@@ -94,9 +94,9 @@ fn space_with_endpoint() -> (KernelCapSpace, CapRef, CapRef) {
     (space, send_cap, recv_cap)
 }
 
-// a receiver that parks on an empty endpoint is woken by a later sender, and the
-// message round-trips. the receiver is spawned first (so it parks on first
-// poll), then the sender runs and wakes it.
+/// A receiver that parks on an empty endpoint is woken by a later sender, and the
+/// message round-trips. The receiver is spawned first (so it parks on first
+/// poll), then the sender runs and wakes it.
 #[test_case]
 fn receiver_parks_then_sender_wakes_it() {
     let (space, send_cap, recv_cap) = space_with_endpoint();
@@ -138,8 +138,8 @@ fn receiver_parks_then_sender_wakes_it() {
     assert_eq!(*got.borrow(), Some(sent));
 }
 
-// the reverse order: the sender deposits before any receiver exists, then a
-// receiver drains it. no parking needed; proves order-independence.
+/// The reverse order: the sender deposits before any receiver exists, then a
+/// receiver drains it. No parking needed; proves order-independence.
 #[test_case]
 fn sender_first_then_receiver_drains() {
     let (space, send_cap, recv_cap) = space_with_endpoint();
@@ -174,10 +174,10 @@ fn sender_first_then_receiver_drains() {
     assert_eq!(*got.borrow(), Some(sent));
 }
 
-// a second sender blocks while the endpoint already holds an undelivered
-// message, and completes only after a receiver drains the first. the capacity-1
-// endpoint serializes two sends through one receive each, so all four events
-// (two sends, two receipts) occur exactly once.
+/// A second sender blocks while the endpoint already holds an undelivered
+/// message, and completes only after a receiver drains the first. The capacity-1
+/// endpoint serializes two sends through one receive each, so all four events
+/// (two sends, two receipts) occur exactly once.
 #[test_case]
 fn sender_blocks_on_full_endpoint_until_drained() {
     let (space, send_cap, recv_cap) = space_with_endpoint();
@@ -229,11 +229,11 @@ fn sender_blocks_on_full_endpoint_until_drained() {
     );
 }
 
-// a future built on a capability that is already stale resolves to InvalidCap on
-// its first poll: the IPC futures re-validate authority through resolve_endpoint
-// every time they run, rather than trusting a check made at creation. (the cap
-// is revoked before the space is shared, so no mutation crosses an await; the
-// revoke-while-parked path is a slice-3 item, see the module header.)
+/// A future built on a capability that is already stale resolves to InvalidCap on
+/// its first poll: the IPC futures re-validate authority through resolve_endpoint
+/// every time they run, rather than trusting a check made at creation. (the cap
+/// is revoked before the space is shared, so no mutation crosses an await; the
+/// revoke-while-parked path is a slice-3 item, see the module header.).
 #[test_case]
 fn stale_capability_is_rejected_at_poll() {
     let mut untyped = fresh_untyped();

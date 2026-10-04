@@ -60,7 +60,7 @@ pub unsafe fn init_mapper() -> OffsetPageTable<'static> {
 /// frame boundary.
 fn reserved_end() -> u64 {
     unsafe extern "C" {
-        // defined by link.ld at the end of the kernel image.
+        /// Defined by link.ld at the end of the kernel image.
         static _kernel_end: u8;
     }
     // taking the address of an extern static (never dereferencing it) is safe.
@@ -72,12 +72,12 @@ fn reserved_end() -> u64 {
 /// regions, in order, never reusing one. Used to bootstrap paging and the heap
 /// before the verified bitmap allocator (which needs heap storage) is online.
 pub struct BootstrapFrameAllocator {
-    // usable regions, clipped to frame boundaries, as (start, end) pairs.
+    /// Usable regions, clipped to frame boundaries, as (start, end) pairs.
     regions: [(u64, u64); MAX_REGIONS],
     region_count: usize,
-    // index of the region we are currently handing frames out of.
+    /// Index of the region we are currently handing frames out of.
     current: usize,
-    // next frame address to return within the current region.
+    /// Next frame address to return within the current region.
     next: u64,
 }
 
@@ -132,8 +132,8 @@ impl BootstrapFrameAllocator {
         allocator
     }
 
-    // positions `current`/`next` past the reserved boundary so the first frame
-    // handed out is the first free frame at or above `boundary`.
+    /// Positions `current`/`next` past the reserved boundary so the first frame
+    /// handed out is the first free frame at or above `boundary`.
     fn skip_reserved(&mut self, boundary: u64) {
         while self.current < self.region_count {
             let (start, end) = self.regions[self.current];

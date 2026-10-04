@@ -261,11 +261,11 @@ mod kani_proofs {
     // below(100), so a sweep through 128 covers every bound in use.
     const BOUND_MAX: u64 = 128;
 
-    // the core in-range guarantee: for any word and any bound in [1, BOUND_MAX],
-    // the Lemire mapping lands strictly below the bound. this is what lets the
-    // DST harness index a slot or pick an action without a bounds check. the
-    // bound is concrete each iteration (so the multiply folds to shift-add); x
-    // is symbolic, so the result is universally quantified over all words.
+    /// The core in-range guarantee: for any word and any bound in [1, BOUND_MAX],
+    /// the Lemire mapping lands strictly below the bound. This is what lets the
+    /// DST harness index a slot or pick an action without a bounds check. The
+    /// bound is concrete each iteration (so the multiply folds to shift-add); x
+    /// is symbolic, so the result is universally quantified over all words.
     #[kani::proof]
     #[kani::unwind(130)] // BOUND_MAX + 2: covers the 1..=BOUND_MAX loop
     fn below_is_in_range() {
@@ -277,8 +277,8 @@ mod kani_proofs {
         }
     }
 
-    // bound == 0 maps to 0 (the documented convention), with no overflow. the
-    // bound is concrete, so the multiply folds to zero and this is cheap.
+    /// Bound == 0 maps to 0 (the documented convention), with no overflow. The
+    /// bound is concrete, so the multiply folds to zero and this is cheap.
     #[kani::proof]
     fn below_zero_maps_to_zero() {
         let x: u64 = kani::any();

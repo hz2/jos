@@ -49,9 +49,9 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// a statically-allocated, 64-byte-aligned untyped region with real provenance.
-// each test takes a fresh 512-byte slice via a bump cursor so their objects do
-// not alias (the tests run sequentially in one boot).
+/// A statically-allocated, 64-byte-aligned untyped region with real provenance.
+/// Each test takes a fresh 512-byte slice via a bump cursor so their objects do
+/// not alias (the tests run sequentially in one boot).
 #[repr(align(64))]
 struct UntypedBacking {
     bytes: core::cell::UnsafeCell<[u8; 4096]>,
@@ -63,7 +63,7 @@ static UNTYPED: UntypedBacking = UntypedBacking {
 };
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
-// carves a fresh 512-byte untyped region out of the backing for one test.
+/// Carves a fresh 512-byte untyped region out of the backing for one test.
 fn fresh_untyped() -> UntypedRegion {
     let off = NEXT.fetch_add(512, Ordering::SeqCst);
     // SAFETY: each call claims a distinct [off, off+512) window of the static
@@ -74,7 +74,7 @@ fn fresh_untyped() -> UntypedRegion {
     UntypedRegion::new(&mut backing[off..off + 512])
 }
 
-// builds a space with one notification and returns (space, signal_cap, wait_cap).
+/// Builds a space with one notification and returns (space, signal_cap, wait_cap).
 fn space_with_notification() -> (KernelCapSpace, CapRef, CapRef) {
     let mut untyped = fresh_untyped();
     let mut space = KernelCapSpace::new();
@@ -85,9 +85,9 @@ fn space_with_notification() -> (KernelCapSpace, CapRef, CapRef) {
     (space, signal_cap, wait_cap)
 }
 
-// a waiter that parks on an empty notification is woken by a later signal, and
-// reads back the signalled badge. the waiter is spawned first (so it parks on
-// first poll), then the signaller runs and wakes it.
+/// A waiter that parks on an empty notification is woken by a later signal, and
+/// reads back the signalled badge. The waiter is spawned first (so it parks on
+/// first poll), then the signaller runs and wakes it.
 #[test_case]
 fn waiter_parks_then_signal_wakes_it() {
     let (space, signal_cap, wait_cap) = space_with_notification();
@@ -125,9 +125,9 @@ fn waiter_parks_then_signal_wakes_it() {
     assert_eq!(*got.borrow(), Some(Badge(0b1010)));
 }
 
-// signals delivered BEFORE any waiter exists coalesce by OR into a single
-// pending badge, which one later wait collects in one go. proves order-
-// independence and the coalescing semantics (the seL4 notification model).
+/// Signals delivered BEFORE any waiter exists coalesce by OR into a single
+/// pending badge, which one later wait collects in one go. Proves order-
+/// independence and the coalescing semantics (the seL4 notification model).
 #[test_case]
 fn signals_coalesce_before_a_wait() {
     let (space, signal_cap, wait_cap) = space_with_notification();
@@ -164,9 +164,9 @@ fn signals_coalesce_before_a_wait() {
     assert_eq!(*got.borrow(), Some(Badge(0b0101)));
 }
 
-// a signal-only (WRITE) capability cannot wait, and a wait-only (READ)
-// capability cannot signal: rights are enforced at the boundary, on every
-// operation, exactly as for endpoint send/recv.
+/// A signal-only (WRITE) capability cannot wait, and a wait-only (READ)
+/// capability cannot signal: rights are enforced at the boundary, on every
+/// operation, exactly as for endpoint send/recv.
 #[test_case]
 fn rights_are_enforced() {
     let (space, signal_cap, wait_cap) = space_with_notification();

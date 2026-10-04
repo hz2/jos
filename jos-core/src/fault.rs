@@ -245,8 +245,8 @@ impl Default for SmallOpVec {
 // FaultInjector
 // ---------------------------------------------------------------------------
 
-// one operation pending delayed delivery: the op plus the number of steps left
-// before it is released. only indices 0..delay_len of the queue are Some.
+/// One operation pending delayed delivery: the op plus the number of steps left
+/// before it is released. Only indices `0..delay_len` of the queue are Some.
 #[derive(Debug, Clone, Copy)]
 struct DelayEntry {
     op: CapOp,
@@ -325,9 +325,9 @@ impl FaultInjector {
         out
     }
 
-    // decrements every queued entry and releases (pushes to `out`) those that
-    // reach zero, removing them from the queue. preserves the "0..delay_len are
-    // Some" shape via a swap-remove with the last live entry.
+    /// Decrements every queued entry and releases (pushes to `out`) those that
+    /// reach zero, removing them from the queue. Preserves the "`0..delay_len` are
+    /// Some" shape via a swap-remove with the last live entry.
     fn flush_ready(&mut self, out: &mut SmallOpVec) {
         let mut i = 0;
         while i < self.delay_len {
@@ -351,8 +351,8 @@ impl FaultInjector {
         }
     }
 
-    // tries to buffer `op` for a randomized delay. returns false (caller passes
-    // the op through) when the queue is full.
+    /// Tries to buffer `op` for a randomized delay. Returns false (caller passes
+    /// the op through) when the queue is full.
     fn try_delay(&mut self, op: CapOp, rng: &mut impl KernelRng) -> bool {
         if self.delay_len >= DELAY_MAX {
             return false;
@@ -428,14 +428,14 @@ impl FaultInjector {
     }
 }
 
-// an arbitrary 32-bit slot index, drawn so that out-of-range values are common
-// (the interesting corruption: the core must reject them via ref_at).
+/// An arbitrary 32-bit slot index, drawn so that out-of-range values are common
+/// (the interesting corruption: the core must reject them via `ref_at`).
 #[allow(clippy::cast_possible_truncation)]
 fn random_slot_word(rng: &mut impl KernelRng) -> u32 {
     rng.next_u64() as u32
 }
 
-// an arbitrary valid Rights value (one of the 16 subsets of the four bits).
+/// An arbitrary valid Rights value (one of the 16 subsets of the four bits).
 #[allow(clippy::cast_possible_truncation)]
 fn random_rights(rng: &mut impl KernelRng) -> Rights {
     Rights::from_bits_truncate(rng.below(16) as u8)
@@ -595,8 +595,8 @@ mod kani_proofs {
     use super::{FaultConfig, SmallOpVec, DELIVER_MAX};
     use crate::trace::CapOp;
 
-    // new() accepts a config iff the four fault weights sum to <= 1000, and the
-    // sum is computed without overflow (u32 accumulation of four u16s).
+    /// New() accepts a config iff the four fault weights sum to <= 1000, and the
+    /// sum is computed without overflow (u32 accumulation of four u16s).
     #[kani::proof]
     fn new_accepts_exactly_when_sum_in_bound() {
         let d: u16 = kani::any();
@@ -613,8 +613,8 @@ mod kani_proofs {
         }
     }
 
-    // pushing up to DELIVER_MAX ops keeps len within capacity, so process (which
-    // never pushes more than DELIVER_MAX) can never overflow the vector.
+    /// Pushing up to DELIVER_MAX ops keeps len within capacity, so process (which
+    /// never pushes more than DELIVER_MAX) can never overflow the vector.
     #[kani::proof]
     #[kani::unwind(8)] // DELIVER_MAX + 2
     fn small_op_vec_respects_capacity() {

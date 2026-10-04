@@ -81,10 +81,10 @@ impl InterruptIndex {
     }
 }
 
-// the idt must outlive the call to load() (the cpu keeps a pointer to it after
-// lidt), so it is a static. we use a mutable static guarded by a one-time init
-// rather than lazy_static: the runtime initializer pattern is simpler to reason
-// about and avoids a spin-lock first-access path in the boot sequence.
+/// The idt must outlive the call to load() (the cpu keeps a pointer to it after
+/// lidt), so it is a static. We use a mutable static guarded by a one-time init
+/// rather than lazy_static: the runtime initializer pattern is simpler to reason
+/// about and avoids a spin-lock first-access path in the boot sequence.
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
 /// Builds and loads the IDT into the cpu. Call once during early kernel init.
@@ -148,10 +148,10 @@ unsafe fn conditional_swapgs(cs: u64) {
     }
 }
 
-// breakpoint (#BP) is a trap: the cpu resumes at the instruction after int3
-// once the handler returns, so we just log and continue. the x86-interrupt abi
-// makes the compiler emit the correct prologue/epilogue (it preserves all
-// registers and uses iretq), so the handler is an ordinary safe fn.
+/// Breakpoint (#BP) is a trap: the cpu resumes at the instruction after int3
+/// once the handler returns, so we just log and continue. The x86-interrupt abi
+/// makes the compiler emit the correct prologue/epilogue (it preserves all
+/// registers and uses iretq), so the handler is an ordinary safe fn.
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     let cs = stack_frame.code_segment;
     // SAFETY: entry swap; no GS access before this point.
@@ -163,11 +163,11 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     unsafe { conditional_swapgs(cs); }
 }
 
-// double fault (#DF) fires when handling one exception triggers another (the
-// classic case: a stack overflow whose page fault then faults again). it is not
-// recoverable, so the handler is diverging; the x86_64 crate types the error
-// code as u64 and requires a `-> !` return. running on the IST stack set up in
-// the gdt module is what keeps this handler from itself faulting.
+/// Double fault (#DF) fires when handling one exception triggers another (the
+/// classic case: a stack overflow whose page fault then faults again). It is not
+/// recoverable, so the handler is diverging; the x86_64 crate types the error
+/// code as u64 and requires a `-> !` return. Running on the IST stack set up in
+/// the gdt module is what keeps this handler from itself faulting.
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
@@ -175,10 +175,10 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
 }
 
-// page fault (#PF). cr2 holds the faulting address and the error code says why
-// (present/write/user bits). we report and halt rather than recover; this is a
-// diagnostic so paging bugs show the faulting address instead of escalating to
-// an opaque double fault.
+/// Page fault (#PF). cr2 holds the faulting address and the error code says why
+/// (present/write/user bits). We report and halt rather than recover; this is a
+/// diagnostic so paging bugs show the faulting address instead of escalating to
+/// an opaque double fault.
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: x86_64::structures::idt::PageFaultErrorCode,
@@ -198,13 +198,13 @@ extern "x86-interrupt" fn page_fault_handler(
     crate::hlt_loop();
 }
 
-// keyboard (IRQ1, vector 33). the handler does the minimum bounded work:
-// consume the scancode from the PS/2 data port and hand it to the keyboard
-// module, which pushes it onto a lock-free queue and wakes the decoder task. the
-// pc-keyboard decode + printing happens later on the executor (the async
-// ScancodeStream pattern), not in interrupt context. the handler runs with
-// interrupts disabled (the cpu clears IF on entry), so add_scancode's queue push
-// is uncontended here.
+/// Keyboard (IRQ1, vector 33). The handler does the minimum bounded work:
+/// consume the scancode from the PS/2 data port and hand it to the keyboard
+/// module, which pushes it onto a lock-free queue and wakes the decoder task. The
+/// pc-keyboard decode + printing happens later on the executor (the async
+/// ScancodeStream pattern), not in interrupt context. The handler runs with
+/// interrupts disabled (the cpu clears IF on entry), so add_scancode's queue push
+/// is uncontended here.
 extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
@@ -233,10 +233,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
 
 #[cfg(test)]
 mod tests {
-    // triggering int3 must return cleanly: if the breakpoint handler is wired
-    // correctly the cpu resumes after the instruction and the test completes.
-    // a missing or broken handler would instead escalate to a double/triple
-    // fault and reset the machine, failing the test.
+    /// Triggering int3 must return cleanly: if the breakpoint handler is wired
+    /// correctly the cpu resumes after the instruction and the test completes.
+    /// A missing or broken handler would instead escalate to a double/triple
+    /// fault and reset the machine, failing the test.
     #[test_case]
     fn breakpoint_exception_returns() {
         super::init_idt();

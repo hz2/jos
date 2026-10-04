@@ -36,7 +36,7 @@ use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::FrameAllocator;
 
-// the assembled retype/invoke program (see the source in the commit notes).
+/// The assembled retype/invoke program (see the source in the commit notes).
 #[rustfmt::skip]
 static USER_PROGRAM: [u8; 210] = [
     0xb8, 0x04, 0x00, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x00, 0x00, 0xbe, 0x00, 0x00, 0x00, 0x00, 0xba,
@@ -65,10 +65,10 @@ const UNTYPED_SIZE: usize = 64 * 1024;
 struct UntypedBacking([u8; UNTYPED_SIZE]);
 static mut VSPACE_UNTYPED: UntypedBacking = UntypedBacking([0; UNTYPED_SIZE]);
 
-// the untyped REGION struct (distinct from its backing bytes): it must outlive
-// the syscalls, since the untyped capability names this struct's address.
+/// The untyped REGION struct (distinct from its backing bytes): it must outlive
+/// the syscalls, since the untyped capability names this struct's address.
 static mut OBJECT_UNTYPED: Option<UntypedRegion> = None;
-// the current task's CSpace (runtime-built; KernelCapSpace::new is not const).
+/// The current task's CSpace (runtime-built; KernelCapSpace::new is not const).
 static mut CSPACE: Option<KernelCapSpace> = None;
 
 const KSTACK_SIZE: usize = 4096 * 4;
@@ -161,8 +161,8 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     }
 }
 
-// a second page-aligned static backing for the user's retype-source region,
-// distinct from the VSpace region. 16 KiB is ample for a few endpoints.
+/// A second page-aligned static backing for the user's retype-source region,
+/// distinct from the VSpace region. 16 KiB is ample for a few endpoints.
 fn fresh_object_backing() -> &'static mut [u8] {
     #[repr(align(4096))]
     struct Backing([u8; 16 * 1024]);

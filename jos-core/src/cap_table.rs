@@ -41,7 +41,7 @@
 /// slot invalidates every prior `CapRef` to it via the generation bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapRef {
-    // u32 keeps a capability slot small; tables never approach u32::MAX slots.
+    /// u32 keeps a capability slot small; tables never approach `u32::MAX` slots.
     slot: u32,
     generation: u32,
 }
@@ -71,16 +71,16 @@ impl CapRef {
     }
 }
 
-// narrow an in-range slot index for storage in a CapRef.
+/// Narrows an in-range slot index for storage in a [`CapRef`].
 #[allow(clippy::cast_possible_truncation)]
 const fn slot_index(slot: usize) -> u32 {
     // callers pass slot < N, and N is far below u32::MAX for any real table.
     slot as u32
 }
 
-// a single table slot: the optional capability plus the generation counter.
-// the generation advances each time the slot is vacated, invalidating any
-// outstanding CapRef that named the previous occupant.
+/// A single table slot: the optional capability plus the generation counter.
+/// The generation advances each time the slot is vacated, invalidating any
+/// outstanding `CapRef` that named the previous occupant.
 struct Slot<T> {
     entry: Option<T>,
     generation: u32,
@@ -195,8 +195,8 @@ impl<T, const N: usize> CapTable<T, N> {
         Err(cap)
     }
 
-    // returns true if `cap_ref` currently names a live capability: in range,
-    // occupied, and matching generation. the single source of validity.
+    /// Returns true if `cap_ref` currently names a live capability: in range,
+    /// occupied, and matching generation. The single source of validity.
     #[inline]
     fn is_valid(&self, cap_ref: CapRef) -> bool {
         cap_ref.slot() < N
@@ -516,12 +516,12 @@ mod tests {
     }
 }
 
-// bounded proof harnesses, run under `cargo kani` once the verifier is wired.
+/// Bounded proof harnesses, run under `cargo kani` once the verifier is wired.
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
 
-    // a fresh insert always yields a ref that resolves back to the same value.
+    /// A fresh insert always yields a ref that resolves back to the same value.
     #[kani::proof]
     fn insert_then_get_identity() {
         let mut t: CapTable<u32, 4> = CapTable::new();
@@ -530,7 +530,7 @@ mod kani_proofs {
         assert!(t.get(r) == Some(&v));
     }
 
-    // after removal the same ref never resolves, no matter the value.
+    /// After removal the same ref never resolves, no matter the value.
     #[kani::proof]
     fn removed_ref_is_always_stale() {
         let mut t: CapTable<u32, 2> = CapTable::new();
@@ -541,9 +541,9 @@ mod kani_proofs {
         assert!(t.remove(r).is_none());
     }
 
-    // insert_at places at exactly the requested slot when free, and the
-    // resulting ref resolves to the inserted value; an occupied or
-    // out-of-range slot is rejected without disturbing the table.
+    /// insert_at places at exactly the requested slot when free, and the
+    /// resulting ref resolves to the inserted value; an occupied or
+    /// out-of-range slot is rejected without disturbing the table.
     #[kani::proof]
     fn insert_at_places_or_rejects() {
         let mut t: CapTable<u32, 4> = CapTable::new();
@@ -565,7 +565,7 @@ mod kani_proofs {
         }
     }
 
-    // the revocation guarantee: an old ref cannot reach a slot's new occupant.
+    /// The revocation guarantee: an old ref cannot reach a slot's new occupant.
     #[kani::proof]
     fn reused_slot_rejects_old_ref() {
         let mut t: CapTable<u32, 1> = CapTable::new();
@@ -577,7 +577,7 @@ mod kani_proofs {
         assert!(t.get(old).is_none());
     }
 
-    // len stays within bounds across a short arbitrary op sequence.
+    /// Len stays within bounds across a short arbitrary op sequence.
     #[kani::proof]
     #[kani::unwind(5)]
     fn len_within_bounds() {

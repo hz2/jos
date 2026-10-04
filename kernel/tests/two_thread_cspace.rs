@@ -33,7 +33,7 @@ use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::FrameAllocator;
 
-// thread B: recv from slot 0, require the word == 0xB0B0, else fail.
+/// Thread B: recv from slot 0, require the word == 0xB0B0, else fail.
 #[rustfmt::skip]
 static THREAD_B_PROGRAM: [u8; 41] = [
     0xb8, 0x03, 0x00, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x3d, 0xb0, 0xb0,
@@ -48,8 +48,8 @@ const UNTYPED_SIZE: usize = 128 * 1024;
 struct UntypedBacking([u8; UNTYPED_SIZE]);
 static mut UNTYPED: UntypedBacking = UntypedBacking([0; UNTYPED_SIZE]);
 
-// two CSpaces + two TCBs, kernel-owned and 'static (the per-CPU block points at
-// the chosen CSpace, and the TCB carries the chosen kernel stack).
+/// Two CSpaces + two TCBs, kernel-owned and 'static (the per-CPU block points at
+/// the chosen CSpace, and the TCB carries the chosen kernel stack).
 static mut CSPACE_A: Option<KernelCapSpace> = None;
 static mut CSPACE_B: Option<KernelCapSpace> = None;
 static mut TCB_A: Option<Tcb> = None;

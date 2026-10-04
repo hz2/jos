@@ -331,7 +331,7 @@ mod tests {
     // the library itself is no_std.
     extern crate std;
 
-    // a tiny object handle for tests: just an id.
+    /// A tiny object handle for tests: just an id.
     type Obj = u32;
 
     #[test]
@@ -499,12 +499,12 @@ mod tests {
     }
 }
 
-// bounded proofs of the capability-space invariants.
+/// Bounded proofs of the capability-space invariants.
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
 
-    // minting never grants a right the source did not have.
+    /// Minting never grants a right the source did not have.
     #[kani::proof]
     fn mint_never_escalates() {
         let mut space: CapSpace<u32, 4> = CapSpace::new();
@@ -520,7 +520,7 @@ mod kani_proofs {
         }
     }
 
-    // check() passes only when the live capability holds all required rights.
+    /// Check() passes only when the live capability holds all required rights.
     #[kani::proof]
     fn check_implies_rights_held() {
         let mut space: CapSpace<u32, 4> = CapSpace::new();
@@ -532,7 +532,7 @@ mod kani_proofs {
         }
     }
 
-    // a removed capability is never accepted by check, for any rights.
+    /// A removed capability is never accepted by check, for any rights.
     #[kani::proof]
     fn removed_cap_never_checks() {
         let mut space: CapSpace<u32, 4> = CapSpace::new();
@@ -542,14 +542,14 @@ mod kani_proofs {
         assert!(!space.check(r, required));
     }
 
-    // the global no-amplification property, the headline security guarantee:
-    // along a derivation CHAIN of arbitrary masks, no descendant holds a right
-    // its root ancestor lacked. mint_never_escalates proves one link; this
-    // proves the transitive closure over a three-deep chain (root -> child ->
-    // grandchild), which by induction stands for any depth (each mint only
-    // attenuates, and contains is transitive, proved in cap_rights). a 4-slot
-    // space holds the whole chain; any mint may legitimately fail with
-    // SpaceFull, so each link is guarded rather than unwrapped.
+    /// The global no-amplification property, the headline security guarantee:
+    /// along a derivation CHAIN of arbitrary masks, no descendant holds a right
+    /// its root ancestor lacked. mint_never_escalates proves one link; this
+    /// proves the transitive closure over a three-deep chain (root -> child ->
+    /// grandchild), which by induction stands for any depth (each mint only
+    /// attenuates, and contains is transitive, proved in cap_rights). A 4-slot
+    /// space holds the whole chain; any mint may legitimately fail with
+    /// SpaceFull, so each link is guarded rather than unwrapped.
     #[kani::proof]
     fn mint_chain_never_amplifies() {
         let mut space: CapSpace<u32, 4> = CapSpace::new();
@@ -574,12 +574,12 @@ mod kani_proofs {
         }
     }
 
-    // the operational form of no-amplification: if any descendant in a mint
-    // chain passes check(required) (i.e. is permitted to perform an operation),
-    // then the root ancestor also holds `required`. so a derived capability can
-    // never authorize an operation the original could not: delegation cannot
-    // manufacture authority. this is the property a confused-deputy attack would
-    // have to violate.
+    /// The operational form of no-amplification: if any descendant in a mint
+    /// chain passes check(required) (i.e. is permitted to perform an operation),
+    /// then the root ancestor also holds `required`. So a derived capability can
+    /// never authorize an operation the original could not: delegation cannot
+    /// manufacture authority. This is the property a confused-deputy attack would
+    /// have to violate.
     #[kani::proof]
     fn derived_authority_bounded_by_root() {
         let mut space: CapSpace<u32, 4> = CapSpace::new();
@@ -600,9 +600,9 @@ mod kani_proofs {
         }
     }
 
-    // a badge, once set, is never changed: a child of a badged cap carries the
-    // same badge, and re-badging it is refused. this stops a client from
-    // impersonating another client to a server.
+    /// A badge, once set, is never changed: a child of a badged cap carries the
+    /// same badge, and re-badging it is refused. This stops a client from
+    /// impersonating another client to a server.
     #[kani::proof]
     fn badge_is_immutable_once_set() {
         let mut space: CapSpace<u32, 4> = CapSpace::new();
@@ -619,7 +619,7 @@ mod kani_proofs {
         }
     }
 
-    // badging is still a mint: it never grants a right the source lacked.
+    /// Badging is still a mint: it never grants a right the source lacked.
     #[kani::proof]
     fn mint_badged_never_escalates() {
         let mut space: CapSpace<u32, 4> = CapSpace::new();

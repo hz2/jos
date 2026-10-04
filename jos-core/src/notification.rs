@@ -99,9 +99,9 @@ pub enum PollOutcome {
 /// [`signal`](Self::signal) reports the waiter was woken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Notification {
-    // the accumulated, un-collected badge bits. coalesces by OR; 0 means idle.
+    /// The accumulated, un-collected badge bits. Coalesces by OR; 0 means idle.
     pending: Badge,
-    // a waiter is parked (it polled while pending was empty).
+    /// A waiter is parked (it polled while pending was empty).
     waiter_parked: bool,
 }
 
@@ -333,12 +333,12 @@ mod tests {
 mod kani_proofs {
     use super::{Badge, Notification, PollOutcome, SignalOutcome};
 
-    // an arbitrary notification state, used to prove the invariants from ANY
-    // reachable starting point, not just a fresh one. the parked flag is
-    // constrained to the reachable combination (parked implies nothing pending)
-    // exactly as the operations maintain it; this models "some valid state"
-    // rather than fabricating an unreachable one, mirroring endpoint's
-    // any_valid_endpoint.
+    /// An arbitrary notification state, used to prove the invariants from ANY
+    /// reachable starting point, not just a fresh one. The parked flag is
+    /// constrained to the reachable combination (parked implies nothing pending)
+    /// exactly as the operations maintain it; this models "some valid state"
+    /// rather than fabricating an unreachable one, mirroring endpoint's
+    /// any_valid_endpoint.
     fn any_valid_notification() -> Notification {
         let mut n = Notification::new();
         let bits: u64 = kani::any();
@@ -353,8 +353,8 @@ mod kani_proofs {
         n
     }
 
-    // the core invariant holds after a signal from any valid state: a parked
-    // waiter is released (so parked is false), and the badge coalesced by OR.
+    /// The core invariant holds after a signal from any valid state: a parked
+    /// waiter is released (so parked is false), and the badge coalesced by OR.
     #[kani::proof]
     fn signal_preserves_invariant() {
         let mut n = any_valid_notification();
@@ -370,7 +370,7 @@ mod kani_proofs {
         let _ = out; // woke_waiter correctness is covered by the delivery proof
     }
 
-    // the parked-implies-empty invariant holds after a poll from any valid state.
+    /// The parked-implies-empty invariant holds after a poll from any valid state.
     #[kani::proof]
     fn poll_preserves_invariant() {
         let mut n = any_valid_notification();
@@ -381,9 +381,9 @@ mod kani_proofs {
         assert!(!n.waiter_parked() || n.pending().is_empty());
     }
 
-    // signalling into a parked notification delivers immediately: the waiter is
-    // released and the bits are pending for it to collect. this is the
-    // no-lost-wakeup property: a signal can never leave a waiter parked.
+    /// Signalling into a parked notification delivers immediately: the waiter is
+    /// released and the bits are pending for it to collect. This is the
+    /// no-lost-wakeup property: a signal can never leave a waiter parked.
     #[kani::proof]
     fn signal_into_parked_wakes_and_delivers() {
         // build the parked-on-empty state directly: poll empty, then park.
@@ -400,8 +400,8 @@ mod kani_proofs {
         assert!(n.pending() == badge);
     }
 
-    // park only takes effect on an empty notification; a pending badge refuses
-    // the park. this is the self-guarding property the invariant rests on.
+    /// Park only takes effect on an empty notification; a pending badge refuses
+    /// the park. This is the self-guarding property the invariant rests on.
     #[kani::proof]
     fn park_is_self_guarding() {
         let mut n = any_valid_notification();
@@ -412,9 +412,9 @@ mod kani_proofs {
         }
     }
 
-    // collecting returns exactly the pending bits and clears them: a deposit
-    // then a single poll yields the same badge, and an immediate second poll
-    // yields nothing. no fabrication, no duplication of a badge.
+    /// Collecting returns exactly the pending bits and clears them: a deposit
+    /// then a single poll yields the same badge, and an immediate second poll
+    /// yields nothing. No fabrication, no duplication of a badge.
     #[kani::proof]
     fn poll_returns_then_clears() {
         let mut n = Notification::new();

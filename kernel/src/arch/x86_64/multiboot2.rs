@@ -15,28 +15,28 @@
 /// Memory area type for usable RAM in a multiboot2 memory map entry.
 pub const MMAP_AVAILABLE: u32 = 1;
 
-// the 8-byte info-structure header at the multiboot2 info pointer.
+/// The 8-byte info-structure header at the multiboot2 info pointer.
 #[repr(C)]
 struct InfoHeader {
     total_size: u32,
     _reserved: u32,
 }
 
-// the 8-byte header that precedes every tag's payload.
+/// The 8-byte header that precedes every tag's payload.
 #[repr(C)]
 struct TagHeader {
     tag_type: u32,
     size: u32,
 }
 
-// the memory map tag's payload header, before the entries.
+/// The memory map tag's payload header, before the entries.
 #[repr(C)]
 struct MmapPayload {
     entry_size: u32,
     _entry_version: u32,
 }
 
-// one memory map entry.
+/// One memory map entry.
 #[repr(C)]
 struct MmapEntry {
     base_addr: u64,
@@ -60,15 +60,15 @@ pub unsafe fn for_each_usable_region(info_ptr: u32, callback: impl FnMut(u64, u6
     unsafe { walk_tags(info_ptr as usize, callback) }
 }
 
-// walks the multiboot2 tags at `base`, invoking `callback` for each usable mmap
-// region. factored out of the public entry so the tag-walk loop (and its
-// malformed-tag termination guarantee) can be unit-tested against a synthetic
-// buffer without a real grub pointer.
-//
-// # Safety
-//
-// `base` must point at a readable multiboot2 info structure: an `InfoHeader`
-// followed by `total_size - 8` bytes of tags, all readable.
+/// Walks the multiboot2 tags at `base`, invoking `callback` for each usable mmap
+/// region. Factored out of the public entry so the tag-walk loop (and its
+/// malformed-tag termination guarantee) can be unit-tested against a synthetic
+/// buffer without a real grub pointer.
+///
+/// # Safety
+///
+/// `base` must point at a readable multiboot2 info structure: an `InfoHeader`
+/// followed by `total_size - 8` bytes of tags, all readable.
 unsafe fn walk_tags(base: usize, mut callback: impl FnMut(u64, u64)) {
     // SAFETY: per the contract, base points at a readable InfoHeader.
     let header = unsafe { &*(base as *const InfoHeader) };
@@ -103,7 +103,7 @@ unsafe fn walk_tags(base: usize, mut callback: impl FnMut(u64, u64)) {
     }
 }
 
-// walks the entries of a memory map tag, calling `callback` for usable ones.
+/// Walks the entries of a memory map tag, calling `callback` for usable ones.
 fn for_each_mmap_entry(tag_addr: usize, tag_size: usize, callback: &mut impl FnMut(u64, u64)) {
     let payload_addr = tag_addr + core::mem::size_of::<TagHeader>();
     // SAFETY: a type-6 tag is large enough to hold its payload header; the tag
@@ -132,29 +132,29 @@ fn for_each_mmap_entry(tag_addr: usize, tag_size: usize, callback: &mut impl FnM
 mod tests {
     use super::{walk_tags, TagHeader};
 
-    // a 64-byte, 8-aligned scratch buffer for a synthetic multiboot2 info
-    // structure. align(8) matches the multiboot2 tag-alignment the walker
-    // assumes, so building tags in it mirrors a real info structure.
+    /// A 64-byte, 8-aligned scratch buffer for a synthetic multiboot2 info
+    /// structure. Align(8) matches the multiboot2 tag-alignment the walker
+    /// assumes, so building tags in it mirrors a real info structure.
     #[repr(C, align(8))]
     struct Buf([u8; 64]);
 
-    // writes a u32 little-endian at byte offset `at`.
+    /// Writes a u32 little-endian at byte offset `at`.
     fn put_u32(buf: &mut Buf, at: usize, v: u32) {
         buf.0[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
 
-    // builds an InfoHeader(total_size) at offset 0; returns the base address.
+    /// Builds an InfoHeader(total_size) at offset 0; returns the base address.
     fn header(buf: &mut Buf, total_size: u32) -> usize {
         put_u32(buf, 0, total_size); // total_size
         put_u32(buf, 4, 0); // reserved
         core::ptr::from_ref(buf).cast::<u8>() as usize
     }
 
-    // the regression test for the zero-size-tag infinite loop: a malformed tag
-    // with size == 0 must not wedge the walker. before the fix, advancing by a
-    // rounded size of 0 left offset unchanged and the while loop spun forever
-    // (hanging the boot); the step-clamp to one TagHeader makes it terminate.
-    // reaching the assertion at all proves no hang.
+    /// The regression test for the zero-size-tag infinite loop: a malformed tag
+    /// with size == 0 must not wedge the walker. Before the fix, advancing by a
+    /// rounded size of 0 left offset unchanged and the while loop spun forever
+    /// (hanging the boot); the step-clamp to one TagHeader makes it terminate.
+    /// Reaching the assertion at all proves no hang.
     #[test_case]
     fn zero_size_tag_does_not_loop_forever() {
         let mut buf = Buf([0; 64]);
@@ -178,8 +178,8 @@ mod tests {
         assert_eq!(count, 0, "no mmap tag, so no usable region");
     }
 
-    // a well-formed tag with size < the 8-byte TagHeader is also malformed and
-    // must terminate (the same clamp covers size 1..7).
+    /// A well-formed tag with size < the 8-byte TagHeader is also malformed and
+    /// must terminate (the same clamp covers size 1..7).
     #[test_case]
     fn undersize_tag_does_not_loop_forever() {
         let mut buf = Buf([0; 64]);
@@ -195,8 +195,8 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    // a well-formed end tag terminates immediately, and a well-formed non-mmap
-    // tag is skipped: confirms the fix did not break normal walking.
+    /// A well-formed end tag terminates immediately, and a well-formed non-mmap
+    /// tag is skipped: confirms the fix did not break normal walking.
     #[test_case]
     fn well_formed_tags_walk_and_terminate() {
         let mut buf = Buf([0; 64]);

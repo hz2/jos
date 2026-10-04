@@ -226,7 +226,7 @@ mod tests {
     // test harness links std; the library itself stays no_std.
     extern crate std;
 
-    // helper: allocate backing words for `frame_count` frames.
+    /// Helper: allocate backing words for `frame_count` frames.
     fn make_storage(frame_count: usize) -> std::vec::Vec<u64> {
         let words = frame_count.div_ceil(64);
         std::vec![0u64; words]

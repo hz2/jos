@@ -27,8 +27,8 @@
 // host-side test and proof crates pull in std/alloc as needed; the library
 // itself stays no_std so it is identical on the kernel target.
 
-// verus proofs: only compiled when the verus verifier processes this crate.
-// regular cargo builds and kani never see this module.
+/// Verus proofs: only compiled when the verus verifier processes this crate.
+/// Regular cargo builds and kani never see this module.
 #[cfg(verus_keep_ghost)]
 pub mod proof;
 

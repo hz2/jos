@@ -27,19 +27,19 @@ use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::FrameAllocator;
 
-// thread A: blocking recv on cap slot 0, verify the word is 0x42, exit success.
-//   b8 07 00 00 00   mov eax, 7          SYS_IPC_RECV_BLOCKING
-//   bf 00 00 00 00   mov edi, 0          cap_slot = 0
-//   0f 05            syscall             -> rax = received word
-//   48 83 f8 42      cmp rax, 0x42
-//   75 0c            jne +12             if wrong, jump to failure exit
-//   b8 01 00 00 00   mov eax, 1          SYS_EXIT
-//   bf 10 00 00 00   mov edi, 0x10       success
-//   0f 05            syscall
-//   b8 01 00 00 00   mov eax, 1          SYS_EXIT (failure path, offset 30)
-//   bf 11 00 00 00   mov edi, 0x11       non-success exit code
-//   0f 05            syscall
-//   eb fe            jmp -2              backstop
+/// Thread A: blocking recv on cap slot 0, verify the word is 0x42, exit success.
+///   b8 07 00 00 00   mov eax, 7          SYS_IPC_RECV_BLOCKING
+///   bf 00 00 00 00   mov edi, 0          cap_slot = 0
+///   0f 05            syscall             -> rax = received word
+///   48 83 f8 42      cmp rax, 0x42
+///   75 0c            jne +12             if wrong, jump to failure exit
+///   b8 01 00 00 00   mov eax, 1          SYS_EXIT
+///   bf 10 00 00 00   mov edi, 0x10       success
+///   0f 05            syscall
+///   b8 01 00 00 00   mov eax, 1          SYS_EXIT (failure path, offset 30)
+///   bf 11 00 00 00   mov edi, 0x11       non-success exit code
+///   0f 05            syscall
+///   eb fe            jmp -2              backstop.
 static THREAD_A_PROGRAM: [u8; 44] = [
     0xb8, 0x07, 0x00, 0x00, 0x00, // mov eax, 7
     0xbf, 0x00, 0x00, 0x00, 0x00, // mov edi, 0
@@ -55,12 +55,12 @@ static THREAD_A_PROGRAM: [u8; 44] = [
     0xeb, 0xfe,                   // jmp -2
 ];
 
-// thread B: blocking send 0x42 to cap slot 0, then spin.
-//   b8 06 00 00 00   mov eax, 6          SYS_IPC_SEND_BLOCKING
-//   bf 00 00 00 00   mov edi, 0          cap_slot = 0
-//   be 42 00 00 00   mov esi, 0x42       word = 0x42
-//   0f 05            syscall
-//   eb fe            jmp -2              spin (thread A exits the test)
+/// Thread B: blocking send 0x42 to cap slot 0, then spin.
+///   b8 06 00 00 00   mov eax, 6          SYS_IPC_SEND_BLOCKING
+///   bf 00 00 00 00   mov edi, 0          cap_slot = 0
+///   be 42 00 00 00   mov esi, 0x42       word = 0x42
+///   0f 05            syscall
+///   eb fe            jmp -2              spin (thread A exits the test).
 static THREAD_B_PROGRAM: [u8; 19] = [
     0xb8, 0x06, 0x00, 0x00, 0x00, // mov eax, 6
     0xbf, 0x00, 0x00, 0x00, 0x00, // mov edi, 0
@@ -88,7 +88,7 @@ static mut KSTACK_B: KernelStack = KernelStack([0; KSTACK_SIZE]);
 
 static mut TCB_A: Option<Tcb> = None;
 static mut TCB_B: Option<Tcb> = None;
-// one CSpace shared by both threads; endpoint at slot 0.
+/// One CSpace shared by both threads; endpoint at slot 0.
 static mut CSPACE: Option<KernelCapSpace> = None;
 
 #[unsafe(no_mangle)]

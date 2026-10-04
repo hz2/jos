@@ -27,9 +27,9 @@ use crate::ring_buffer::RingBuffer;
 /// A bounded FIFO of task indices in `[0, N)` that holds each index at most
 /// once. Enqueue is idempotent; dequeue returns indices in enqueue order.
 pub struct RunQueue<const N: usize> {
-    // the ready order; holds each queued index exactly once.
+    /// The ready order; holds each queued index exactly once.
     fifo: RingBuffer<usize, N>,
-    // queued[i] mirrors "index i is in fifo". the sole source of dedup truth.
+    /// Queued[i] mirrors "index i is in fifo". The sole source of dedup truth.
     queued: [bool; N],
 }
 
@@ -112,8 +112,8 @@ impl<const N: usize> RunQueue<N> {
         Some(id)
     }
 
-    // number of indices flagged as queued. used by the tests and proofs to
-    // check the count invariant (queued_count == len) directly.
+    /// Number of indices flagged as queued. Used by the tests and proofs to
+    /// check the count invariant (`queued_count` == len) directly.
     #[cfg(any(test, kani))]
     fn queued_count(&self) -> usize {
         let mut count = 0;
@@ -235,15 +235,15 @@ mod tests {
     }
 }
 
-// bounded proofs of the run-queue invariants.
-//
-// every harness here constructs (and therefore drops) a `RunQueue`, which wraps
-// a `RingBuffer` whose `Drop` runs `for i in 0..len`. CBMC cannot bound that
-// loop on its own, so each harness carries an explicit `#[kani::unwind]`: the
-// `len <= N` invariant means `N + 1` unwinds suffice, and the unwinding
-// assertion then *proves* the drop loop terminates within that bound. `N` is
-// kept a power of two so the ring buffer's `% N` is a cheap mask for the solver
-// rather than full 64-bit division.
+/// Bounded proofs of the run-queue invariants.
+///
+/// Every harness here constructs (and therefore drops) a `RunQueue`, which wraps
+/// a `RingBuffer` whose `Drop` runs `for i in 0..len`. CBMC cannot bound that
+/// loop on its own, so each harness carries an explicit `#[kani::unwind]`: the
+/// `len <= N` invariant means `N + 1` unwinds suffice, and the unwinding
+/// assertion then *proves* the drop loop terminates within that bound. `N` is
+/// kept a power of two so the ring buffer's `% N` is a cheap mask for the solver
+/// rather than full 64-bit division.
 #[cfg(kani)]
 mod kani_proofs {
     use super::RunQueue;
@@ -254,7 +254,7 @@ mod kani_proofs {
     // op loop below, each of which runs at most N times.
     const N: usize = 4;
 
-    // a fresh in-range index always enqueues (never dropped) and is then queued.
+    /// A fresh in-range index always enqueues (never dropped) and is then queued.
     #[kani::proof]
     #[kani::unwind(5)] // N + 1
     fn enqueue_fresh_never_drops() {
@@ -267,8 +267,8 @@ mod kani_proofs {
         assert_eq!(q.len(), 1);
     }
 
-    // enqueuing an already-queued index is a no-op: it returns false and leaves
-    // the length unchanged (dedup / idempotence).
+    /// Enqueuing an already-queued index is a no-op: it returns false and leaves
+    /// the length unchanged (dedup / idempotence).
     #[kani::proof]
     #[kani::unwind(5)] // N + 1
     fn enqueue_idempotent() {
@@ -281,7 +281,7 @@ mod kani_proofs {
         assert_eq!(q.len(), len_before);
     }
 
-    // an out-of-range index is rejected and leaves the queue untouched.
+    /// An out-of-range index is rejected and leaves the queue untouched.
     #[kani::proof]
     #[kani::unwind(5)] // N + 1
     fn out_of_range_is_rejected() {
@@ -293,7 +293,7 @@ mod kani_proofs {
         assert!(q.is_empty());
     }
 
-    // dequeue returns the first-enqueued index and clears its membership.
+    /// Dequeue returns the first-enqueued index and clears its membership.
     #[kani::proof]
     #[kani::unwind(5)] // N + 1
     fn dequeue_is_fifo_and_clears_membership() {
@@ -311,10 +311,10 @@ mod kani_proofs {
         assert!(q.is_empty());
     }
 
-    // the master invariant: across an arbitrary bounded sequence of enqueue and
-    // dequeue operations, the membership count always equals the fifo length
-    // and the length never exceeds the capacity. the op-loop runs N times, so
-    // its bound (N + 1) coincides with the drop/scan bound above.
+    /// The master invariant: across an arbitrary bounded sequence of enqueue and
+    /// dequeue operations, the membership count always equals the fifo length
+    /// and the length never exceeds the capacity. The op-loop runs N times, so
+    /// its bound (N + 1) coincides with the drop/scan bound above.
     #[kani::proof]
     #[kani::unwind(5)] // N + 1, also covers the N-iteration op loop below
     fn count_equals_len_and_len_bounded() {

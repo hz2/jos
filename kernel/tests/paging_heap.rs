@@ -20,14 +20,14 @@ use x86_64::structures::paging::OffsetPageTable;
 
 use jos::memory::BootstrapFrameAllocator;
 
-// grub passes info_ptr to kernel_main, but #[test_case] fns take no args, so
-// stash it in a global for the tests to read.
+/// Grub passes info_ptr to kernel_main, but #[test_case] fns take no args, so
+/// stash it in a global for the tests to read.
 static INFO_PTR: AtomicU32 = AtomicU32::new(0);
 
-// the mapper and frame allocator are set up once in kernel_main and shared by
-// the tests that need to map pages. they must be shared (not reconstructed per
-// test): a fresh BootstrapFrameAllocator would re-hand-out frames the heap
-// already took, corrupting any new mapping.
+/// The mapper and frame allocator are set up once in kernel_main and shared by
+/// the tests that need to map pages. They must be shared (not reconstructed per
+/// test): a fresh BootstrapFrameAllocator would re-hand-out frames the heap
+/// already took, corrupting any new mapping.
 static mut MAPPER: Option<OffsetPageTable<'static>> = None;
 static mut FRAME_ALLOC: Option<BootstrapFrameAllocator> = None;
 
@@ -71,7 +71,7 @@ fn panic(info: &PanicInfo) -> ! {
     jos::test_panic_handler(info)
 }
 
-// the multiboot2 memory map yields at least one usable frame.
+/// The multiboot2 memory map yields at least one usable frame.
 #[test_case]
 fn memory_map_has_usable_frames() {
     use x86_64::structures::paging::FrameAllocator;
@@ -81,7 +81,7 @@ fn memory_map_has_usable_frames() {
     assert!(fa.allocate_frame().is_some());
 }
 
-// box and vec allocations work after heap init.
+/// Box and vec allocations work after heap init.
 #[test_case]
 fn heap_allocation_works() {
     let b = Box::new(0xCAFE_u64);
@@ -92,7 +92,7 @@ fn heap_allocation_works() {
     assert_eq!(v.iter().sum::<u64>(), (0..1024).sum());
 }
 
-// many small boxes do not collide (exercises the allocator's bookkeeping).
+/// Many small boxes do not collide (exercises the allocator's bookkeeping).
 #[test_case]
 fn many_boxes() {
     let mut boxes = Vec::new();
@@ -104,13 +104,13 @@ fn many_boxes() {
     }
 }
 
-// map a fresh upper-half page to a new frame, write and read it back, and
-// confirm translate agrees. this proves map_to builds a 4 KiB hierarchy.
-//
-// it reuses the SHARED frame allocator (set up once in kernel_main, same one
-// the heap used). a fresh BootstrapFrameAllocator here would re-hand-out the
-// frames the heap already took, so map_to's new page-table frames would alias
-// heap memory and the mapping would be corrupt.
+/// Map a fresh upper-half page to a new frame, write and read it back, and
+/// confirm translate agrees. This proves map_to builds a 4 KiB hierarchy.
+///
+/// It reuses the SHARED frame allocator (set up once in kernel_main, same one
+/// the heap used). A fresh BootstrapFrameAllocator here would re-hand-out the
+/// frames the heap already took, so map_to's new page-table frames would alias
+/// heap memory and the mapping would be corrupt.
 #[test_case]
 fn map_and_access_fresh_page() {
     use x86_64::structures::paging::{

@@ -14,10 +14,10 @@ use core::panic::PanicInfo;
 use jos::executor::{Executor, Task};
 use jos::println;
 
-// the multiboot2 header + long-mode trampoline live in the jos library so all
-// binaries share one boot entry. it calls kernel_main below in 64-bit mode.
-// magic should be 0x36d76289 (the multiboot2 loader magic); info_ptr points at
-// the multiboot2 info struct.
+/// The multiboot2 header + long-mode trampoline live in the jos library so all
+/// binaries share one boot entry. It calls kernel_main below in 64-bit mode.
+/// Magic should be 0x36d76289 (the multiboot2 loader magic); info_ptr points at
+/// the multiboot2 info struct.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     // 0xb8000 vga text mode is live at entry, so println! works immediately.
@@ -60,7 +60,7 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     }
 }
 
-// panic handler for normal (non-test) builds.
+/// Panic handler for normal (non-test) builds.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -68,7 +68,7 @@ fn panic(info: &PanicInfo) -> ! {
     jos::hlt_loop()
 }
 
-// panic handler for test builds routes through the serial test reporter.
+/// Panic handler for test builds routes through the serial test reporter.
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

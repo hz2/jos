@@ -31,16 +31,16 @@ use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::FrameAllocator;
 
-// thread A: spin forever. only exits if the test times out (QEMU watchdog).
+/// Thread A: spin forever. Only exits if the test times out (QEMU watchdog).
 static THREAD_A_PROGRAM: [u8; 2] = [
     0xeb, 0xfe, // jmp -2
 ];
 
-// thread B: call SYS_EXIT(0x10) -> success.
-//   b8 01 00 00 00   mov eax, 1      (SYS_EXIT)
-//   bf 10 00 00 00   mov edi, 0x10   (success exit code)
-//   0f 05            syscall
-//   eb fe            jmp -2          (backstop; syscall does not return)
+/// Thread B: call SYS_EXIT(0x10) -> success.
+///   b8 01 00 00 00   mov eax, 1      (SYS_EXIT)
+///   bf 10 00 00 00   mov edi, 0x10   (success exit code)
+///   0f 05            syscall
+///   eb fe            jmp -2          (backstop; syscall does not return).
 static THREAD_B_PROGRAM: [u8; 14] = [
     0xb8, 0x01, 0x00, 0x00, 0x00, 0xbf, 0x10, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe,
 ];
@@ -65,7 +65,7 @@ static mut KSTACK_B: KernelStack = KernelStack([0; KSTACK_SIZE]);
 
 static mut TCB_A: Option<Tcb> = None;
 static mut TCB_B: Option<Tcb> = None;
-// one CSpace is enough; SYS_EXIT does not touch capabilities.
+/// One CSpace is enough; SYS_EXIT does not touch capabilities.
 static mut CSPACE: Option<KernelCapSpace> = None;
 
 #[unsafe(no_mangle)]

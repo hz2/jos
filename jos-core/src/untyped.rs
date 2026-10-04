@@ -41,6 +41,7 @@
 //! | `Tcb` | 512 | 64 |
 //! | `Notification` | 64 | 64 |
 //! | `Reply` | 128 | 64 |
+//! | `Frame` | 4096 | 4096 |
 //!
 //! `CNode { size_bits }` uses byte-size semantics (`size = 2^size_bits` bytes),
 //! like `Untyped`: `size_bits` is the log2 of the byte size, not a slot count.
@@ -120,6 +121,12 @@ pub const REPLY_SIZE: usize = 128;
 
 /// Alignment requirement of a `Reply` object in bytes (one cache line).
 pub const REPLY_ALIGN: usize = 64;
+
+/// Size of one `Frame` object in bytes: one 4 KiB page.
+pub const FRAME_SIZE: usize = 4096;
+
+/// Alignment of a `Frame` object in bytes (page-aligned, so it can be mapped).
+pub const FRAME_ALIGN: usize = 4096;
 
 /// Size and alignment of the kernel's `CNode` (capability-node) object in
 /// bytes.
@@ -208,6 +215,14 @@ pub enum ObjectType {
     /// names one when it receives; a `Call` binds it to the caller, and the
     /// server answers through it exactly once (the seL4 MCS reply object).
     Reply,
+
+    /// One page of memory a thread can be granted, for example as its IPC
+    /// buffer.
+    ///
+    /// Fixed size: [`FRAME_SIZE`] bytes, [`FRAME_ALIGN`]-byte aligned. Because a
+    /// frame is carved from untyped memory like every other object, it can never
+    /// overlap a kernel object (the MEM-1 non-overlap property).
+    Frame,
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +270,7 @@ pub const fn object_layout(ty: ObjectType) -> (usize, usize) {
         ObjectType::Tcb => (TCB_SIZE, TCB_ALIGN),
         ObjectType::Notification => (NOTIFICATION_SIZE, NOTIFICATION_ALIGN),
         ObjectType::Reply => (REPLY_SIZE, REPLY_ALIGN),
+        ObjectType::Frame => (FRAME_SIZE, FRAME_ALIGN),
     }
 }
 
@@ -672,14 +688,15 @@ mod kani_proofs {
         let size_bits: u8 = kani::any();
         // keep size_bits small: 2^12 = 4096 bytes max, well inside MAX_REGION.
         kani::assume(size_bits <= 12);
-        match tag % 7 {
+        match tag % 8 {
             0 => ObjectType::Endpoint,
             1 => ObjectType::CNode { size_bits },
             2 => ObjectType::Untyped { size_bits },
             3 => ObjectType::PageTable,
             4 => ObjectType::Tcb,
             5 => ObjectType::Notification,
-            _ => ObjectType::Reply,
+            6 => ObjectType::Reply,
+            _ => ObjectType::Frame,
         }
     }
 

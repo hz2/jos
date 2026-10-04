@@ -39,8 +39,9 @@ use jos_core::reply;
 use jos_core::ipc_buffer::IpcBuffer;
 use jos_core::placement::{place, place_zeroed, PlaceError};
 use jos_core::untyped::{
-    ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, NOTIFICATION_ALIGN,
-    NOTIFICATION_SIZE, PAGE_TABLE_SIZE, REPLY_ALIGN, REPLY_SIZE, TCB_ALIGN, TCB_SIZE,
+    ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, FRAME_ALIGN, FRAME_SIZE,
+    NOTIFICATION_ALIGN, NOTIFICATION_SIZE, PAGE_TABLE_SIZE, REPLY_ALIGN, REPLY_SIZE, TCB_ALIGN,
+    TCB_SIZE,
 };
 use spin::Mutex;
 
@@ -79,6 +80,8 @@ pub enum ObjectKind {
     Notification,
     /// A one-shot reply object: binds to a caller, answered exactly once.
     Reply,
+    /// One page of memory granted to a thread, for example as its IPC buffer.
+    Frame,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -530,6 +533,37 @@ pub fn reply_object(obj: ObjectId) -> Option<&'static Reply> {
 }
 
 // --------------------------------------------------------------------------
+// Frame object
+// --------------------------------------------------------------------------
+
+/// One page of memory, sized and aligned to match [`ObjectType::Frame`].
+///
+/// The kernel never interprets a frame's bytes; holding a capability to it is
+/// the authority to use the page, for example to register it as a thread's IPC
+/// buffer. Carved from untyped memory, it is zeroed when created.
+#[repr(C, align(4096))]
+pub struct Frame {
+    bytes: [u8; FRAME_SIZE],
+}
+
+impl Frame {
+    /// Creates a zeroed frame.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { bytes: [0; FRAME_SIZE] }
+    }
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<Frame>() == FRAME_SIZE);
+const _: () = assert!(core::mem::align_of::<Frame>() == FRAME_ALIGN);
+
+// --------------------------------------------------------------------------
 // PageTable object
 // --------------------------------------------------------------------------
 
@@ -859,6 +893,7 @@ impl UntypedRegion {
             ObjectType::Endpoint => self.retype_endpoint(),
             ObjectType::Notification => self.retype_notification(),
             ObjectType::Reply => self.retype_reply(),
+            ObjectType::Frame => self.retype_frame(),
             ObjectType::PageTable => self.retype_page_table(),
             ObjectType::Tcb => self.retype_tcb(),
             ObjectType::CNode { size_bits } if size_bits == KERNEL_CNODE_SIZE_BITS => {
@@ -890,6 +925,13 @@ impl UntypedRegion {
             Notification::new(),
             ObjectKind::Notification,
         )
+    }
+
+    /// Carves a fresh zeroed [`Frame`] out of this region and returns its handle.
+    /// Returns `None` if the region has no room, or if its base is not page
+    /// aligned (a frame is 4096-aligned, like a page table).
+    pub fn retype_frame(&mut self) -> Option<ObjectId> {
+        self.retype_zeroed(ObjectType::Frame, ObjectKind::Frame)
     }
 
     /// Carves a fresh idle [`Reply`] out of this region and returns its handle.
@@ -1583,7 +1625,10 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
     let mut count = 0;
     space.for_each_in_subtree(cap_ref, |_r, cap| {
         let kind = cap.object.kind();
-        if matches!(kind, ObjectKind::Endpoint | ObjectKind::Notification | ObjectKind::Reply)
+        if matches!(
+            kind,
+            ObjectKind::Endpoint | ObjectKind::Notification | ObjectKind::Reply | ObjectKind::Frame
+        )
             && count < CSPACE_SLOTS
         {
             blockers[count] = Some(cap.object);
@@ -1637,7 +1682,12 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                     crate::syscall::abort_call(tid);
                 }
             }
-            // only Endpoint, Notification, and Reply are collected above.
+            ObjectKind::Frame => {
+                // a thread must not keep using a buffer it no longer has the
+                // capability for: unregister it everywhere.
+                crate::syscall::forget_ipc_buffer(obj.phys_addr());
+            }
+            // only Endpoint, Notification, Reply, and Frame are collected above.
             _ => {}
         }
     }

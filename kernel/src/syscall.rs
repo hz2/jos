@@ -132,6 +132,12 @@ pub enum Syscall {
     /// reply object with `word` and returns the object to idle. One answer per
     /// call: a second reply fails with [`IpcSyscallError::NoCaller`].
     Reply = 11,
+    /// `set_ipc_buffer(frame_slot) -> 0 | errno`. Registers the frame named by
+    /// `frame_slot` as the calling thread's IPC buffer, replacing any previous
+    /// one. The capability must name a Frame and carry `READ` and `WRITE`, since
+    /// the kernel reads and writes the buffer on the thread's behalf. Mapping the
+    /// frame into the thread's address space is the caller's business.
+    SetIpcBuffer = 12,
 }
 
 impl Syscall {
@@ -150,6 +156,7 @@ impl Syscall {
             9 => Some(Self::Call),
             10 => Some(Self::RecvReply),
             11 => Some(Self::Reply),
+            12 => Some(Self::SetIpcBuffer),
             _ => None,
         }
     }
@@ -183,6 +190,10 @@ pub enum IpcSyscallError {
     NoReply = 7,
     /// `reply` named a reply object with no caller waiting.
     NoCaller = 8,
+    /// The slot does not name a frame.
+    NotFrame = 9,
+    /// The call needs a current thread (a TCB) and there is none.
+    NoThread = 10,
 }
 
 /// Bit OR-ed into an [`Syscall::IpcRecv`] return value to mark it an error
@@ -252,6 +263,12 @@ pub mod object_type_id {
     pub const PAGE_TABLE: u8 = 3;
     /// A thread control block.
     pub const TCB: u8 = 4;
+    /// One page of memory (for example an IPC buffer).
+    pub const FRAME: u8 = 5;
+    /// An asynchronous notification.
+    pub const NOTIFICATION: u8 = 6;
+    /// A one-shot reply object for `Call` IPC.
+    pub const REPLY: u8 = 7;
 }
 
 /// Decodes a retype `type_word` into an ObjectType. Bits [7:0] are the type
@@ -268,6 +285,9 @@ fn decode_object_type(type_word: u64) -> Option<ObjectType> {
         object_type_id::ENDPOINT if size_bits == 0 => Some(ObjectType::Endpoint),
         object_type_id::PAGE_TABLE if size_bits == 0 => Some(ObjectType::PageTable),
         object_type_id::TCB if size_bits == 0 => Some(ObjectType::Tcb),
+        object_type_id::FRAME if size_bits == 0 => Some(ObjectType::Frame),
+        object_type_id::NOTIFICATION if size_bits == 0 => Some(ObjectType::Notification),
+        object_type_id::REPLY if size_bits == 0 => Some(ObjectType::Reply),
         object_type_id::CNODE => Some(ObjectType::CNode { size_bits }),
         object_type_id::UNTYPED => Some(ObjectType::Untyped { size_bits }),
         // unknown discriminant, or a fixed-size type given a non-zero size_bits.
@@ -442,6 +462,8 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::RecvReply) => sys_recv_reply(arg0, arg1),
         // reply(reply_slot = arg0, word = arg1) -> 0 | errno.
         Some(Syscall::Reply) => sys_reply(arg0, arg1).into(),
+        // set_ipc_buffer(frame_slot = arg0) -> 0 | errno.
+        Some(Syscall::SetIpcBuffer) => sys_set_ipc_buffer(arg0).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -1049,6 +1071,47 @@ fn sys_recv_reply(ep_slot: u64, reply_slot: u64) -> SyscallRet {
         return err(IpcSyscallError::ReplyBusy);
     }
     recv_blocking(ep_slot, Some(reply))
+}
+
+/// Implements [`Syscall::SetIpcBuffer`]: registers the frame at `frame_slot` as
+/// the calling thread's IPC buffer.
+fn sys_set_ipc_buffer(frame_slot: u64) -> u64 {
+    let Some(cap) = current_cap(frame_slot) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    if cap.object.kind() != ObjectKind::Frame {
+        return IpcSyscallError::NotFrame as u64;
+    }
+    if !cap.rights.contains(Rights::READ_WRITE) {
+        return IpcSyscallError::Denied as u64;
+    }
+    // SAFETY: the per-CPU block is read on the single-CPU syscall path.
+    let tcb = unsafe { (*cpu_local::cpu_local_ptr()).current_tcb };
+    if tcb.is_null() {
+        return IpcSyscallError::NoThread as u64;
+    }
+    // SAFETY: switch_to installed a live Tcb as current; single-CPU syscall
+    // path, so nothing else touches it while we update one field.
+    unsafe {
+        (*tcb).ipc_buffer = cap.object.phys_addr();
+    }
+    0
+}
+
+/// Unregisters the IPC buffer at physical address `frame` from every thread
+/// using it. Called when a Frame capability is revoked, so no thread keeps a
+/// buffer it no longer has the right to.
+pub fn forget_ipc_buffer(frame: u64) {
+    for thread_id in 0..crate::sched::MAX_THREADS {
+        // SAFETY: THREAD_TABLE entries live for the kernel lifetime (null when
+        // unused); single-CPU with interrupts disabled on the revoke path.
+        unsafe {
+            let tcb = crate::sched::thread_table_entry(thread_id);
+            if !tcb.is_null() && (*tcb).ipc_buffer == frame {
+                (*tcb).ipc_buffer = 0;
+            }
+        }
+    }
 }
 
 /// Implements [`Syscall::Reply`]: answers the caller bound to the reply object,

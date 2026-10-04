@@ -115,7 +115,11 @@ it. The take-or-park step happens under one lock, so wakeups are never lost.
   and mapped into its own address space. The kernel copies the sender's words
   and writes the receiver's through its own identity mapping of those frames,
   never through a user virtual address, so there is no user pointer to
-  validate. A thread without a buffer sends zeros and receives word 0 only.
+  validate. A thread registers its buffer with `SetIpcBuffer`, which only
+  accepts a Frame capability with `READ` and `WRITE`; frames are carved from
+  untyped memory, so a buffer can never alias a kernel object, and revoking
+  the capability unregisters the buffer. A thread without a buffer sends zeros
+  and receives word 0 only.
 - **Badges**: a server mints one badged copy of its endpoint capability per
   client (`Mint` syscall). The badge can be set once and is inherited by every
   further derivation, and the receiver gets it in `rdx` with each message, so a

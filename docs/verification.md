@@ -51,9 +51,11 @@ makes it unbounded, with ghost state for the parked peers.
 The kernel reaches IPC buffers through registered frames, not user pointers, so
 the obligation moves to registration: a buffer can only be registered from a
 Frame capability, so it can never name a kernel object or another thread's
-private memory. Today only kernel setup code registers buffers; this lands with
-the registration syscall (Kani for the frame checks, an integration test for
-the end-to-end path).
+private memory. `SetIpcBuffer` now enforces this and
+`ipc_buffer_registration` and `frame_revoke` test it end to end; the proof
+obligation that remains is a model of registration in jos-core that Kani can
+check. Frames are placed with `place_zeroed`, which shares MEM-1's verified
+arithmetic, so the non-overlap half already holds.
 
 ### ARITH-2: frame allocator refinement
 

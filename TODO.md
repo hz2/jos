@@ -18,8 +18,12 @@ Check items off in the same commit that finishes them.
 - [x] per-thread IPC buffer: a registered frame (`Tcb::ipc_buffer`) carries
       message words 1 to 3 on every IPC path; the kernel uses its own mapping
       of the frame, never a user pointer
-- [ ] a syscall to register a thread's IPC buffer from a Frame capability
-      (today only kernel setup code can set it)
+- [x] `Frame` objects (retypeable from untyped) and `SetIpcBuffer` (12), which
+      only accepts a Frame cap with READ and WRITE; revoking the cap
+      unregisters the buffer
+- [ ] a syscall to map a Frame into a VSpace (today the kernel maps it)
+- [ ] retyping a CNode through the syscall still builds a 4 KiB value on the
+      kernel stack (the overflow class fixed for frames and page tables)
 - [ ] decide cross-CSpace derivation (ROADMAP open decision 1), then cap transfer
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)
 
@@ -41,7 +45,8 @@ Check items off in the same commit that finishes them.
 ## Verification backlog
 
 - [ ] ARITH-2: frame allocator abstract spec (Verus + Kani)
-- [ ] JPC-2: IPC buffer registration only accepts Frame capabilities
+- [ ] JPC-2: prove IPC buffer registration only accepts Frame capabilities
+      (implemented and tested; not yet proved)
 - [ ] ARITH-3: trace encoding round-trip harness
 
 ## Docs and process

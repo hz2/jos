@@ -46,7 +46,8 @@ speak IPC.
 - [ ] `ReplyRecv` combined syscall
 - [x] per-thread IPC buffer frame carrying message words 1 to 3 (seL4 model:
       the kernel uses its own mapping of the registered frame)
-- [ ] register the IPC buffer from userspace through a Frame capability
+- [x] register the IPC buffer from userspace through a Frame capability
+- [ ] map Frames into a VSpace from userspace
 - [ ] capability transfer over IPC (needs the cross-CSpace derivation decision,
       see "open decisions")
 - [ ] JPC-1: Verus proof of rendezvous deadlock-freedom

@@ -44,6 +44,7 @@ pub mod notification;
 pub mod page_table;
 pub mod placement;
 pub mod pte;
+pub mod reply;
 pub mod ring_buffer;
 pub mod rng;
 pub mod run_queue;

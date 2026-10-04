@@ -138,6 +138,12 @@ pub enum Syscall {
     /// the kernel reads and writes the buffer on the thread's behalf. Mapping the
     /// frame into the thread's address space is the caller's business.
     SetIpcBuffer = 12,
+    /// `reply_recv(ep_slot, reply_slot, word) -> word | (errno | ERR_FLAG)`, badge
+    /// in `rdx`. The server loop in one call: answers the caller bound to the
+    /// reply object with `word` (and the server's buffer words), then receives
+    /// exactly like [`RecvReply`](Syscall::RecvReply). If no caller is bound the
+    /// answer is skipped, so a loop can use it from its first iteration.
+    ReplyRecv = 13,
 }
 
 impl Syscall {
@@ -157,6 +163,7 @@ impl Syscall {
             10 => Some(Self::RecvReply),
             11 => Some(Self::Reply),
             12 => Some(Self::SetIpcBuffer),
+            13 => Some(Self::ReplyRecv),
             _ => None,
         }
     }
@@ -464,6 +471,8 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::Reply) => sys_reply(arg0, arg1).into(),
         // set_ipc_buffer(frame_slot = arg0) -> 0 | errno.
         Some(Syscall::SetIpcBuffer) => sys_set_ipc_buffer(arg0).into(),
+        // reply_recv(ep_slot = arg0, reply_slot = arg1, word = arg2).
+        Some(Syscall::ReplyRecv) => sys_reply_recv(arg0, arg1, arg2),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -1071,6 +1080,22 @@ fn sys_recv_reply(ep_slot: u64, reply_slot: u64) -> SyscallRet {
         return err(IpcSyscallError::ReplyBusy);
     }
     recv_blocking(ep_slot, Some(reply))
+}
+
+/// Implements [`Syscall::ReplyRecv`]: answers the bound caller, if any, then
+/// receives the next message through [`sys_recv_reply`].
+fn sys_reply_recv(ep_slot: u64, reply_slot: u64, word: u64) -> SyscallRet {
+    let reply = match resolve_reply_slot(reply_slot) {
+        Ok(obj) => obj,
+        Err(e) => return SyscallRet::from(e as u64 | IPC_ERR_FLAG),
+    };
+    // compose before receiving: the receive overwrites the buffer.
+    let message = compose_current(word);
+    let answered = cap::reply_object(reply).and_then(|r| r.inner.lock().answer(message).ok());
+    if let Some(caller) = answered {
+        resume_with(caller, &message, 0);
+    }
+    sys_recv_reply(ep_slot, reply_slot)
 }
 
 /// Implements [`Syscall::SetIpcBuffer`]: registers the frame at `frame_slot` as

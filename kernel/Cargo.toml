@@ -69,6 +69,10 @@ harness = false
 name = "ipc_buffer_registration"
 harness = false
 
+[[test]]
+name = "reply_recv_server"
+harness = false
+
 # retype_invoke drops to ring 3 and exits qemu from inside the user program
 # (after retype/invoke syscalls), so it likewise runs without the framework.
 [[test]]

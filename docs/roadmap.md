@@ -44,7 +44,9 @@ speak IPC.
 - [x] `Reply` object state machine in jos-core (Kani: one reply per bind)
 - [x] `Reply` kernel object + `Call` / `RecvReply` / `Reply` syscalls (seL4 MCS model)
 - [ ] `ReplyRecv` combined syscall
-- [ ] per-TCB IPC buffer page (message words 1..N, read inside the SMAP window)
+- [x] per-thread IPC buffer frame carrying message words 1 to 3 (seL4 model:
+      the kernel uses its own mapping of the registered frame)
+- [ ] register the IPC buffer from userspace through a Frame capability
 - [ ] capability transfer over IPC (needs the cross-CSpace derivation decision,
       see "open decisions")
 - [ ] JPC-1: Verus proof of rendezvous deadlock-freedom

@@ -15,8 +15,11 @@ Check items off in the same commit that finishes them.
       revoke syscall or a kernel-side test hook)
 - [ ] `ReplyRecv` fast path: answer, then receive, in one syscall
 - [ ] a server answering two clients by badge (needs `ReplyRecv` or a loop)
-- [ ] per-TCB IPC buffer page mapped at a fixed user address; copy words 1..3
-      inside `arch::x86_64::with_user_access`
+- [x] per-thread IPC buffer: a registered frame (`Tcb::ipc_buffer`) carries
+      message words 1 to 3 on every IPC path; the kernel uses its own mapping
+      of the frame, never a user pointer
+- [ ] a syscall to register a thread's IPC buffer from a Frame capability
+      (today only kernel setup code can set it)
 - [ ] decide cross-CSpace derivation (ROADMAP open decision 1), then cap transfer
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)
 
@@ -38,7 +41,7 @@ Check items off in the same commit that finishes them.
 ## Verification backlog
 
 - [ ] ARITH-2: frame allocator abstract spec (Verus + Kani)
-- [ ] JPC-2: user-pointer slice validation for the IPC buffer
+- [ ] JPC-2: IPC buffer registration only accepts Frame capabilities
 - [ ] ARITH-3: trace encoding round-trip harness
 
 ## Docs and process

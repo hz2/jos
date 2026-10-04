@@ -37,7 +37,7 @@ use jos_core::notification;
 // the verified one-shot reply state machine, by module path for the same reason.
 use jos_core::reply;
 use jos_core::ipc_buffer::IpcBuffer;
-use jos_core::placement::{place, PlaceError};
+use jos_core::placement::{place, place_zeroed, PlaceError};
 use jos_core::untyped::{
     ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, NOTIFICATION_ALIGN,
     NOTIFICATION_SIZE, PAGE_TABLE_SIZE, REPLY_ALIGN, REPLY_SIZE, TCB_ALIGN, TCB_SIZE,
@@ -907,7 +907,7 @@ impl UntypedRegion {
     /// whose base is merely 64-aligned). Callers that retype page tables must
     /// provide a page-aligned untyped region.
     pub fn retype_page_table(&mut self) -> Option<ObjectId> {
-        self.retype(ObjectType::PageTable, PageTable::empty(), ObjectKind::PageTable)
+        self.retype_zeroed(ObjectType::PageTable, ObjectKind::PageTable)
     }
 
     /// Carves a fresh inactive [`Tcb`] out of this region and returns its
@@ -938,25 +938,41 @@ impl UntypedRegion {
     /// into the region at the watermark, advance the watermark, and return an
     /// ObjectId tagged `kind` whose address is the placement site. Factors out
     /// the body retype_endpoint had so every object type carves identically.
+    /// Records a successful placement at `start` and returns a handle to it.
+    fn commit(&mut self, start: usize, new_watermark: usize, kind: ObjectKind) -> ObjectId {
+        self.watermark = new_watermark;
+        self.has_children = true;
+        // derive from as_MUT_ptr, not as_ptr: the address is later
+        // reconstructed as a *mut T (as_page_table_mut / as_tcb_mut /
+        // as_cnode_mut / as_untyped_mut) and WRITTEN through. as_ptr
+        // would expose read-only provenance, so a write through the
+        // reconstructed pointer would be UB under strict provenance
+        // (Stacked/Tree Borrows); as_mut_ptr exposes write provenance.
+        // SAFETY: `start <= new_watermark - size` and `new_watermark <=
+        // bytes.len()` (the placement returned them), so the offset is in
+        // bounds and `add` stays within the region's provenance.
+        let obj_ptr = unsafe { self.bytes.as_mut_ptr().add(start) };
+        let addr = obj_ptr.expose_provenance();
+        ObjectId { addr, kind }
+    }
+
+    /// Carves an object whose initial state is all zeros (a frame or an empty
+    /// page table) by zeroing its bytes in place.
+    ///
+    /// Building a 4 KiB value and copying it through [`place`] costs two pages
+    /// of kernel stack, which overflows the per-thread syscall stack in debug
+    /// builds and silently corrupts the handle being built.
+    fn retype_zeroed(&mut self, ty: ObjectType, kind: ObjectKind) -> Option<ObjectId> {
+        match place_zeroed(self.bytes, self.watermark, ty) {
+            Ok((start, new_watermark)) => Some(self.commit(start, new_watermark, kind)),
+            Err(PlaceError::DoesNotFit) => None,
+            Err(e) => panic!("retype: unexpected placement error for {kind:?}: {e:?}"),
+        }
+    }
+
     fn retype<T>(&mut self, ty: ObjectType, value: T, kind: ObjectKind) -> Option<ObjectId> {
         match place(self.bytes, self.watermark, ty, value) {
-            Ok((start, new_watermark)) => {
-                self.watermark = new_watermark;
-                self.has_children = true;
-                // derive from as_MUT_ptr, not as_ptr: the address is later
-                // reconstructed as a *mut T (as_page_table_mut / as_tcb_mut /
-                // as_cnode_mut / as_untyped_mut) and WRITTEN through. as_ptr
-                // would expose read-only provenance, so a write through the
-                // reconstructed pointer would be UB under strict provenance
-                // (Stacked/Tree Borrows); as_mut_ptr exposes write provenance.
-                // retype takes &mut self, so the unique borrow is available.
-                // SAFETY: `start <= new_watermark - size` and `new_watermark <=
-                // bytes.len()` (place returned them), so the offset is in bounds
-                // and `add` stays within the region's provenance.
-                let obj_ptr = unsafe { self.bytes.as_mut_ptr().add(start) };
-                let addr = obj_ptr.expose_provenance();
-                Some(ObjectId { addr, kind })
-            }
+            Ok((start, new_watermark)) => Some(self.commit(start, new_watermark, kind)),
             Err(PlaceError::DoesNotFit) => None,
             Err(e) => panic!("retype: unexpected placement error for {kind:?}: {e:?}"),
         }

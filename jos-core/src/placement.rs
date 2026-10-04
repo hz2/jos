@@ -104,6 +104,70 @@ pub fn place<T>(
     Ok((start, new_watermark))
 }
 
+/// Reserves an object of type `ty` in `region` at the watermark and zeroes its
+/// bytes in place, for objects whose initial state is all zeros (an empty page table, a frame).
+///
+/// Uses the same verified arithmetic as [`place`], but never builds the object
+/// as a value: a page-sized value plus its by-value copy would cost two pages of
+/// kernel stack. Returns `(start_offset, new_watermark)` like [`place`].
+///
+/// # Errors
+///
+/// - [`PlaceError::DoesNotFit`] if the object does not fit at the watermark.
+/// - [`PlaceError::RegionMisaligned`] if `region`'s base is under-aligned for `ty`.
+pub fn place_zeroed(
+    region: &mut [u8],
+    watermark: usize,
+    ty: ObjectType,
+) -> Result<(usize, usize), PlaceError> {
+    let (size, align) = object_layout(ty);
+    if !(region.as_ptr() as usize).is_multiple_of(align) {
+        return Err(PlaceError::RegionMisaligned);
+    }
+    let new_watermark = retype_fits(region.len(), watermark, ty).ok_or(PlaceError::DoesNotFit)?;
+    let start = new_watermark - size;
+    region[start..new_watermark].fill(0);
+    Ok((start, new_watermark))
+}
+
+#[cfg(test)]
+mod zeroed_tests {
+    use super::{PlaceError, place_zeroed};
+    use crate::untyped::{ObjectType, PAGE_TABLE_SIZE};
+
+    /// Three pages' worth of page-aligned bytes.
+    #[repr(C, align(4096))]
+    struct Pages([u8; 3 * PAGE_TABLE_SIZE]);
+
+    #[test]
+    fn place_zeroed_reserves_and_zeroes_a_page() {
+        let mut pages = Pages([0xAA; 3 * PAGE_TABLE_SIZE]);
+        let (start, wm) = place_zeroed(&mut pages.0, 1, ObjectType::PageTable).unwrap();
+        // the watermark of 1 rounds up to the next page.
+        assert_eq!((start, wm), (PAGE_TABLE_SIZE, 2 * PAGE_TABLE_SIZE));
+        assert!(pages.0[start..wm].iter().all(|b| *b == 0));
+        // bytes outside the reservation are untouched.
+        assert_eq!(pages.0[0], 0xAA);
+        assert_eq!(pages.0[wm], 0xAA);
+    }
+
+    #[test]
+    fn place_zeroed_refuses_when_full() {
+        let mut pages = Pages([0; 3 * PAGE_TABLE_SIZE]);
+        let full = 3 * PAGE_TABLE_SIZE;
+        assert_eq!(place_zeroed(&mut pages.0, full, ObjectType::PageTable), Err(PlaceError::DoesNotFit));
+    }
+
+    #[test]
+    fn place_zeroed_rejects_a_misaligned_region() {
+        let mut pages = Pages([0; 3 * PAGE_TABLE_SIZE]);
+        assert_eq!(
+            place_zeroed(&mut pages.0[64..], 0, ObjectType::PageTable),
+            Err(PlaceError::RegionMisaligned)
+        );
+    }
+}
+
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;

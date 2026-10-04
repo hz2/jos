@@ -15,8 +15,8 @@
 //! entry (to activate the kernel's per-CPU `GS` block) and once on exit (to
 //! restore the user's `GS` before `iretq`). Because the same handler fires from
 //! both ring 0 and ring 3, the swap is conditional: check the `RPL` field of the
-//! saved `CS` on the interrupt frame. `CS & 3 == 3` → came from ring 3 → swap.
-//! `CS & 3 == 0` → already in ring 0 → do nothing.
+//! saved `CS` on the interrupt frame. `CS & 3 == 3` -> came from ring 3 -> swap.
+//! `CS & 3 == 0` -> already in ring 0 -> do nothing.
 //!
 //! The `extern "x86-interrupt"` prologue saves registers with plain `push`
 //! instructions and never accesses `gs:`-relative memory, so it is safe to read
@@ -191,8 +191,10 @@ extern "x86-interrupt" fn page_fault_handler(
     serial_println!("  accessed address: {:?}", addr);
     serial_println!("  error code: {:?}", error_code);
     serial_println!("{:#?}", stack_frame);
-    // hlt_loop does not return; no exit swap needed (GS state is irrelevant
-    // once the kernel halts).
+    // a page fault is fatal and jos only runs under qemu: fail the run rather
+    // than hang it. hlt_loop is the fallback if the exit device is absent.
+    // no exit swap needed (GS state is irrelevant once the kernel stops).
+    crate::exit_qemu(crate::QemuExitCode::Failed);
     crate::hlt_loop();
 }
 

@@ -28,10 +28,11 @@ grub-mkrescue -d "$(dirname "$(command -v grub-mkrescue)")/../lib/grub/i386-pc" 
     -o "$ISO" "$BUILD_DIR" >/dev/null 2>&1 \
   || grub-mkrescue -o "$ISO" "$BUILD_DIR" >/dev/null 2>&1
 
-# boot headless. capture qemu's exit code: isa-debug-exit maps a guest write of
-# N at port 0xf4 to a host exit of (N<<1)|1, so success (0x10) => 33.
+# boot headless, bounded by a timeout so a wedged guest fails the test instead
+# of hanging it (override with JOS_QEMU_TIMEOUT seconds). capture qemu's exit
+# code: isa-debug-exit maps a guest write of N at port 0xf4 to a host exit of (N<<1)|1, so success (0x10) => 33.
 set +e
-qemu-system-x86_64 \
+timeout --foreground -k 5 "${JOS_QEMU_TIMEOUT:-120}" qemu-system-x86_64 \
     -machine q35 \
     -cpu max \
     -m 128M \

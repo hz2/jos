@@ -33,6 +33,7 @@ grub-mkrescue -d "$(dirname "$(command -v grub-mkrescue)")/../lib/grub/i386-pc" 
 set +e
 qemu-system-x86_64 \
     -machine q35 \
+    -cpu max \
     -m 128M \
     -cdrom "$ISO" \
     -serial mon:stdio \

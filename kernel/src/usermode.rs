@@ -120,13 +120,16 @@ where
             .flush();
     }
 
-    // copy the payload into the freshly mapped code page.
-    // SAFETY: the page is mapped present + writable above and is exactly one
-    // 4 KiB page; the destination does not overlap the source (kernel slice vs.
-    // user frame).
-    unsafe {
-        core::ptr::copy_nonoverlapping(code.as_ptr(), USER_CODE_ADDR as *mut u8, code.len());
-    }
+    // copy the payload into the freshly mapped code page. it is a USER page, so
+    // with SMAP on the copy must sit inside the user-access window.
+    crate::arch::x86_64::with_user_access(|| {
+        // SAFETY: the page is mapped present + writable above and is exactly
+        // one 4 KiB page; the destination does not overlap the source (kernel
+        // slice vs. user frame).
+        unsafe {
+            core::ptr::copy_nonoverlapping(code.as_ptr(), USER_CODE_ADDR as *mut u8, code.len());
+        }
+    });
 
     // W^X: strip WRITABLE now that the copy is done. the CPU re-reads PTE flags
     // on each TLB miss, so the flush here takes effect before ring 3 runs.

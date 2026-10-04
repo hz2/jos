@@ -59,6 +59,8 @@ pub fn init() {
     #[cfg(target_arch = "x86_64")]
     {
         gdt::init_gdt();
+        // hardware guards against the kernel following a user pointer.
+        arch::x86_64::enable_smep_smap();
         interrupts::init_idt();
         // remap + init the PIC after the idt has timer/keyboard handlers, then
         // enable interrupts. order matters: an IRQ arriving before its idt

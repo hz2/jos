@@ -311,8 +311,13 @@ pub fn init_syscall() {
     // interrupts are masked inside the entry stub until we choose otherwise,
     // so the half-built kernel frame (before the stack switch completes) cannot
     // be interrupted. Also clear the direction and trap flags for a sane kernel
-    // entry state.
-    SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::DIRECTION_FLAG | RFlags::TRAP_FLAG);
+    // entry state, and AC so ring 3 cannot enter with the SMAP window open.
+    SFMask::write(
+        RFlags::INTERRUPT_FLAG
+            | RFlags::DIRECTION_FLAG
+            | RFlags::TRAP_FLAG
+            | RFlags::ALIGNMENT_CHECK,
+    );
 
     // per-CPU data for the swapgs-based entry stub. KernelGsBase holds the
     // CpuLocal pointer while userspace runs; the entry stub's `swapgs` moves it

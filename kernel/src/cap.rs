@@ -861,8 +861,8 @@ enum SendOutcome {
 }
 
 enum RecvOutcome {
-    // message taken; wake this sender if present.
-    Took(Message, Option<Waker>),
+    // message taken with the sender badge; wake this sender if present.
+    Took(Message, Badge, Option<Waker>),
     // endpoint had no message.
     Empty,
 }
@@ -874,8 +874,8 @@ impl EndpointInner {
     // place and the take-or-park stays race-free (it all happens under one lock
     // acquisition by the caller). when the model reports a receiver was released,
     // its stored waker is taken so the caller can fire it after the lock drops.
-    fn try_deposit(&mut self, message: Message) -> SendOutcome {
-        match self.rendezvous.try_send(message) {
+    fn try_deposit(&mut self, message: Message, badge: Badge) -> SendOutcome {
+        match self.rendezvous.try_send_badged(message, badge) {
             endpoint::SendOutcome::Deposited { woke_receiver } => {
                 // the model cleared its receiver_parked flag iff it released a
                 // receiver; keep our waker slot in lockstep by taking it then.
@@ -889,9 +889,9 @@ impl EndpointInner {
     // try to take the parked message without blocking, delegating to the model.
     fn try_take(&mut self) -> RecvOutcome {
         match self.rendezvous.try_recv() {
-            endpoint::RecvOutcome::Took { message, woke_sender } => {
+            endpoint::RecvOutcome::Took { message, badge, woke_sender } => {
                 let waker = if woke_sender { self.send_waiter.take() } else { None };
-                RecvOutcome::Took(message, waker)
+                RecvOutcome::Took(message, badge, waker)
             }
             endpoint::RecvOutcome::Empty => RecvOutcome::Empty,
         }
@@ -951,8 +951,9 @@ impl EndpointInner {
 /// See [`IpcError`].
 pub fn cap_send(space: &KernelCapSpace, cap_ref: CapRef, message: Message) -> Result<(), IpcError> {
     let endpoint = resolve_endpoint(space, cap_ref, Rights::WRITE)?;
+    let badge = cap_badge(space, cap_ref);
     // do the deposit under the lock, then wake the receiver after releasing it.
-    let to_wake = match endpoint.inner.lock().try_deposit(message) {
+    let to_wake = match endpoint.inner.lock().try_deposit(message, badge) {
         SendOutcome::Deposited(waker) => waker,
         SendOutcome::Full => return Err(IpcError::EndpointBusy),
     };
@@ -974,15 +975,33 @@ pub fn cap_send(space: &KernelCapSpace, cap_ref: CapRef, message: Message) -> Re
 ///
 /// See [`IpcError`].
 pub fn cap_recv(space: &KernelCapSpace, cap_ref: CapRef) -> Result<Message, IpcError> {
+    cap_recv_badged(space, cap_ref).map(|(message, _)| message)
+}
+
+/// Like [`cap_recv`], but also returns the badge of the capability the message
+/// was sent through, so a server can tell which client sent it.
+///
+/// # Errors
+///
+/// See [`IpcError`].
+pub fn cap_recv_badged(
+    space: &KernelCapSpace,
+    cap_ref: CapRef,
+) -> Result<(Message, Badge), IpcError> {
     let endpoint = resolve_endpoint(space, cap_ref, Rights::READ)?;
-    let (message, to_wake) = match endpoint.inner.lock().try_take() {
-        RecvOutcome::Took(message, waker) => (message, waker),
+    let (message, badge, to_wake) = match endpoint.inner.lock().try_take() {
+        RecvOutcome::Took(message, badge, waker) => (message, badge, waker),
         RecvOutcome::Empty => return Err(IpcError::EndpointEmpty),
     };
     if let Some(waker) = to_wake {
         waker.wake();
     }
-    Ok(message)
+    Ok((message, badge))
+}
+
+// the badge stamped on the capability at cap_ref, or none if it is stale.
+fn cap_badge(space: &KernelCapSpace, cap_ref: CapRef) -> Badge {
+    space.lookup(cap_ref).map_or(Badge::NONE, |cap| cap.badge)
 }
 
 // --------------------------------------------------------------------------
@@ -1022,7 +1041,7 @@ impl Future for CapSend<'_> {
         // of the locked scope so it is woken after the lock is released.
         let to_wake = {
             let mut inner = endpoint.inner.lock();
-            match inner.try_deposit(self.message) {
+            match inner.try_deposit(self.message, cap_badge(self.space, self.cap_ref)) {
                 SendOutcome::Deposited(waker) => waker,
                 SendOutcome::Full => {
                     // endpoint full: park as the sender (storing our waker in the
@@ -1059,7 +1078,7 @@ impl Future for CapRecv<'_> {
         let (message, to_wake) = {
             let mut inner = endpoint.inner.lock();
             match inner.try_take() {
-                RecvOutcome::Took(message, waker) => (message, waker),
+                RecvOutcome::Took(message, _, waker) => (message, waker),
                 RecvOutcome::Empty => {
                     // endpoint empty: park as the receiver so a sender depositing
                     // a message wakes us, and yield.
@@ -1119,7 +1138,7 @@ impl Future for CapRecvTimeout<'_> {
         let (message, to_wake) = {
             let mut inner = endpoint.inner.lock();
             match inner.try_take() {
-                RecvOutcome::Took(message, waker) => (message, waker),
+                RecvOutcome::Took(message, _, waker) => (message, waker),
                 RecvOutcome::Empty => {
                     // nothing waiting. if the deadline has passed, time out:
                     // cancel our parked receiver and report TimedOut.
@@ -1470,7 +1489,7 @@ impl Future for CapRecvResolving {
         let (message, to_wake) = {
             let mut inner = endpoint.inner.lock();
             match inner.try_take() {
-                RecvOutcome::Took(message, waker) => (message, waker),
+                RecvOutcome::Took(message, _, waker) => (message, waker),
                 RecvOutcome::Empty => {
                     inner.park_receiver(context.waker().clone());
                     return Poll::Pending;

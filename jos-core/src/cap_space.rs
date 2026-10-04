@@ -33,6 +33,7 @@
 
 use crate::cap_rights::Rights;
 use crate::cap_table::{CapRef, CapTable};
+use crate::notification::Badge;
 pub use crate::cap_table::InsertAtError;
 
 /// A typed, rights-bearing capability: the entry stored in a [`CapSpace`] slot.
@@ -50,16 +51,23 @@ pub struct Capability<O: Copy> {
     /// original capability (for example, the one produced by retyping untyped
     /// memory). Used to find children during revocation.
     pub parent: Option<CapRef>,
+    /// The badge delivered to a receiver with every message sent through this
+    /// capability, so a server can tell its clients apart. [`Badge::NONE`]
+    /// means unbadged. Set at most once, by [`CapSpace::mint_badged`]; every
+    /// later derivation inherits it unchanged.
+    pub badge: Badge,
 }
 
 impl<O: Copy> Capability<O> {
-    /// Creates an original capability (no parent) with the given rights.
+    /// Creates an original, unbadged capability (no parent) with the given
+    /// rights.
     #[must_use]
     pub const fn new(object: O, rights: Rights) -> Self {
         Self {
             object,
             rights,
             parent: None,
+            badge: Badge::NONE,
         }
     }
 }
@@ -71,6 +79,9 @@ pub enum MintError {
     InvalidSource,
     /// The capability space has no free slot for the derived capability.
     SpaceFull,
+    /// The source capability already carries a badge. A badge is set at most
+    /// once and is never changed by a later derivation.
+    AlreadyBadged,
 }
 
 /// A single-level capability space backed by a [`CapTable`] of `N` slots.
@@ -188,6 +199,40 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
             // monotone: the result is a subset of the parent's rights.
             rights: parent.rights.attenuate(mask),
             parent: Some(source),
+            // a plain mint inherits the badge, never changes it.
+            badge: parent.badge,
+        };
+        self.table.insert(derived).map_err(|_| MintError::SpaceFull)
+    }
+
+    /// Derives a badged capability from an unbadged `source`, with rights
+    /// attenuated by `mask`.
+    ///
+    /// This is the seL4 badge discipline: a server holding an unbadged
+    /// endpoint capability mints one badged copy per client, and the badge is
+    /// delivered with every message sent through that copy. The badge can be
+    /// set only once, so a client can never relabel itself as another client.
+    ///
+    /// # Errors
+    ///
+    /// [`MintError::InvalidSource`] if `source` is stale;
+    /// [`MintError::AlreadyBadged`] if `source` already carries a badge;
+    /// [`MintError::SpaceFull`] if there is no free slot.
+    pub fn mint_badged(
+        &mut self,
+        source: CapRef,
+        mask: Rights,
+        badge: Badge,
+    ) -> Result<CapRef, MintError> {
+        let parent = self.table.get(source).ok_or(MintError::InvalidSource)?;
+        if !parent.badge.is_empty() {
+            return Err(MintError::AlreadyBadged);
+        }
+        let derived = Capability {
+            object: parent.object,
+            rights: parent.rights.attenuate(mask),
+            parent: Some(source),
+            badge,
         };
         self.table.insert(derived).map_err(|_| MintError::SpaceFull)
     }
@@ -416,6 +461,42 @@ mod tests {
         let _b = space.insert(2, Rights::all()).unwrap();
         assert_eq!(space.mint(a, Rights::READ), Err(MintError::SpaceFull));
     }
+
+    #[test]
+    fn mint_badged_stamps_and_children_inherit() {
+        let mut space: CapSpace<Obj, 8> = CapSpace::new();
+        let root = space.insert(1, Rights::all()).unwrap();
+        let badged = space.mint_badged(root, Rights::WRITE, Badge(42)).unwrap();
+        assert_eq!(space.lookup(badged).unwrap().badge, Badge(42));
+        assert_eq!(space.lookup(badged).unwrap().rights, Rights::WRITE);
+        // a plain mint from the badged cap keeps the badge.
+        let child = space.mint(badged, Rights::all()).unwrap();
+        assert_eq!(space.lookup(child).unwrap().badge, Badge(42));
+        // the root stays unbadged.
+        assert_eq!(space.lookup(root).unwrap().badge, Badge::NONE);
+    }
+
+    #[test]
+    fn mint_badged_refuses_rebadging() {
+        let mut space: CapSpace<Obj, 8> = CapSpace::new();
+        let root = space.insert(1, Rights::all()).unwrap();
+        let badged = space.mint_badged(root, Rights::all(), Badge(1)).unwrap();
+        assert_eq!(
+            space.mint_badged(badged, Rights::all(), Badge(2)),
+            Err(MintError::AlreadyBadged)
+        );
+    }
+
+    #[test]
+    fn revoke_removes_badged_children() {
+        let mut space: CapSpace<Obj, 8> = CapSpace::new();
+        let root = space.insert(1, Rights::all()).unwrap();
+        let a = space.mint_badged(root, Rights::WRITE, Badge(1)).unwrap();
+        let b = space.mint_badged(root, Rights::WRITE, Badge(2)).unwrap();
+        assert_eq!(space.revoke(root), 3);
+        assert!(space.lookup(a).is_none());
+        assert!(space.lookup(b).is_none());
+    }
 }
 
 // bounded proofs of the capability-space invariants.
@@ -516,6 +597,39 @@ mod kani_proofs {
                     assert!(space.check(root, required));
                 }
             }
+        }
+    }
+
+    // a badge, once set, is never changed: a child of a badged cap carries the
+    // same badge, and re-badging it is refused. this stops a client from
+    // impersonating another client to a server.
+    #[kani::proof]
+    fn badge_is_immutable_once_set() {
+        let mut space: CapSpace<u32, 4> = CapSpace::new();
+        let root = space.insert(kani::any(), Rights::from_bits_truncate(kani::any())).unwrap();
+        let b1 = Badge(kani::any());
+        kani::assume(!b1.is_empty());
+        let badged = space.mint_badged(root, Rights::from_bits_truncate(kani::any()), b1).unwrap();
+        if let Ok(child) = space.mint(badged, Rights::from_bits_truncate(kani::any())) {
+            assert!(space.lookup(child).unwrap().badge == b1);
+            assert!(
+                space.mint_badged(child, Rights::all(), Badge(kani::any()))
+                    == Err(MintError::AlreadyBadged)
+            );
+        }
+    }
+
+    // badging is still a mint: it never grants a right the source lacked.
+    #[kani::proof]
+    fn mint_badged_never_escalates() {
+        let mut space: CapSpace<u32, 4> = CapSpace::new();
+        let src_rights = Rights::from_bits_truncate(kani::any());
+        let mask = Rights::from_bits_truncate(kani::any());
+        let src = space.insert(kani::any(), src_rights).unwrap();
+        if let Ok(child) = space.mint_badged(src, mask, Badge(kani::any())) {
+            let child_rights = space.lookup(child).unwrap().rights;
+            assert!(src_rights.contains(child_rights));
+            assert!(mask.contains(child_rights));
         }
     }
 }

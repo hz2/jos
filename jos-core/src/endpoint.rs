@@ -29,6 +29,8 @@
 //! each operation establishing its half of the parking precondition. The
 //! `#[cfg(kani)]` harnesses discharge them over arbitrary bounded op sequences.
 
+use crate::notification::Badge;
+
 /// A small inline IPC message: a tag plus four data words.
 ///
 /// Mirrors seL4's short register-passed messages and the kernel's `Message`
@@ -81,6 +83,8 @@ pub enum RecvOutcome {
     Took {
         /// The message removed from the endpoint.
         message: Message,
+        /// The badge of the capability the message was sent through.
+        badge: Badge,
         /// Whether a parked sender was released by this take.
         woke_sender: bool,
     },
@@ -100,7 +104,7 @@ pub enum RecvOutcome {
 pub struct Endpoint {
     // the single message slot. None means empty, Some means an undelivered
     // message is parked. capacity-1: a second deposit is refused, not queued.
-    slot: Option<Message>,
+    slot: Option<(Message, Badge)>,
     // a sender is parked (the slot was full when it tried to send).
     sender_parked: bool,
     // a receiver is parked (the slot was empty when it tried to receive).
@@ -146,10 +150,19 @@ impl Endpoint {
     /// [`SendOutcome::Full`] (depositing nothing) when the slot already holds an
     /// undelivered message; the caller's blocking path then parks the sender.
     pub fn try_send(&mut self, message: Message) -> SendOutcome {
+        self.try_send_badged(message, Badge::NONE)
+    }
+
+    /// Tries to deposit `message` stamped with the sender capability's `badge`.
+    ///
+    /// Behaves exactly like [`try_send`](Self::try_send); the badge travels with
+    /// the message and is handed to the receiver in [`RecvOutcome::Took`], so a
+    /// server learns which badged capability (which client) sent it.
+    pub fn try_send_badged(&mut self, message: Message, badge: Badge) -> SendOutcome {
         if self.slot.is_some() {
             return SendOutcome::Full;
         }
-        self.slot = Some(message);
+        self.slot = Some((message, badge));
         // a receiver waiting on the empty slot is now satisfied: clear its
         // parked flag and tell the caller to wake it.
         let woke_receiver = self.receiver_parked;
@@ -165,12 +178,13 @@ impl Endpoint {
     /// parks the receiver.
     pub fn try_recv(&mut self) -> RecvOutcome {
         match self.slot.take() {
-            Some(message) => {
+            Some((message, badge)) => {
                 // a sender waiting for the slot to free can now proceed.
                 let woke_sender = self.sender_parked;
                 self.sender_parked = false;
                 RecvOutcome::Took {
                     message,
+                    badge,
                     woke_sender,
                 }
             }
@@ -257,7 +271,7 @@ impl Default for Endpoint {
 
 #[cfg(test)]
 mod tests {
-    use super::{Endpoint, Message, RecvOutcome, SendOutcome};
+    use super::{Badge, Endpoint, Message, RecvOutcome, SendOutcome};
 
     fn msg(label: u64) -> Message {
         Message::new(label, [label, label + 1, label + 2, label + 3])
@@ -284,6 +298,7 @@ mod tests {
             ep.try_recv(),
             RecvOutcome::Took {
                 message: m,
+                badge: Badge::NONE,
                 woke_sender: false
             }
         );
@@ -301,8 +316,19 @@ mod tests {
             ep.try_recv(),
             RecvOutcome::Took {
                 message: msg(1),
+                badge: Badge::NONE,
                 woke_sender: false
             }
+        );
+    }
+
+    #[test]
+    fn badge_travels_with_the_message() {
+        let mut ep = Endpoint::new();
+        ep.try_send_badged(msg(5), Badge(0xB));
+        assert_eq!(
+            ep.try_recv(),
+            RecvOutcome::Took { message: msg(5), badge: Badge(0xB), woke_sender: false }
         );
     }
 
@@ -340,6 +366,7 @@ mod tests {
             ep.try_recv(),
             RecvOutcome::Took {
                 message: msg(1),
+                badge: Badge::NONE,
                 woke_sender: true
             }
         );
@@ -393,7 +420,7 @@ mod tests {
         // the message still delivers to a later receiver.
         assert_eq!(
             ep.try_recv(),
-            RecvOutcome::Took { message: msg(1), woke_sender: false }
+            RecvOutcome::Took { message: msg(1), badge: Badge::NONE, woke_sender: false }
         );
     }
 
@@ -454,7 +481,7 @@ mod tests {
 // so the round-trip proof confirms no corruption.
 #[cfg(kani)]
 mod kani_proofs {
-    use super::{Endpoint, Message, RecvOutcome, SendOutcome};
+    use super::{Badge, Endpoint, Message, RecvOutcome, SendOutcome};
 
     // an arbitrary endpoint state, used to prove the invariants hold from ANY
     // reachable starting point, not just a fresh one. the parking flags are
@@ -510,10 +537,11 @@ mod kani_proofs {
     fn deposit_then_take_returns_same_message() {
         let mut ep = Endpoint::new();
         let m = Message::new(kani::any(), [kani::any(); 4]);
-        let out = ep.try_send(m);
+        let b = Badge(kani::any());
+        let out = ep.try_send_badged(m, b);
         assert!(matches!(out, SendOutcome::Deposited { .. }));
         match ep.try_recv() {
-            RecvOutcome::Took { message, .. } => assert!(message == m),
+            RecvOutcome::Took { message, badge, .. } => assert!(message == m && badge == b),
             RecvOutcome::Empty => panic!("message vanished after a successful deposit"),
         }
     }

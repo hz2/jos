@@ -82,6 +82,7 @@ fn apply_op(space: &mut CapSpace<ObjectToken, N>, op: CapOp) -> CapOutcome {
                 Ok(r) => CapOutcome::Installed { slot: as_u32(r.slot()) },
                 Err(MintError::SpaceFull) => CapOutcome::Refused(Refusal::SpaceFull),
                 Err(MintError::InvalidSource) => CapOutcome::Refused(Refusal::StaleSlot),
+                Err(MintError::AlreadyBadged) => unreachable!("plain mint never badges"),
             },
         },
         CapOp::Remove { slot } => match resolve(space, slot) {

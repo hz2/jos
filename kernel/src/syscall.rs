@@ -50,7 +50,7 @@ use x86_64::registers::model_specific::{Efer, EferFlags, GsBase, KernelGsBase, L
 use x86_64::registers::rflags::RFlags;
 
 use crate::cap::{
-    cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectKind, RetypeError,
+    Badge, cap_recv_badged, cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectKind, RetypeError,
 };
 use crate::cpu_local::{
     self, OFF_KERNEL_RSP, OFF_NEED_YIELD, OFF_SAVED_USER_RFLAGS, OFF_SAVED_USER_RBP,
@@ -59,7 +59,7 @@ use crate::cpu_local::{
 };
 use crate::gdt;
 use jos_core::cap_rights::Rights;
-use jos_core::cap_space::InsertAtError;
+use jos_core::cap_space::{InsertAtError, MintError};
 use jos_core::untyped::ObjectType;
 
 /// The system calls jos understands.
@@ -108,6 +108,13 @@ pub enum Syscall {
     /// `ipc_recv_blocking(cap_slot) -> word | (errno | ERR_FLAG)`. Like
     /// [`IpcRecv`] but parks the calling thread until a sender is ready.
     IpcRecvBlocking = 7,
+    /// `mint(src_slot, rights, badge) -> new_slot | (errno | ERR_FLAG)`. Derives a
+    /// capability from `src_slot` with rights attenuated by the low 8 bits of
+    /// `rights`, installing it in the lowest free slot of the current `CSpace`.
+    /// A non-zero `badge` stamps it (only allowed on an unbadged source), so a
+    /// server can hand each client a distinguishable endpoint capability.
+    /// Errors are [`MintSyscallError`] codes with [`IPC_ERR_FLAG`] set.
+    Mint = 8,
 }
 
 impl Syscall {
@@ -122,6 +129,7 @@ impl Syscall {
             5 => Some(Self::Invoke),
             6 => Some(Self::IpcSendBlocking),
             7 => Some(Self::IpcRecvBlocking),
+            8 => Some(Self::Mint),
             _ => None,
         }
     }
@@ -173,6 +181,18 @@ pub enum RetypeSyscallError {
     BadAlign = 7,
     /// The requested object type cannot be carved via the syscall.
     BadType = 8,
+}
+
+/// Error codes returned by [`Syscall::Mint`] (OR-ed with [`IPC_ERR_FLAG`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum MintSyscallError {
+    /// The source slot is out of range or names no live capability.
+    BadCap = 1,
+    /// A badge was requested but the source capability is already badged.
+    AlreadyBadged = 2,
+    /// The current `CSpace` has no free slot.
+    SpaceFull = 3,
 }
 
 /// Error codes returned by [`Syscall::Invoke`] (OR-ed with [`IPC_ERR_FLAG`]).
@@ -321,20 +341,35 @@ pub fn init_syscall() {
 #[doc(hidden)]
 #[must_use]
 pub fn dispatch_for_test(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    dispatch_syscall(nr, arg0, arg1, arg2)
+    dispatch_syscall(nr, arg0, arg1, arg2).rax
+}
+
+// the two return registers of a syscall. sysv returns a two-u64 repr(C) struct
+// in rax:rdx, so the entry stub hands both back with no extra asm.
+#[repr(C)]
+struct SyscallRet {
+    rax: u64,
+    // secondary result: the sender badge on a receive, else 0.
+    rdx: u64,
+}
+
+impl From<u64> for SyscallRet {
+    fn from(rax: u64) -> Self {
+        Self { rax, rdx: 0 }
+    }
 }
 
 /// The Rust system-call dispatcher, called by [`syscall_entry`] with the user
 /// arguments already in C-ABI registers.
 ///
-/// Returns the value to place in the user's `rax`. `Syscall::Exit` does not
-/// return (it ends the qemu session); every other call returns a `u64`.
+/// Returns the values to place in the user's `rax` and `rdx`. `Syscall::Exit`
+/// does not return (it ends the qemu session).
 ///
 /// `extern "C"` so the assembly stub can call it with the standard argument
 /// registers (`rdi`, `rsi`, `rdx`, `rcx`) holding (nr, arg0, arg1, arg2).
-extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    let result = match Syscall::from_u64(nr) {
-        Some(Syscall::Add) => arg0.wrapping_add(arg1),
+extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> SyscallRet {
+    let result: SyscallRet = match Syscall::from_u64(nr) {
+        Some(Syscall::Add) => arg0.wrapping_add(arg1).into(),
         Some(Syscall::Exit) => {
             // Exit never returns, so record it BEFORE diverging: the trace must
             // capture the final syscall too. its "result" is the exit code it
@@ -351,23 +386,25 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 
             crate::hlt_loop();
         }
         // ipc_send(cap_slot = arg0, word = arg1) -> 0 | errno.
-        Some(Syscall::IpcSend) => sys_ipc_send(arg0, arg1),
-        // ipc_recv(cap_slot = arg0) -> word | (errno | IPC_ERR_FLAG).
+        Some(Syscall::IpcSend) => sys_ipc_send(arg0, arg1).into(),
+        // ipc_recv(cap_slot = arg0) -> word | (errno | IPC_ERR_FLAG), badge in rdx.
         Some(Syscall::IpcRecv) => sys_ipc_recv(arg0),
         // retype(untyped_slot = arg0, type_word = arg1, dest_slot = arg2).
-        Some(Syscall::Retype) => sys_retype(arg0, arg1, arg2),
+        Some(Syscall::Retype) => sys_retype(arg0, arg1, arg2).into(),
         // invoke(cap_slot = arg0, method = arg1, arg0_word = arg2).
-        Some(Syscall::Invoke) => sys_invoke(arg0, arg1, arg2),
+        Some(Syscall::Invoke) => sys_invoke(arg0, arg1, arg2).into(),
         // ipc_send_blocking(cap_slot = arg0, word = arg1).
-        Some(Syscall::IpcSendBlocking) => sys_ipc_send_blocking(arg0, arg1),
+        Some(Syscall::IpcSendBlocking) => sys_ipc_send_blocking(arg0, arg1).into(),
         // ipc_recv_blocking(cap_slot = arg0).
         Some(Syscall::IpcRecvBlocking) => sys_ipc_recv_blocking(arg0),
-        None => ENOSYS,
+        // mint(src_slot = arg0, rights = arg1, badge = arg2) -> new slot.
+        Some(Syscall::Mint) => sys_mint(arg0, arg1, arg2).into(),
+        None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
     // hands back to userspace, the structured trace event of VISION star 5.
     // (Exit recorded itself above, since it does not reach here.)
-    crate::trace::record(nr, [arg0, arg1, arg2], result);
+    crate::trace::record(nr, [arg0, arg1, arg2], result.rax);
     result
 }
 
@@ -454,20 +491,51 @@ fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
 
 // ipc_recv: resolve cap_slot per call, then receive a one-word message. returns
 // the message's first word on success, or (errno | IPC_ERR_FLAG) on failure so
-// userspace can distinguish a real word from an error.
-fn sys_ipc_recv(cap_slot: u64) -> u64 {
+// userspace can distinguish a real word from an error. the sender badge goes
+// back in rdx.
+fn sys_ipc_recv(cap_slot: u64) -> SyscallRet {
+    let bad_cap = (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
     let Some(space) = current_cspace() else {
-        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+        return bad_cap;
     };
     let Ok(slot) = usize::try_from(cap_slot) else {
-        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+        return bad_cap;
     };
     let Some(cap_ref) = space.ref_at(slot) else {
-        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+        return bad_cap;
     };
-    match cap_recv(space, cap_ref) {
-        Ok(message) => message.words[0],
-        Err(e) => ipc_errno(e) | IPC_ERR_FLAG,
+    match cap_recv_badged(space, cap_ref) {
+        Ok((message, badge)) => SyscallRet { rax: message.words[0], rdx: badge.0 },
+        Err(e) => (ipc_errno(e) | IPC_ERR_FLAG).into(),
+    }
+}
+
+// mint: derive a capability from src_slot into the lowest free slot, with
+// rights attenuated by the low byte of `rights` and an optional badge. the new
+// slot index is returned so userspace can hand it to a client.
+fn sys_mint(src_slot: u64, rights: u64, badge: u64) -> u64 {
+    let err = |e: MintSyscallError| e as u64 | IPC_ERR_FLAG;
+    let Some(space) = current_cspace_mut() else {
+        return err(MintSyscallError::BadCap);
+    };
+    let Ok(slot) = usize::try_from(src_slot) else {
+        return err(MintSyscallError::BadCap);
+    };
+    let Some(src) = space.ref_at(slot) else {
+        return err(MintSyscallError::BadCap);
+    };
+    // the low byte carries the mask; truncate drops any undefined bits.
+    let mask = Rights::from_bits_truncate(rights.to_le_bytes()[0]);
+    let minted = if badge == 0 {
+        space.mint(src, mask)
+    } else {
+        space.mint_badged(src, mask, Badge(badge))
+    };
+    match minted {
+        Ok(r) => r.slot() as u64,
+        Err(MintError::InvalidSource) => err(MintSyscallError::BadCap),
+        Err(MintError::AlreadyBadged) => err(MintSyscallError::AlreadyBadged),
+        Err(MintError::SpaceFull) => err(MintSyscallError::SpaceFull),
     }
 }
 
@@ -542,6 +610,7 @@ struct BlockedSend {
     endpoint_addr: u64, // endpoint identity (phys_addr of the ObjectId)
     thread_id: usize,
     word: u64,
+    badge: u64, // badge of the sending capability, delivered in rdx
 }
 
 // a parked thread waiting to receive on a specific endpoint.
@@ -619,14 +688,15 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
         return IpcSyscallError::Denied as u64;
     }
     let endpoint_addr = cap.object.phys_addr();
+    let badge = cap.badge.0;
 
     // check for a waiting receiver and deliver directly (bypassing the endpoint
     // buffer so we don't deposit a message that the parked receiver will miss).
     {
         let mut recvs = BLOCKED_RECVS.lock();
         for entry in recvs.iter_mut() {
-            if let Some(recv) = entry {
-                if recv.endpoint_addr == endpoint_addr {
+            if let Some(recv) = entry
+                && recv.endpoint_addr == endpoint_addr {
                     let recv_tid = recv.thread_id;
                     *entry = None;
                     drop(recvs);
@@ -637,12 +707,12 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
                         let tcb = crate::sched::thread_table_entry(recv_tid);
                         if !tcb.is_null() {
                             (*tcb).context.rax = word;
+                            (*tcb).context.rdx = badge;
                         }
                     }
                     crate::sched::mark_ready(recv_tid);
                     return 0; // send succeeded immediately
                 }
-            }
         }
     }
 
@@ -661,7 +731,7 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
     {
         let mut sends = BLOCKED_SENDS.lock();
         if let Some(entry) = sends.iter_mut().find(|e| e.is_none()) {
-            *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word });
+            *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word, badge });
         } else {
             return IpcSyscallError::WouldBlock as u64; // table full
         }
@@ -677,24 +747,24 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
 
 // ipc_recv_blocking: try to rendezvous with a waiting sender; if none is
 // present, park this thread in the BLOCKED_RECVS table and yield.
-fn sys_ipc_recv_blocking(cap_slot: u64) -> u64 {
+fn sys_ipc_recv_blocking(cap_slot: u64) -> SyscallRet {
     let Some(space) = current_cspace() else {
-        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
     };
     let Ok(slot) = usize::try_from(cap_slot) else {
-        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
     };
     let Some(cap_ref) = space.ref_at(slot) else {
-        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
     };
     let Some(cap) = space.lookup(cap_ref) else {
-        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
     };
     if cap.object.kind() != ObjectKind::Endpoint {
-        return IpcSyscallError::NotEndpoint as u64 | IPC_ERR_FLAG;
+        return (IpcSyscallError::NotEndpoint as u64 | IPC_ERR_FLAG).into();
     }
     if !cap.rights.contains(Rights::READ) {
-        return IpcSyscallError::Denied as u64 | IPC_ERR_FLAG;
+        return (IpcSyscallError::Denied as u64 | IPC_ERR_FLAG).into();
     }
     let endpoint_addr = cap.object.phys_addr();
 
@@ -702,9 +772,10 @@ fn sys_ipc_recv_blocking(cap_slot: u64) -> u64 {
     {
         let mut sends = BLOCKED_SENDS.lock();
         for entry in sends.iter_mut() {
-            if let Some(send) = entry {
-                if send.endpoint_addr == endpoint_addr {
+            if let Some(send) = entry
+                && send.endpoint_addr == endpoint_addr {
                     let word = send.word;
+                    let badge = send.badge;
                     let send_tid = send.thread_id;
                     *entry = None;
                     drop(sends);
@@ -718,29 +789,29 @@ fn sys_ipc_recv_blocking(cap_slot: u64) -> u64 {
                         }
                     }
                     crate::sched::mark_ready(send_tid);
-                    return word; // return message word to this receiver immediately
+                    // hand the word and the sender badge to this receiver immediately.
+                    return SyscallRet { rax: word, rdx: badge };
                 }
-            }
         }
     }
 
     // no sender waiting: try cap_recv in case a message was already deposited.
     let nb = sys_ipc_recv(cap_slot);
-    if nb & IPC_ERR_FLAG == 0 || nb != (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG) {
+    if nb.rax != (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG) {
         return nb;
     }
 
     // park ourselves.
     let cur = crate::sched::current_thread_id();
     if cur == usize::MAX {
-        return IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG;
+        return (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG).into();
     }
     {
         let mut recvs = BLOCKED_RECVS.lock();
         if let Some(entry) = recvs.iter_mut().find(|e| e.is_none()) {
             *entry = Some(BlockedRecv { endpoint_addr, thread_id: cur });
         } else {
-            return IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG;
+            return (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG).into();
         }
     }
     // rax = 0 initially; the sender overwrites it with the message word before
@@ -751,7 +822,7 @@ fn sys_ipc_recv_blocking(cap_slot: u64) -> u64 {
     unsafe {
         (*cpu_local::cpu_local_ptr()).need_yield = 1;
     }
-    0 // ignored
+    0.into() // ignored
 }
 
 // invoke: a generic capability invocation routed by the named object's kind.

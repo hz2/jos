@@ -41,7 +41,8 @@
 /// slot invalidates every prior `CapRef` to it via the generation bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapRef {
-    slot: usize,
+    // u32 keeps a capability slot small; tables never approach u32::MAX slots.
+    slot: u32,
     generation: u32,
 }
 
@@ -59,7 +60,7 @@ impl CapRef {
     #[inline]
     #[must_use]
     pub const fn slot(&self) -> usize {
-        self.slot
+        self.slot as usize
     }
 
     /// Returns the generation this reference was minted at.
@@ -68,6 +69,13 @@ impl CapRef {
     pub const fn generation(&self) -> u32 {
         self.generation
     }
+}
+
+// narrow an in-range slot index for storage in a CapRef.
+#[allow(clippy::cast_possible_truncation)]
+const fn slot_index(slot: usize) -> u32 {
+    // callers pass slot < N, and N is far below u32::MAX for any real table.
+    slot as u32
 }
 
 // a single table slot: the optional capability plus the generation counter.
@@ -158,7 +166,7 @@ impl<T, const N: usize> CapTable<T, N> {
         self.slots[slot].entry = Some(cap);
         self.len += 1;
         Ok(CapRef {
-            slot,
+            slot: slot_index(slot),
             generation: self.slots[slot].generation,
         })
     }
@@ -179,7 +187,7 @@ impl<T, const N: usize> CapTable<T, N> {
                 self.slots[slot].entry = Some(cap);
                 self.len += 1;
                 return Ok(CapRef {
-                    slot,
+                    slot: slot_index(slot),
                     generation: self.slots[slot].generation,
                 });
             }
@@ -191,9 +199,9 @@ impl<T, const N: usize> CapTable<T, N> {
     // occupied, and matching generation. the single source of validity.
     #[inline]
     fn is_valid(&self, cap_ref: CapRef) -> bool {
-        cap_ref.slot < N
-            && self.slots[cap_ref.slot].entry.is_some()
-            && self.slots[cap_ref.slot].generation == cap_ref.generation
+        cap_ref.slot() < N
+            && self.slots[cap_ref.slot()].entry.is_some()
+            && self.slots[cap_ref.slot()].generation == cap_ref.generation
     }
 
     /// Returns a shared reference to the capability named by `cap_ref`, or
@@ -201,7 +209,7 @@ impl<T, const N: usize> CapTable<T, N> {
     #[must_use]
     pub fn get(&self, cap_ref: CapRef) -> Option<&T> {
         if self.is_valid(cap_ref) {
-            self.slots[cap_ref.slot].entry.as_ref()
+            self.slots[cap_ref.slot()].entry.as_ref()
         } else {
             None
         }
@@ -212,7 +220,7 @@ impl<T, const N: usize> CapTable<T, N> {
     #[must_use]
     pub fn get_mut(&mut self, cap_ref: CapRef) -> Option<&mut T> {
         if self.is_valid(cap_ref) {
-            self.slots[cap_ref.slot].entry.as_mut()
+            self.slots[cap_ref.slot()].entry.as_mut()
         } else {
             None
         }
@@ -227,7 +235,7 @@ impl<T, const N: usize> CapTable<T, N> {
         if !self.is_valid(cap_ref) {
             return None;
         }
-        let slot = &mut self.slots[cap_ref.slot];
+        let slot = &mut self.slots[cap_ref.slot()];
         // advance the generation first so any copy of this cap_ref is invalid
         // from here on, including against a future occupant of the same slot.
         slot.generation = slot.generation.wrapping_add(1);
@@ -251,7 +259,7 @@ impl<T, const N: usize> CapTable<T, N> {
     pub fn ref_at(&self, slot: usize) -> Option<CapRef> {
         if slot < N && self.slots[slot].entry.is_some() {
             Some(CapRef {
-                slot,
+                slot: slot_index(slot),
                 generation: self.slots[slot].generation,
             })
         } else {
@@ -269,7 +277,7 @@ impl<T, const N: usize> CapTable<T, N> {
         for slot in 0..N {
             if let Some(entry) = self.slots[slot].entry.as_ref() {
                 let cap_ref = CapRef {
-                    slot,
+                    slot: slot_index(slot),
                     generation: self.slots[slot].generation,
                 };
                 f(cap_ref, entry);
@@ -429,7 +437,7 @@ mod tests {
     fn out_of_range_ref_is_rejected() {
         let mut t: CapTable<u32, 2> = CapTable::new();
         let bogus = CapRef {
-            slot: 99,
+            slot: 99u32,
             generation: 0,
         };
         assert_eq!(t.get(bogus), None);
@@ -438,7 +446,7 @@ mod tests {
         // a forged-generation ref to a real slot is also rejected.
         let real = t.insert(1).unwrap();
         let forged = CapRef {
-            slot: real.slot(),
+            slot: slot_index(real.slot()),
             generation: real.generation().wrapping_add(1),
         };
         assert_eq!(t.get(forged), None);

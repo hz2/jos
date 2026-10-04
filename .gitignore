@@ -1,8 +1,9 @@
 target
+
+# local agent material, not part of the repo for now
 .claude
 CLAUDE.md
-AGENT.md
-
+AGENTS.md
 
 # verus build leftovers dropped at the repo root
 liblib.rlib

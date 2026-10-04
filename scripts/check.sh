@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# every check jos runs, defined once. the git hooks, the claude hooks, and ci
-# all call this script.
+# every check jos runs, defined once. the git hooks, ci, and any local agent
+# hooks all call this script.
 #
 # usage: scripts/check.sh <gate> [arg]
 #   style [files]   ascii, no ai attribution, SAFETY on every unsafe

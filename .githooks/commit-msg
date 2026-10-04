@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# enforce the CLAUDE.md commit style: `type(scope): summary`, no trailing
+# enforce the project commit style: `type(scope): summary`, no trailing
 # period, ascii only, and no ai attribution anywhere in the message.
 
 set -euo pipefail

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fast, tool-free style gate shared by the git hooks and the claude hooks.
+# fast, tool-free style gate shared by the git hooks and any local agent hooks.
 # usage: scripts/check-style.sh FILE...
 # checks: ascii-only text, no ai attribution phrases, and (for .rs) every
 # `unsafe {` / `unsafe impl` has a SAFETY: comment in the comment block above.

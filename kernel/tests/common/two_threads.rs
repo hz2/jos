@@ -5,6 +5,10 @@
 //! the scheduler's `iretq` on the first timer tick that switches to it. A zeroed
 //! page at [`SHARED_ADDR`] is mapped read-write for both.
 //!
+//! Each thread also gets its own zeroed IPC buffer frame, registered in its
+//! TCB and mapped at [`A_IPC_BUFFER`] or [`B_IPC_BUFFER`]; the thread starts
+//! with that address in `rdi`.
+//!
 //! When a test needs both threads' checks to pass and either may finish last,
 //! each program ends with `lock inc qword ptr [SHARED_ADDR]` and exits with
 //! success only if the counter then reads 2; the other thread spins.
@@ -26,6 +30,10 @@ pub const B_STACK_ADDR: u64 = usermode::USER_BASE + 0x3000;
 pub const B_STACK_TOP: u64 = B_STACK_ADDR + 0x1000;
 /// User address of the zeroed data page both threads can read and write.
 pub const SHARED_ADDR: u64 = usermode::USER_BASE + 0x4000;
+/// User address of thread A's IPC buffer, passed to it in `rdi` at start.
+pub const A_IPC_BUFFER: u64 = usermode::USER_BASE + 0x5000;
+/// User address of thread B's IPC buffer, passed to it in `rdi` at start.
+pub const B_IPC_BUFFER: u64 = usermode::USER_BASE + 0x6000;
 
 /// The bounds of one ring-3 program emitted by a test's `global_asm!`.
 #[derive(Clone, Copy)]
@@ -95,6 +103,7 @@ pub unsafe fn boot(
 
     let mut frame = || frames.allocate_frame().expect("frame");
     let (code_a, stack_a, code_b, stack_b, shared) = (frame(), frame(), frame(), frame(), frame());
+    let (buffer_a, buffer_b) = (frame(), frame());
     // SAFETY: a and b bound emitted programs (this function's contract); the
     // frames were just allocated and are identity-mapped. the shared frame is
     // zeroed so the done counter starts at 0.
@@ -102,6 +111,8 @@ pub unsafe fn boot(
         load(a, code_a);
         load(b, code_b);
         core::ptr::write_bytes(shared.start_address().as_u64() as *mut u8, 0, 4096);
+        core::ptr::write_bytes(buffer_a.start_address().as_u64() as *mut u8, 0, 4096);
+        core::ptr::write_bytes(buffer_b.start_address().as_u64() as *mut u8, 0, 4096);
     }
 
     let code = PteFlags::PRESENT | PteFlags::USER;
@@ -112,6 +123,8 @@ pub unsafe fn boot(
         (B_CODE_ADDR, code_b, code),
         (B_STACK_ADDR, stack_b, data),
         (SHARED_ADDR, shared, data),
+        (A_IPC_BUFFER, buffer_a, data),
+        (B_IPC_BUFFER, buffer_b, data),
     ];
     for (addr, frame, flags) in pages {
         // SAFETY: each frame is fresh and each address is a distinct user page.
@@ -136,17 +149,20 @@ pub unsafe fn boot(
         let mut ta = Tcb::new();
         ta.kernel_stack_top = kstack_a_top;
         ta.cspace_ptr = cspace_ptr;
+        ta.ipc_buffer = buffer_a.start_address().as_u64();
         TCB_A = Some(ta);
 
         let mut tb = Tcb::new();
         tb.kernel_stack_top = kstack_b_top;
         tb.cspace_ptr = cspace_ptr;
+        tb.ipc_buffer = buffer_b.start_address().as_u64();
         // B is entered by the scheduler's iretq, so its context is pre-filled.
         tb.context.rip = B_CODE_ADDR;
         tb.context.rsp = B_STACK_TOP;
         tb.context.rflags = 0x0000_0202;
         tb.context.cs = u64::from(sel.user_code.0);
         tb.context.ss = u64::from(sel.user_data.0);
+        tb.context.rdi = B_IPC_BUFFER;
         TCB_B = Some(tb);
 
         (
@@ -169,9 +185,10 @@ pub unsafe fn boot(
     // SAFETY: pages mapped; init and init_syscall ran; switch_to installed
     // thread A's kernel stack.
     unsafe {
-        usermode::enter_user_mode(
+        usermode::enter_user_mode_with_arg(
             VirtAddr::new(usermode::USER_CODE_ADDR),
             VirtAddr::new(usermode::USER_STACK_TOP),
+            A_IPC_BUFFER,
         );
     }
 }

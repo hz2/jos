@@ -61,6 +61,7 @@ use crate::cpu_local::{
 use crate::gdt;
 use jos_core::cap_rights::Rights;
 use jos_core::cap_space::{Capability, InsertAtError, MintError};
+use jos_core::ipc_buffer::{self, IpcBuffer};
 use jos_core::untyped::ObjectType;
 
 /// The system calls jos understands.
@@ -521,10 +522,7 @@ fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
     let Some(cap_ref) = space.ref_at(slot) else {
         return IpcSyscallError::BadCap as u64;
     };
-    let message = Message {
-        label: 0,
-        words: [word, 0, 0, 0],
-    };
+    let message = compose_current(word);
     match cap_send(space, cap_ref, message) {
         Ok(()) => 0,
         Err(e) => ipc_errno(e),
@@ -547,7 +545,7 @@ fn sys_ipc_recv(cap_slot: u64) -> SyscallRet {
         return bad_cap;
     };
     match cap_recv_badged(space, cap_ref) {
-        Ok((message, badge)) => SyscallRet { rax: message.words[0], rdx: badge.0 },
+        Ok((message, badge)) => SyscallRet { rax: deliver_to(&message, current_buffer()), rdx: badge.0 },
         Err(e) => (ipc_errno(e) | IPC_ERR_FLAG).into(),
     }
 }
@@ -653,8 +651,9 @@ struct BlockedSend {
     endpoint_addr: u64,
     /// Scheduler id of the parked sender.
     thread_id: usize,
-    /// The one-word message.
-    word: u64,
+    /// The message: word 0 from the register, words 1 to 3 from the sender's
+    /// IPC buffer, captured when it parked.
+    message: Message,
     /// Badge of the sending capability, delivered to the receiver in `rdx`.
     badge: u64,
     /// The sender is in a `Call` and waits for an answer through a reply object.
@@ -752,17 +751,9 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
                     let recv_tid = recv.thread_id;
                     *entry = None;
                     drop(recvs);
-                    // write the message word into the receiver's saved rax so
-                    // when the timer resumes it, the syscall return value = word.
-                    // SAFETY: recv_tid came from register_thread; live for lifetime.
-                    unsafe {
-                        let tcb = crate::sched::thread_table_entry(recv_tid);
-                        if !tcb.is_null() {
-                            (*tcb).context.rax = word;
-                            (*tcb).context.rdx = badge;
-                        }
-                    }
-                    crate::sched::mark_ready(recv_tid);
+                    // hand the message straight to the parked receiver: its
+                    // buffer gets the words, its saved rax word 0, rdx the badge.
+                    resume_with(recv_tid, &compose_current(word), badge);
                     return 0; // send succeeded immediately
                 }
         }
@@ -783,7 +774,13 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
     {
         let mut sends = BLOCKED_SENDS.lock();
         if let Some(entry) = sends.iter_mut().find(|e| e.is_none()) {
-            *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word, badge, call: false });
+            *entry = Some(BlockedSend {
+                endpoint_addr,
+                thread_id: cur,
+                message: compose_current(word),
+                badge,
+                call: false,
+            });
         } else {
             return IpcSyscallError::WouldBlock as u64; // table full
         }
@@ -839,7 +836,7 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
             // a plain send completes now: wake the sender with success.
             resume(send.thread_id, 0, 0);
         }
-        return SyscallRet { rax: send.word, rdx: send.badge };
+        return SyscallRet { rax: deliver_to(&send.message, current_buffer()), rdx: send.badge };
     }
 
     // no sender waiting: try cap_recv in case a message was already deposited.
@@ -924,6 +921,54 @@ fn resume(thread_id: usize, rax: u64, rdx: u64) {
     crate::sched::mark_ready(thread_id);
 }
 
+/// Returns the IPC buffer registered by the scheduler thread `thread_id`, if any.
+fn thread_buffer(thread_id: usize) -> Option<*mut IpcBuffer> {
+    // SAFETY: thread_id came from register_thread, and THREAD_TABLE entries live
+    // for the kernel lifetime; a null entry is handled below.
+    let tcb = unsafe { crate::sched::thread_table_entry(thread_id) };
+    if tcb.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null entry points at a live Tcb, read on the single-CPU,
+    // interrupts-disabled syscall path.
+    unsafe { (*tcb).ipc_buffer_ptr() }
+}
+
+/// Returns the IPC buffer registered by the current thread, if any.
+fn current_buffer() -> Option<*mut IpcBuffer> {
+    // SAFETY: the per-CPU block is read on the single-CPU syscall path.
+    let tcb = unsafe { (*cpu_local::cpu_local_ptr()).current_tcb };
+    if tcb.is_null() {
+        return None;
+    }
+    // SAFETY: switch_to installed a live Tcb as current; single-CPU syscall path.
+    unsafe { (*tcb).ipc_buffer_ptr() }
+}
+
+/// Builds the message the current thread sends: `word0` from the register,
+/// words 1 to 3 from its IPC buffer (zeros if it has none).
+fn compose_current(word0: u64) -> Message {
+    let buffer = current_buffer();
+    // SAFETY: the pointer is a registered, page-aligned, identity-mapped buffer
+    // frame; the shared reference lives only for this call, on the single-CPU
+    // syscall path, so no write to the frame overlaps it.
+    ipc_buffer::compose(word0, buffer.map(|p| unsafe { &*p }))
+}
+
+/// Writes `message` into the buffer at `buffer`, if any, returning word 0.
+fn deliver_to(message: &Message, buffer: Option<*mut IpcBuffer>) -> u64 {
+    // SAFETY: as in compose_current; the exclusive reference lives only for this
+    // call, and the message was already copied out of any sender buffer.
+    ipc_buffer::deliver(message, buffer.map(|p| unsafe { &mut *p }))
+}
+
+/// Resumes a blocked thread with a delivered message: its buffer gets the
+/// words, its saved `rax` word 0, and its saved `rdx` the given value.
+fn resume_with(thread_id: usize, message: &Message, rdx: u64) {
+    let word0 = deliver_to(message, thread_buffer(thread_id));
+    resume(thread_id, word0, rdx);
+}
+
 /// Fails a thread blocked in [`Syscall::Call`] that can never be answered (its
 /// reply object was revoked), resuming it with [`IpcSyscallError::NoReply`].
 pub fn abort_call(thread_id: usize) {
@@ -953,6 +998,7 @@ fn sys_call(cap_slot: u64, word: u64) -> u64 {
         Ok(found) => found,
         Err(e) => return err(e),
     };
+    let message = compose_current(word);
     let cur = crate::sched::current_thread_id();
     if cur == usize::MAX {
         return err(IpcSyscallError::WouldBlock);
@@ -970,7 +1016,7 @@ fn sys_call(cap_slot: u64, word: u64) -> u64 {
             .reply
             .and_then(cap::reply_object)
             .is_some_and(|r| r.inner.lock().bind(cur).is_ok());
-        resume(recv.thread_id, word, badge);
+        resume_with(recv.thread_id, &message, badge);
         if !bound {
             // a plain receive took the message but cannot answer it.
             return err(IpcSyscallError::NoReply);
@@ -985,7 +1031,7 @@ fn sys_call(cap_slot: u64, word: u64) -> u64 {
         let Some(entry) = sends.iter_mut().find(|e| e.is_none()) else {
             return err(IpcSyscallError::WouldBlock);
         };
-        *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word, badge, call: true });
+        *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, message, badge, call: true });
     }
     park_current();
     0 // ignored
@@ -1012,11 +1058,11 @@ fn sys_reply(reply_slot: u64, word: u64) -> u64 {
         Ok(obj) => obj,
         Err(e) => return e as u64,
     };
-    let message = Message { label: 0, words: [word, 0, 0, 0] };
+    let message = compose_current(word);
     let answered = cap::reply_object(reply).map(|r| r.inner.lock().answer(message));
     match answered {
         Some(Ok(caller)) => {
-            resume(caller, word, 0);
+            resume_with(caller, &message, 0);
             0
         }
         _ => IpcSyscallError::NoCaller as u64,

@@ -36,12 +36,17 @@ use jos_core::endpoint;
 use jos_core::notification;
 // the verified one-shot reply state machine, by module path for the same reason.
 use jos_core::reply;
+use jos_core::ipc_buffer::IpcBuffer;
 use jos_core::placement::{place, PlaceError};
 use jos_core::untyped::{
     ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, NOTIFICATION_ALIGN,
     NOTIFICATION_SIZE, PAGE_TABLE_SIZE, REPLY_ALIGN, REPLY_SIZE, TCB_ALIGN, TCB_SIZE,
 };
 use spin::Mutex;
+
+/// End of the physical range the boot trampoline identity-maps (the first
+/// 1 GiB). Kernel objects and IPC buffer frames must live below it.
+pub const IDENTITY_MAPPED_LIMIT: u64 = 1 << 30;
 
 /// Number of capability slots in a task's capability space (single-level for now).
 pub const CSPACE_SLOTS: usize = 64;
@@ -640,6 +645,10 @@ pub struct Tcb {
     /// The thread's `CSpace` root: an [`ObjectId`] naming a [`KernelCNode`], or
     /// `None` if no capability space has been assigned yet.
     pub cspace_root: Option<ObjectId>,
+    /// Physical address of the frame this thread registered as its IPC buffer,
+    /// or zero for none. The kernel reaches the buffer through its own identity
+    /// mapping of this frame, never through a user virtual address.
+    pub ipc_buffer: u64,
     /// The thread's run state. Last of the real fields (a small type), before
     /// the padding, so it introduces no interior alignment gap.
     pub state: TcbState,
@@ -660,6 +669,7 @@ impl Tcb {
     const USED: usize = core::mem::size_of::<SavedContext>()
         + core::mem::size_of::<u64>()
         + core::mem::size_of::<Option<ObjectId>>()
+        + core::mem::size_of::<u64>()
         + core::mem::size_of::<TcbState>()
         + core::mem::size_of::<u64>()
         + core::mem::size_of::<*mut KernelCapSpace>();
@@ -676,11 +686,29 @@ impl Tcb {
             },
             vspace_root: 0,
             cspace_root: None,
+            ipc_buffer: 0,
             state: TcbState::Inactive,
             kernel_stack_top: 0,
             cspace_ptr: core::ptr::null_mut(),
             _pad: [0; Self::PAD],
         }
+    }
+}
+
+impl Tcb {
+    /// Returns a pointer to this thread's IPC buffer through the kernel's
+    /// identity mapping, or `None` if no buffer is registered or the address is
+    /// not a page-aligned frame inside the identity-mapped range.
+    #[must_use]
+    pub fn ipc_buffer_ptr(&self) -> Option<*mut IpcBuffer> {
+        let phys = self.ipc_buffer;
+        if phys == 0 || !phys.is_multiple_of(4096) || phys >= IDENTITY_MAPPED_LIMIT {
+            return None;
+        }
+        let addr = usize::try_from(phys).ok()?;
+        // the frame is reached like any other physical memory the kernel owns:
+        // through the boot identity map, where virtual equals physical.
+        Some(core::ptr::with_exposed_provenance_mut::<IpcBuffer>(addr))
     }
 }
 

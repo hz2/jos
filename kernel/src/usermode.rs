@@ -172,11 +172,9 @@ where
 /// the ring-3 code segment into `CS` (lowering `CPL` to 3), the user stack into
 /// `RSP`, and jumps to `entry`.
 ///
-/// Interrupts are left masked in the entered context (`RFLAGS` has only the
-/// reserved bit set, `IF` clear): this first bring-up is deterministic, with a
-/// software trap as the sole way back into the kernel. Enabling interrupts in
-/// ring 3 (so the timer can preempt user code) comes with the scheduler's
-/// userspace thread support.
+/// Interrupts are enabled in the entered context (`RFLAGS.IF` set), so the timer
+/// can preempt user code. Equivalent to [`enter_user_mode_with_arg`] with an
+/// argument of 0.
 ///
 /// # Safety
 ///
@@ -186,6 +184,17 @@ where
 /// run (so the user segments and the TSS `rsp0` exist). After this call the cpu
 /// is in ring 3; there is no return.
 pub unsafe fn enter_user_mode(entry: VirtAddr, stack_top: VirtAddr) -> ! {
+    // SAFETY: forwarded unchanged; this function has the same contract.
+    unsafe { enter_user_mode_with_arg(entry, stack_top, 0) }
+}
+
+/// Like [`enter_user_mode`], but starts user code with `arg` in `rdi`, the
+/// first-argument register, for example the address of the thread's IPC buffer.
+///
+/// # Safety
+///
+/// The same contract as [`enter_user_mode`].
+pub unsafe fn enter_user_mode_with_arg(entry: VirtAddr, stack_top: VirtAddr, arg: u64) -> ! {
     use x86_64::instructions::segmentation::{DS, ES, Segment};
 
     let sel = gdt::selectors();
@@ -231,6 +240,7 @@ pub unsafe fn enter_user_mode(entry: VirtAddr, stack_top: VirtAddr) -> ! {
             rflags = in(reg) rflags,
             cs = in(reg) user_cs,
             rip = in(reg) entry.as_u64(),
+            in("rdi") arg,
             options(noreturn),
         );
     }

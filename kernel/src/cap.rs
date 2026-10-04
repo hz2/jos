@@ -34,10 +34,12 @@ use jos_core::endpoint;
 // (`notification::Notification`) so it does not collide with this module's own
 // `Notification` kernel object type.
 use jos_core::notification;
+// the verified one-shot reply state machine, by module path for the same reason.
+use jos_core::reply;
 use jos_core::placement::{place, PlaceError};
 use jos_core::untyped::{
     ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, NOTIFICATION_ALIGN,
-    NOTIFICATION_SIZE, PAGE_TABLE_SIZE, TCB_ALIGN, TCB_SIZE,
+    NOTIFICATION_SIZE, PAGE_TABLE_SIZE, REPLY_ALIGN, REPLY_SIZE, TCB_ALIGN, TCB_SIZE,
 };
 use spin::Mutex;
 
@@ -70,6 +72,8 @@ pub enum ObjectKind {
     Untyped,
     /// An asynchronous notification (a coalescing signal word).
     Notification,
+    /// A one-shot reply object: binds to a caller, answered exactly once.
+    Reply,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -133,6 +137,23 @@ impl ObjectId {
         // it is live for the kernel's lifetime (static untyped region). Per this
         // function's contract the caller guarantees no aliasing live &mut and the
         // kind is Notification.
+        unsafe { &*ptr }
+    }
+
+    /// Returns a shared reference to the [`Reply`] this handle names.
+    ///
+    /// # Safety
+    ///
+    /// As [`as_notification`](Self::as_notification): `self.kind` must be
+    /// `ObjectKind::Reply`, the owning untyped region must be live, and the
+    /// caller must be in a single-CPU, interrupts-disabled context.
+    unsafe fn as_reply(self) -> &'static Reply {
+        debug_assert_eq!(self.kind, ObjectKind::Reply);
+        let ptr = core::ptr::with_exposed_provenance::<Reply>(self.addr);
+        // SAFETY: the address was captured in retype (kind Reply) from a pointer
+        // derived from the region base where a Reply was placed; it is live for
+        // the kernel's lifetime. the caller guarantees the kind and that no
+        // aliasing live &mut exists.
         unsafe { &*ptr }
     }
 
@@ -389,6 +410,119 @@ impl Default for Notification {
 
 const _: () = assert!(core::mem::size_of::<Notification>() == NOTIFICATION_SIZE);
 const _: () = assert!(core::mem::align_of::<Notification>() == NOTIFICATION_ALIGN);
+
+// --------------------------------------------------------------------------
+// Reply object
+// --------------------------------------------------------------------------
+
+/// The mutable state of a reply object, behind its lock.
+///
+/// The verified [`reply::Reply`] state machine decides whether a bind or an
+/// answer is allowed (one answer per bind); this struct adds only the thread id
+/// of the bound caller, kept `Some` exactly when the model is waiting, so the
+/// model decides delivery and this struct decides whom to resume.
+#[derive(Debug)]
+pub struct ReplyInner {
+    /// The verified one-shot reply state.
+    state: reply::Reply,
+    /// Scheduler id of the bound caller; `Some` exactly when `state` is waiting.
+    caller: Option<usize>,
+}
+
+impl ReplyInner {
+    /// Returns `true` if no caller is bound and no answer is pending.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.state.is_idle()
+    }
+
+    /// Binds `caller` (a scheduler thread id) as the thread awaiting an answer.
+    ///
+    /// # Errors
+    ///
+    /// [`reply::ReplyError::Busy`] if a caller is already bound.
+    pub fn bind(&mut self, caller: usize) -> Result<(), reply::ReplyError> {
+        self.state.bind()?;
+        self.caller = Some(caller);
+        Ok(())
+    }
+
+    /// Answers the bound caller with `message`, returning its thread id so the
+    /// kernel can resume it. The message passes through the model (reply, then
+    /// take), so the one-shot rule enforced is the verified one.
+    ///
+    /// # Errors
+    ///
+    /// [`reply::ReplyError::NotWaiting`] if no caller is bound.
+    pub fn answer(&mut self, message: Message) -> Result<usize, reply::ReplyError> {
+        self.state.reply(message)?;
+        let _ = self.state.take();
+        self.caller.take().ok_or(reply::ReplyError::NotWaiting)
+    }
+
+    /// Abandons the binding (the reply capability was revoked), returning the
+    /// caller that was waiting, if any, so it can be failed instead of hanging.
+    pub fn cancel(&mut self) -> Option<usize> {
+        self.state.cancel();
+        self.caller.take()
+    }
+}
+
+/// A one-shot reply object, sized and aligned to match [`ObjectType::Reply`].
+///
+/// A server names one when it receives with `RecvReply`; a `Call` binds it to
+/// the calling thread, and the server answers through it exactly once with
+/// `Reply`. The right to answer is the capability, not knowledge of who called.
+/// Same lock discipline as [`Notification`]: task (syscall) context only.
+#[repr(C, align(64))]
+pub struct Reply {
+    /// The reply state and bound caller.
+    pub inner: Mutex<ReplyInner>,
+    /// Pad out to the full REPLY_SIZE (asserted below).
+    _pad: [u8; Reply::PAD],
+}
+
+impl Reply {
+    // bytes of padding so size_of::<Reply>() == REPLY_SIZE.
+    const PAD: usize = REPLY_SIZE - core::mem::size_of::<Mutex<ReplyInner>>();
+
+    /// Creates a fresh idle reply object.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: Mutex::new(ReplyInner {
+                state: reply::Reply::new(),
+                caller: None,
+            }),
+            _pad: [0; Self::PAD],
+        }
+    }
+}
+
+impl Default for Reply {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<Reply>() == REPLY_SIZE);
+const _: () = assert!(core::mem::align_of::<Reply>() == REPLY_ALIGN);
+
+/// Returns the [`Reply`] object `obj` names, or `None` if it is not a reply.
+///
+/// The kind check makes this safe to call with any handle; it must run in the
+/// single-CPU, interrupts-disabled syscall or revoke path like every other
+/// object access.
+#[must_use]
+pub fn reply_object(obj: ObjectId) -> Option<&'static Reply> {
+    if obj.kind() != ObjectKind::Reply {
+        return None;
+    }
+    // SAFETY: the kind is Reply (checked above); the object lives in a static
+    // untyped region for the kernel's lifetime; callers run single-CPU with
+    // interrupts disabled, so no aliasing live &mut exists.
+    Some(unsafe { obj.as_reply() })
+}
 
 // --------------------------------------------------------------------------
 // PageTable object
@@ -696,6 +830,7 @@ impl UntypedRegion {
         let carved = match ty {
             ObjectType::Endpoint => self.retype_endpoint(),
             ObjectType::Notification => self.retype_notification(),
+            ObjectType::Reply => self.retype_reply(),
             ObjectType::PageTable => self.retype_page_table(),
             ObjectType::Tcb => self.retype_tcb(),
             ObjectType::CNode { size_bits } if size_bits == KERNEL_CNODE_SIZE_BITS => {
@@ -727,6 +862,12 @@ impl UntypedRegion {
             Notification::new(),
             ObjectKind::Notification,
         )
+    }
+
+    /// Carves a fresh idle [`Reply`] out of this region and returns its handle.
+    /// Returns `None` if the region has no room for another one.
+    pub fn retype_reply(&mut self) -> Option<ObjectId> {
+        self.retype(ObjectType::Reply, Reply::new(), ObjectKind::Reply)
     }
 
     /// Carves a fresh zeroed [`PageTable`] out of this region and returns its
@@ -999,7 +1140,8 @@ pub fn cap_recv_badged(
     Ok((message, badge))
 }
 
-// the badge stamped on the capability at cap_ref, or none if it is stale.
+/// Returns the badge stamped on the capability at `cap_ref`, or
+/// [`Badge::NONE`] if the reference is stale.
 fn cap_badge(space: &KernelCapSpace, cap_ref: CapRef) -> Badge {
     space.lookup(cap_ref).map_or(Badge::NONE, |cap| cap.badge)
 }
@@ -1389,15 +1531,17 @@ pub fn wait(space: &KernelCapSpace, cap_ref: CapRef) -> CapWait<'_> {
 /// the marked set is collected (via `for_each_in_subtree`) before `revoke`
 /// clears the slots, the endpoint objects are still reachable to wake.
 pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
-    // mark phase: collect the endpoint and notification objects in the revoke
-    // subtree while the parent links are still intact. both own a parked waiter
-    // that must be woken so a blocked future observes the cancellation. fixed-
+    // mark phase: collect the endpoint, notification, and reply objects in the
+    // revoke subtree while the parent links are still intact. each may hold a
+    // blocked waiter that must be woken so it observes the cancellation. fixed-
     // size scratch sized to the space (no heap); CSPACE_SLOTS bounds the subtree.
     let mut blockers: [Option<ObjectId>; CSPACE_SLOTS] = [None; CSPACE_SLOTS];
     let mut count = 0;
     space.for_each_in_subtree(cap_ref, |_r, cap| {
         let kind = cap.object.kind();
-        if matches!(kind, ObjectKind::Endpoint | ObjectKind::Notification) && count < CSPACE_SLOTS {
+        if matches!(kind, ObjectKind::Endpoint | ObjectKind::Notification | ObjectKind::Reply)
+            && count < CSPACE_SLOTS
+        {
             blockers[count] = Some(cap.object);
             count += 1;
         }
@@ -1441,7 +1585,15 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                     waker.wake();
                 }
             }
-            // only Endpoint / Notification are collected in the mark phase.
+            ObjectKind::Reply => {
+                // a caller blocked on a revoked reply could never be answered:
+                // fail its call instead of leaving it parked forever.
+                let caller = reply_object(obj).and_then(|r| r.inner.lock().cancel());
+                if let Some(tid) = caller {
+                    crate::syscall::abort_call(tid);
+                }
+            }
+            // only Endpoint, Notification, and Reply are collected above.
             _ => {}
         }
     }

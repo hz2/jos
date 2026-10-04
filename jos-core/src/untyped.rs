@@ -40,6 +40,7 @@
 //! | `PageTable` | 4096 | 4096 |
 //! | `Tcb` | 512 | 64 |
 //! | `Notification` | 64 | 64 |
+//! | `Reply` | 128 | 64 |
 //!
 //! `CNode { size_bits }` uses byte-size semantics (`size = 2^size_bits` bytes),
 //! like `Untyped`: `size_bits` is the log2 of the byte size, not a slot count.
@@ -109,6 +110,16 @@ pub const NOTIFICATION_SIZE: usize = 64;
 /// Alignment requirement of a `Notification` object in bytes (one cache line),
 /// so concurrent signalling of distinct notifications does not falsely share.
 pub const NOTIFICATION_ALIGN: usize = 64;
+
+/// Size of one `Reply` object in bytes.
+///
+/// 128 bytes: the verified reply state can hold a whole pending `Message`
+/// (label plus four words), and the kernel adds a lock and the bound caller's
+/// thread id, which together outgrow one 64-byte line.
+pub const REPLY_SIZE: usize = 128;
+
+/// Alignment requirement of a `Reply` object in bytes (one cache line).
+pub const REPLY_ALIGN: usize = 64;
 
 /// Size and alignment of the kernel's `CNode` (capability-node) object in
 /// bytes.
@@ -190,6 +201,13 @@ pub enum ObjectType {
     /// aligned. The async counterpart to an [`Endpoint`](ObjectType::Endpoint):
     /// holds the verified notification state plus the parked waiter's waker.
     Notification,
+
+    /// A one-shot reply object for `Call` IPC.
+    ///
+    /// Fixed size: [`REPLY_SIZE`] bytes, [`REPLY_ALIGN`]-byte aligned. A server
+    /// names one when it receives; a `Call` binds it to the caller, and the
+    /// server answers through it exactly once (the seL4 MCS reply object).
+    Reply,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +254,7 @@ pub const fn object_layout(ty: ObjectType) -> (usize, usize) {
         ObjectType::PageTable => (PAGE_TABLE_SIZE, PAGE_TABLE_SIZE),
         ObjectType::Tcb => (TCB_SIZE, TCB_ALIGN),
         ObjectType::Notification => (NOTIFICATION_SIZE, NOTIFICATION_ALIGN),
+        ObjectType::Reply => (REPLY_SIZE, REPLY_ALIGN),
     }
 }
 
@@ -653,13 +672,14 @@ mod kani_proofs {
         let size_bits: u8 = kani::any();
         // keep size_bits small: 2^12 = 4096 bytes max, well inside MAX_REGION.
         kani::assume(size_bits <= 12);
-        match tag % 6 {
+        match tag % 7 {
             0 => ObjectType::Endpoint,
             1 => ObjectType::CNode { size_bits },
             2 => ObjectType::Untyped { size_bits },
             3 => ObjectType::PageTable,
             4 => ObjectType::Tcb,
-            _ => ObjectType::Notification,
+            5 => ObjectType::Notification,
+            _ => ObjectType::Reply,
         }
     }
 

@@ -50,7 +50,8 @@ use x86_64::registers::model_specific::{Efer, EferFlags, GsBase, KernelGsBase, L
 use x86_64::registers::rflags::RFlags;
 
 use crate::cap::{
-    Badge, cap_recv_badged, cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectKind, RetypeError,
+    self, Badge, cap_recv_badged, cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectId,
+    ObjectKind, RetypeError,
 };
 use crate::cpu_local::{
     self, OFF_KERNEL_RSP, OFF_NEED_YIELD, OFF_SAVED_USER_RFLAGS, OFF_SAVED_USER_RBP,
@@ -59,7 +60,7 @@ use crate::cpu_local::{
 };
 use crate::gdt;
 use jos_core::cap_rights::Rights;
-use jos_core::cap_space::{InsertAtError, MintError};
+use jos_core::cap_space::{Capability, InsertAtError, MintError};
 use jos_core::untyped::ObjectType;
 
 /// The system calls jos understands.
@@ -115,6 +116,21 @@ pub enum Syscall {
     /// server can hand each client a distinguishable endpoint capability.
     /// Errors are [`MintSyscallError`] codes with [`IPC_ERR_FLAG`] set.
     Mint = 8,
+    /// `call(cap_slot, word) -> reply_word | (errno | ERR_FLAG)`. Sends `word`
+    /// through the endpoint (requires `WRITE`) and blocks until the server
+    /// answers with [`Reply`](Syscall::Reply). The server must receive with
+    /// [`RecvReply`](Syscall::RecvReply); a plain receive cannot answer, so the
+    /// call fails with [`IpcSyscallError::NoReply`].
+    Call = 9,
+    /// `recv_reply(ep_slot, reply_slot) -> word | (errno | ERR_FLAG)`, badge in
+    /// `rdx`. A blocking receive that names an idle reply object (requires
+    /// `WRITE` on it): if the message came from a [`Call`](Syscall::Call), the
+    /// reply object is bound to the caller.
+    RecvReply = 10,
+    /// `reply(reply_slot, word) -> 0 | errno`. Answers the caller bound to the
+    /// reply object with `word` and returns the object to idle. One answer per
+    /// call: a second reply fails with [`IpcSyscallError::NoCaller`].
+    Reply = 11,
 }
 
 impl Syscall {
@@ -130,6 +146,9 @@ impl Syscall {
             6 => Some(Self::IpcSendBlocking),
             7 => Some(Self::IpcRecvBlocking),
             8 => Some(Self::Mint),
+            9 => Some(Self::Call),
+            10 => Some(Self::RecvReply),
+            11 => Some(Self::Reply),
             _ => None,
         }
     }
@@ -154,6 +173,15 @@ pub enum IpcSyscallError {
     NotEndpoint = 3,
     /// `send` to a full endpoint, or `recv` from an empty one (non-blocking).
     WouldBlock = 4,
+    /// The reply slot does not name a reply object.
+    NotReply = 5,
+    /// `recv_reply` named a reply object that is already bound to a caller.
+    ReplyBusy = 6,
+    /// A `call` was received by a plain receive, or its reply object was
+    /// revoked, so it can never be answered.
+    NoReply = 7,
+    /// `reply` named a reply object with no caller waiting.
+    NoCaller = 8,
 }
 
 /// Bit OR-ed into an [`Syscall::IpcRecv`] return value to mark it an error
@@ -349,10 +377,13 @@ pub fn dispatch_for_test(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     dispatch_syscall(nr, arg0, arg1, arg2).rax
 }
 
-// the two return registers of a syscall. sysv returns a two-u64 repr(C) struct
-// in rax:rdx, so the entry stub hands both back with no extra asm.
+/// The two return registers of a syscall.
+///
+/// The System V ABI returns a two-`u64` `repr(C)` struct in `rax:rdx`, so the
+/// entry stub hands both back to user mode with no extra assembly.
 #[repr(C)]
 struct SyscallRet {
+    /// Primary result, or an error code.
     rax: u64,
     // secondary result: the sender badge on a receive, else 0.
     rdx: u64,
@@ -404,6 +435,12 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::IpcRecvBlocking) => sys_ipc_recv_blocking(arg0),
         // mint(src_slot = arg0, rights = arg1, badge = arg2) -> new slot.
         Some(Syscall::Mint) => sys_mint(arg0, arg1, arg2).into(),
+        // call(cap_slot = arg0, word = arg1) -> reply word.
+        Some(Syscall::Call) => sys_call(arg0, arg1).into(),
+        // recv_reply(ep_slot = arg0, reply_slot = arg1) -> word, badge in rdx.
+        Some(Syscall::RecvReply) => sys_recv_reply(arg0, arg1),
+        // reply(reply_slot = arg0, word = arg1) -> 0 | errno.
+        Some(Syscall::Reply) => sys_reply(arg0, arg1).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -612,17 +649,27 @@ const MAX_THREADS: usize = crate::sched::MAX_THREADS;
 // a parked thread waiting to send on a specific endpoint.
 #[derive(Clone, Copy)]
 struct BlockedSend {
-    endpoint_addr: u64, // endpoint identity (phys_addr of the ObjectId)
+    /// Endpoint identity (the `phys_addr` of its `ObjectId`).
+    endpoint_addr: u64,
+    /// Scheduler id of the parked sender.
     thread_id: usize,
+    /// The one-word message.
     word: u64,
-    badge: u64, // badge of the sending capability, delivered in rdx
+    /// Badge of the sending capability, delivered to the receiver in `rdx`.
+    badge: u64,
+    /// The sender is in a `Call` and waits for an answer through a reply object.
+    call: bool,
 }
 
 // a parked thread waiting to receive on a specific endpoint.
 #[derive(Clone, Copy)]
 struct BlockedRecv {
+    /// Endpoint identity (the `phys_addr` of its `ObjectId`).
     endpoint_addr: u64,
+    /// Scheduler id of the parked receiver.
     thread_id: usize,
+    /// For `RecvReply`: the reply object a `Call` binds to its caller.
+    reply: Option<ObjectId>,
 }
 
 static BLOCKED_SENDS: Mutex<[Option<BlockedSend>; MAX_THREADS]> =
@@ -736,7 +783,7 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
     {
         let mut sends = BLOCKED_SENDS.lock();
         if let Some(entry) = sends.iter_mut().find(|e| e.is_none()) {
-            *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word, badge });
+            *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word, badge, call: false });
         } else {
             return IpcSyscallError::WouldBlock as u64; // table full
         }
@@ -750,57 +797,53 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
     0 // ignored: the stub yields instead of sysretq'ing
 }
 
-// ipc_recv_blocking: try to rendezvous with a waiting sender; if none is
-// present, park this thread in the BLOCKED_RECVS table and yield.
+/// Blocking receive with no reply object; see [`recv_blocking`].
 fn sys_ipc_recv_blocking(cap_slot: u64) -> SyscallRet {
-    let Some(space) = current_cspace() else {
-        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
+    recv_blocking(cap_slot, None)
+}
+
+/// The shared blocking receive behind [`Syscall::IpcRecvBlocking`] and
+/// [`Syscall::RecvReply`].
+///
+/// Rendezvous with a sender already parked on the endpoint, or take a message
+/// already deposited; otherwise park this thread in `BLOCKED_RECVS` and yield.
+/// `reply` is the reply object a `RecvReply` named: a `Call` that meets it binds
+/// it to the caller, and a `Call` that meets a plain receive fails with
+/// [`IpcSyscallError::NoReply`] rather than waiting forever.
+fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
+    let err = |e: IpcSyscallError| SyscallRet::from(e as u64 | IPC_ERR_FLAG);
+    let (endpoint_addr, _) = match resolve_endpoint_slot(cap_slot, Rights::READ) {
+        Ok(found) => found,
+        Err(e) => return err(e),
     };
-    let Ok(slot) = usize::try_from(cap_slot) else {
-        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
-    };
-    let Some(cap_ref) = space.ref_at(slot) else {
-        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
-    };
-    let Some(cap) = space.lookup(cap_ref) else {
-        return (IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG).into();
-    };
-    if cap.object.kind() != ObjectKind::Endpoint {
-        return (IpcSyscallError::NotEndpoint as u64 | IPC_ERR_FLAG).into();
-    }
-    if !cap.rights.contains(Rights::READ) {
-        return (IpcSyscallError::Denied as u64 | IPC_ERR_FLAG).into();
-    }
-    let endpoint_addr = cap.object.phys_addr();
 
     // check for a waiting sender.
-    {
+    let waiting = {
         let mut sends = BLOCKED_SENDS.lock();
-        for entry in sends.iter_mut() {
-            if let Some(send) = entry
-                && send.endpoint_addr == endpoint_addr {
-                    let word = send.word;
-                    let badge = send.badge;
-                    let send_tid = send.thread_id;
-                    *entry = None;
-                    drop(sends);
-                    // wake the sender (it returns 0 = success from the send).
-                    // SAFETY: send_tid came from register_thread; TCB lives for the
-                    // kernel lifetime; single-CPU, interrupts disabled on syscall path.
-                    unsafe {
-                        let tcb = crate::sched::thread_table_entry(send_tid);
-                        if !tcb.is_null() {
-                            (*tcb).context.rax = 0;
-                        }
-                    }
-                    crate::sched::mark_ready(send_tid);
-                    // hand the word and the sender badge to this receiver immediately.
-                    return SyscallRet { rax: word, rdx: badge };
-                }
+        sends
+            .iter_mut()
+            .find(|e| e.is_some_and(|s| s.endpoint_addr == endpoint_addr))
+            .and_then(Option::take)
+    };
+    if let Some(send) = waiting {
+        if send.call {
+            // the caller stays parked until a Reply answers it. with no reply
+            // object it could never be answered, so fail its call instead.
+            let bound = reply
+                .and_then(cap::reply_object)
+                .is_some_and(|r| r.inner.lock().bind(send.thread_id).is_ok());
+            if !bound {
+                abort_call(send.thread_id);
+            }
+        } else {
+            // a plain send completes now: wake the sender with success.
+            resume(send.thread_id, 0, 0);
         }
+        return SyscallRet { rax: send.word, rdx: send.badge };
     }
 
     // no sender waiting: try cap_recv in case a message was already deposited.
+    // only plain sends deposit; a Call always waits in BLOCKED_SENDS.
     let nb = sys_ipc_recv(cap_slot);
     if nb.rax != (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG) {
         return nb;
@@ -809,31 +852,181 @@ fn sys_ipc_recv_blocking(cap_slot: u64) -> SyscallRet {
     // park ourselves.
     let cur = crate::sched::current_thread_id();
     if cur == usize::MAX {
-        return (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG).into();
+        return err(IpcSyscallError::WouldBlock);
     }
     {
         let mut recvs = BLOCKED_RECVS.lock();
-        if let Some(entry) = recvs.iter_mut().find(|e| e.is_none()) {
-            *entry = Some(BlockedRecv { endpoint_addr, thread_id: cur });
-        } else {
-            return (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG).into();
+        let Some(entry) = recvs.iter_mut().find(|e| e.is_none()) else {
+            return err(IpcSyscallError::WouldBlock);
+        };
+        *entry = Some(BlockedRecv { endpoint_addr, thread_id: cur, reply });
+    }
+    // the sender overwrites rax/rdx with the word and badge before readying us.
+    park_current();
+    0.into() // ignored: the stub yields instead of sysretq'ing
+}
+
+/// Resolves `cap_slot` in the current `CSpace` to an endpoint the capability
+/// grants `right` on, returning the endpoint identity and the capability's badge.
+///
+/// # Errors
+///
+/// [`IpcSyscallError::BadCap`], [`NotEndpoint`](IpcSyscallError::NotEndpoint),
+/// or [`Denied`](IpcSyscallError::Denied).
+fn resolve_endpoint_slot(cap_slot: u64, right: Rights) -> Result<(u64, u64), IpcSyscallError> {
+    let cap = current_cap(cap_slot).ok_or(IpcSyscallError::BadCap)?;
+    if cap.object.kind() != ObjectKind::Endpoint {
+        return Err(IpcSyscallError::NotEndpoint);
+    }
+    if !cap.rights.contains(right) {
+        return Err(IpcSyscallError::Denied);
+    }
+    Ok((cap.object.phys_addr(), cap.badge.0))
+}
+
+/// Resolves `cap_slot` to a reply object the capability grants `WRITE` on.
+///
+/// # Errors
+///
+/// [`IpcSyscallError::BadCap`], [`NotReply`](IpcSyscallError::NotReply), or
+/// [`Denied`](IpcSyscallError::Denied).
+fn resolve_reply_slot(cap_slot: u64) -> Result<ObjectId, IpcSyscallError> {
+    let cap = current_cap(cap_slot).ok_or(IpcSyscallError::BadCap)?;
+    if cap.object.kind() != ObjectKind::Reply {
+        return Err(IpcSyscallError::NotReply);
+    }
+    if !cap.rights.contains(Rights::WRITE) {
+        return Err(IpcSyscallError::Denied);
+    }
+    Ok(cap.object)
+}
+
+/// Returns a copy of the live capability at `cap_slot` of the current `CSpace`.
+fn current_cap(cap_slot: u64) -> Option<Capability<ObjectId>> {
+    let space = current_cspace()?;
+    let cap_ref = space.ref_at(usize::try_from(cap_slot).ok()?)?;
+    space.lookup(cap_ref).copied()
+}
+
+/// Makes a blocked thread ready, resuming it with `rax` and `rdx` as its
+/// syscall return registers.
+fn resume(thread_id: usize, rax: u64, rdx: u64) {
+    // SAFETY: thread_id came from register_thread, and THREAD_TABLE entries
+    // live for the kernel lifetime; single-CPU with interrupts disabled on the
+    // syscall and revoke paths, so nothing else touches the saved context.
+    unsafe {
+        let tcb = crate::sched::thread_table_entry(thread_id);
+        if !tcb.is_null() {
+            (*tcb).context.rax = rax;
+            (*tcb).context.rdx = rdx;
         }
     }
-    // rax = 0 initially; the sender overwrites it with the message word before
-    // re-enqueueing us, so the resumed thread sees the correct return value.
+    crate::sched::mark_ready(thread_id);
+}
+
+/// Fails a thread blocked in [`Syscall::Call`] that can never be answered (its
+/// reply object was revoked), resuming it with [`IpcSyscallError::NoReply`].
+pub fn abort_call(thread_id: usize) {
+    resume(thread_id, IpcSyscallError::NoReply as u64 | IPC_ERR_FLAG, 0);
+}
+
+/// Parks the current thread: saves its user context for a later [`resume`] and
+/// tells the syscall stub to yield instead of returning to user mode.
+fn park_current() {
     save_blocking_context(0);
     // SAFETY: ring-0, single-CPU; need_yield is read by the syscall stub after
     // dispatch_syscall returns and before the sysretq decision.
     unsafe {
         (*cpu_local::cpu_local_ptr()).need_yield = 1;
     }
-    0.into() // ignored
 }
 
-// invoke: a generic capability invocation routed by the named object's kind.
-// today only Endpoint methods (Send/Recv) are defined; they reuse the IPC
-// primitives, so SYS_INVOKE(Endpoint, Send/Recv) is equivalent to the dedicated
-// IPC syscalls, proving the generic dispatch path.
+/// Implements [`Syscall::Call`]: sends `word` and blocks until a server answers
+/// through a reply object.
+///
+/// If a server is already parked in `RecvReply`, the word is handed over
+/// directly and its reply object is bound to the caller; otherwise the caller
+/// parks as a call-flagged sender for the next receive to find.
+fn sys_call(cap_slot: u64, word: u64) -> u64 {
+    let err = |e: IpcSyscallError| e as u64 | IPC_ERR_FLAG;
+    let (endpoint_addr, badge) = match resolve_endpoint_slot(cap_slot, Rights::WRITE) {
+        Ok(found) => found,
+        Err(e) => return err(e),
+    };
+    let cur = crate::sched::current_thread_id();
+    if cur == usize::MAX {
+        return err(IpcSyscallError::WouldBlock);
+    }
+
+    let waiting = {
+        let mut recvs = BLOCKED_RECVS.lock();
+        recvs
+            .iter_mut()
+            .find(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
+            .and_then(Option::take)
+    };
+    if let Some(recv) = waiting {
+        let bound = recv
+            .reply
+            .and_then(cap::reply_object)
+            .is_some_and(|r| r.inner.lock().bind(cur).is_ok());
+        resume(recv.thread_id, word, badge);
+        if !bound {
+            // a plain receive took the message but cannot answer it.
+            return err(IpcSyscallError::NoReply);
+        }
+        // the Reply syscall overwrites our rax with the answer.
+        park_current();
+        return 0; // ignored: the stub yields instead of sysretq'ing
+    }
+
+    {
+        let mut sends = BLOCKED_SENDS.lock();
+        let Some(entry) = sends.iter_mut().find(|e| e.is_none()) else {
+            return err(IpcSyscallError::WouldBlock);
+        };
+        *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, word, badge, call: true });
+    }
+    park_current();
+    0 // ignored
+}
+
+/// Implements [`Syscall::RecvReply`]: a blocking receive that names an idle reply
+/// object, so a `Call` that arrives can be answered later.
+fn sys_recv_reply(ep_slot: u64, reply_slot: u64) -> SyscallRet {
+    let err = |e: IpcSyscallError| SyscallRet::from(e as u64 | IPC_ERR_FLAG);
+    let reply = match resolve_reply_slot(reply_slot) {
+        Ok(obj) => obj,
+        Err(e) => return err(e),
+    };
+    if !cap::reply_object(reply).is_some_and(|r| r.inner.lock().is_idle()) {
+        return err(IpcSyscallError::ReplyBusy);
+    }
+    recv_blocking(ep_slot, Some(reply))
+}
+
+/// Implements [`Syscall::Reply`]: answers the caller bound to the reply object,
+/// exactly once.
+fn sys_reply(reply_slot: u64, word: u64) -> u64 {
+    let reply = match resolve_reply_slot(reply_slot) {
+        Ok(obj) => obj,
+        Err(e) => return e as u64,
+    };
+    let message = Message { label: 0, words: [word, 0, 0, 0] };
+    let answered = cap::reply_object(reply).map(|r| r.inner.lock().answer(message));
+    match answered {
+        Some(Ok(caller)) => {
+            resume(caller, word, 0);
+            0
+        }
+        _ => IpcSyscallError::NoCaller as u64,
+    }
+}
+
+/// Invoke: a generic capability invocation routed by the named object's kind.
+/// Today only Endpoint methods (Send/Recv) are defined; they reuse the IPC
+/// primitives, so SYS_INVOKE(Endpoint, Send/Recv) is equivalent to the dedicated
+/// IPC syscalls, proving the generic dispatch path.
 fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
     // endpoint method labels.
     const ENDPOINT_SEND: u64 = 0;

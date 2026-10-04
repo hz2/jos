@@ -47,6 +47,24 @@ harness = false
 name = "badged_ipc"
 harness = false
 
+# call_reply_* exit qemu from ring 3; both share tests/common/call_reply.rs.
+[[test]]
+name = "call_reply_server_first"
+harness = false
+
+[[test]]
+name = "call_reply_client_first"
+harness = false
+
+# call_no_reply_* share tests/common/call_no_reply.rs.
+[[test]]
+name = "call_no_reply_server_first"
+harness = false
+
+[[test]]
+name = "call_no_reply_client_first"
+harness = false
+
 # retype_invoke drops to ring 3 and exits qemu from inside the user program
 # (after retype/invoke syscalls), so it likewise runs without the framework.
 [[test]]

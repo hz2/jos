@@ -17,13 +17,13 @@ use core::panic::PanicInfo;
 use jos::serial_print;
 use jos_core::cap_rights::Rights;
 
-#[path = "two_threads.rs"]
-mod two_threads;
-use two_threads::Program;
+#[path = "threads.rs"]
+mod threads;
+use threads::Program;
 
 // numeric labels avoid symbol clashes; backward refs avoid 0/1 (intel syntax
 // would read `1b` as a binary literal). the tail after label 5 is the shared
-// done counter at two_threads::SHARED_ADDR.
+// done counter at threads::SHARED_ADDR.
 core::arch::global_asm!(
     ".pushsection .rodata.call_no_reply_progs, \"a\"",
     "call_no_reply_server_start:",
@@ -87,7 +87,7 @@ unsafe extern "C" {
 }
 
 // the asm hard-codes the shared page address; keep it in step with the harness.
-const _: () = assert!(two_threads::SHARED_ADDR == 0x2000_0000_4000);
+const _: () = assert!(threads::SHARED_ADDR == 0x2000_0000_4000);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
@@ -106,7 +106,7 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     // SAFETY: called once from kernel_main with the boot info pointer; both
     // programs are bounded by labels in the global_asm above.
     unsafe {
-        two_threads::boot(info_ptr, a, b, |untyped, cspace| {
+        threads::boot(info_ptr, &[a, b], |untyped, cspace| {
             let endpoint = untyped.retype_endpoint().expect("endpoint");
             cspace.insert_at(0, endpoint, Rights::all()).expect("endpoint cap");
         })

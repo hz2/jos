@@ -26,9 +26,9 @@ use jos::serial_print;
 use jos_core::cap_rights::Rights;
 use jos_core::notification::Badge;
 
-#[path = "two_threads.rs"]
-mod two_threads;
-use two_threads::Program;
+#[path = "threads.rs"]
+mod threads;
+use threads::Program;
 
 // numeric labels avoid symbol clashes; backward refs avoid 0/1 (intel syntax
 // would read `1b` as a binary literal).
@@ -163,7 +163,7 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     // SAFETY: called once from kernel_main with the boot info pointer; both
     // programs are bounded by labels in the global_asm above.
     unsafe {
-        two_threads::boot(info_ptr, a, b, |untyped, cspace| {
+        threads::boot(info_ptr, &[a, b], |untyped, cspace| {
             let endpoint = untyped.retype_endpoint().expect("endpoint");
             let reply = untyped.retype_reply().expect("reply");
             let ep = cspace.insert_at(0, endpoint, Rights::all()).expect("server cap");

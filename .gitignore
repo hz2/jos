@@ -3,3 +3,7 @@ target
 CLAUDE.md
 AGENT.md
 
+
+# verus build leftovers dropped at the repo root
+liblib.rlib
+test_verus

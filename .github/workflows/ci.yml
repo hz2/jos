@@ -19,27 +19,23 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # jos-core: pure logic. host build, clippy pedantic, tests, and Miri for
-      # undefined behavior in unsafe code.
-      - name: clippy (jos-core, pedantic)
-        run: nix develop --command cargo clippy -p jos-core --all-targets -- -D warnings
+      # every step is a scripts/check.sh gate, the same ones the git hooks
+      # run, so a green local `scripts/check.sh ci` means a green ci run.
+      # split into steps so a failure names its gate.
+      - name: style
+        run: scripts/check.sh style
+
+      - name: clippy (both crates, -D warnings)
+        run: scripts/check.sh clippy
 
       - name: test (jos-core, host)
-        run: nix develop --command cargo test -p jos-core
+        run: scripts/check.sh test
 
       - name: miri (jos-core)
-        run: nix develop --command cargo miri test -p jos-core
+        run: scripts/check.sh miri
 
-      # kani bounded proofs of the jos-core invariants. uses the verify shell
-      # (adds kani + its pinned toolchain). slower than the other gates.
       - name: kani (jos-core)
-        run: nix develop .#verify --command cargo kani -p jos-core
+        run: scripts/check.sh kani
 
-      # kernel: clippy (incl. the safety-comment lints) then a bare-metal build
-      # + boot of the test suite under qemu (headless). invoked from kernel/ so
-      # its .cargo/config (custom target) applies.
-      - name: clippy (kernel)
-        run: nix develop --command bash -c 'cd kernel && cargo clippy --all-targets -- -D warnings'
-
-      - name: kernel build + boot tests (qemu)
-        run: nix develop --command bash -c 'cd kernel && cargo test'
+      - name: kernel boot tests (qemu)
+        run: scripts/check.sh qemu

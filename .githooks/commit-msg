@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# enforce the CLAUDE.md commit style: `type(scope): summary`, no trailing
+# period, ascii only, and no ai attribution anywhere in the message.
+
+set -euo pipefail
+msg_file="$1"
+subject=$(grep -v '^#' "$msg_file" | head -n1)
+
+fail() {
+    echo "commit-msg: $1" >&2
+    echo "  subject: $subject" >&2
+    exit 1
+}
+
+# merges and fixups made by git itself are exempt.
+case "$subject" in
+    Merge\ *|Revert\ *|fixup!\ *|squash!\ *) exit 0 ;;
+esac
+
+types='feat|fix|refactor|test|chore|docs|perf|build|ci'
+if ! echo "$subject" | grep -qE "^($types)(\([a-z0-9_-]+\))?!?: .+"; then
+    fail "subject must be 'type(scope): summary' with type in: ${types//|/, }"
+fi
+if echo "$subject" | grep -qE '\.$'; then
+    fail "no period at the end of the subject"
+fi
+if [ ${#subject} -gt 72 ]; then
+    fail "subject is ${#subject} chars; keep it to 72"
+fi
+if grep -v '^#' "$msg_file" | grep -qP '[^\x00-\x7F]'; then
+    fail "message must be ascii (no em dashes or emojis)"
+fi
+if grep -v '^#' "$msg_file" | grep -qiE 'co-authored-by: *claude|generated (with|by) (claude|ai)|noreply@anthropic'; then
+    fail "no ai attribution in commit messages"
+fi

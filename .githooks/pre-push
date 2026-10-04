@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# slow gate before code leaves the machine: `scripts/check.sh ci` (style,
+# clippy, host tests, miri, kani, every qemu test), the same gates ci runs.
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+scripts/check.sh ci

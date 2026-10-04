@@ -67,6 +67,10 @@
           # bootimage discovers llvm-tools via `rustc --print sysroot`; the fenix toolchain
           # places them under $sysroot/lib/rustlib/<host>/bin, so no extra setup is needed.
           export JOS_NIX_SHELL=1
+          # enable the repo git hooks (style, clippy, tests, commit message rules).
+          if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git config core.hooksPath .githooks
+          fi
         '';
       in
       {
@@ -82,9 +86,9 @@
           ];
           shellHook = commonShellHook + ''
             echo "jos dev shell -- rustc $(rustc --version | cut -d' ' -f2), qemu $(qemu-system-x86_64 --version | head -1 | cut -d' ' -f4)"
-            echo "  cargo build / cargo run / cargo test    (kernel under QEMU)"
-            echo "  cargo miri test -p jos-core             (Stage 0 UB checks, once workspace split lands)"
-            echo "  nix develop .#verify                    (adds Verus + Kani)"
+            echo "  cd kernel && cargo run      build and boot under qemu"
+            echo "  scripts/check.sh fast       style + clippy + host tests"
+            echo "  scripts/check.sh ci         + miri, kani, every qemu test"
           '';
         };
 

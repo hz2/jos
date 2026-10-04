@@ -131,9 +131,10 @@ it. The take-or-park step happens under one lock, so wakeups are never lost.
 - **Reply objects**: a server receives with `RecvReply`, naming a reply object;
   a `Call` binds it to the caller, who blocks until the server answers through
   it exactly once with `Reply` (the seL4 MCS model; the state machine is in
-  `jos-core/src/reply.rs`). A call that can never be answered, because a plain
-  receive took it or its reply object was revoked, fails with `NoReply` instead
-  of blocking forever.
+  `jos-core/src/reply.rs`). A server loop uses `ReplyRecv`, which answers the
+  current caller and waits for the next request in one syscall. A call that can
+  never be answered, because a plain receive took it or its reply object was
+  revoked, fails with `NoReply` instead of blocking forever.
 - **Revocation**: a blocked IPC future holds a generation-checked `CapRef`.
   Revoking the capability wakes it, it finds the ref stale, and it fails with
   `InvalidCap` rather than hanging.

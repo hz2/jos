@@ -199,7 +199,8 @@ outlive the capability it names.
 
 The current syscalls are `add` and `exit` (test probes), `ipc_send` /
 `ipc_recv` and their blocking variants, `retype`, `invoke`, `mint`, and the
-`call` / `recv_reply` / `reply` trio for request-response IPC, and
+`call` / `recv_reply` / `reply` trio for request-response IPC (plus
+`reply_recv`, the server loop in one call), and
 `set_ipc_buffer` to register a Frame as the caller's IPC buffer. A
 syscall returns its result in `rax` and a secondary result (the sender badge on
 a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit

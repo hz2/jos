@@ -13,8 +13,8 @@ Check items off in the same commit that finishes them.
 - [x] test the `NoReply` path where a plain receive takes a call (both orders)
 - [ ] test the `NoReply` path where a bound reply object is revoked (needs a
       revoke syscall or a kernel-side test hook)
-- [ ] `ReplyRecv` fast path: answer, then receive, in one syscall
-- [ ] a server answering two clients by badge (needs `ReplyRecv` or a loop)
+- [x] `ReplyRecv` (13): answer, then receive, in one syscall
+- [x] a server answering two badged clients in a `ReplyRecv` loop
 - [x] per-thread IPC buffer: a registered frame (`Tcb::ipc_buffer`) carries
       message words 1 to 3 on every IPC path; the kernel uses its own mapping
       of the frame, never a user pointer

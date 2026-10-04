@@ -43,7 +43,7 @@ speak IPC.
 - [x] badges on capabilities; `Mint` syscall; badge delivered to the receiver
 - [x] `Reply` object state machine in jos-core (Kani: one reply per bind)
 - [x] `Reply` kernel object + `Call` / `RecvReply` / `Reply` syscalls (seL4 MCS model)
-- [ ] `ReplyRecv` combined syscall
+- [x] `ReplyRecv` combined syscall (the server loop in one call)
 - [x] per-thread IPC buffer frame carrying message words 1 to 3 (seL4 model:
       the kernel uses its own mapping of the registered frame)
 - [x] register the IPC buffer from userspace through a Frame capability

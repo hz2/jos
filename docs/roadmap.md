@@ -24,9 +24,11 @@ gap this roadmap closes first.
 | 6 | SMP, scheduling contexts, WASM sandbox, agent namespaces, PQ crypto caps | future |
 
 Done inside phase 4 so far: blocking send/recv syscalls, badged endpoint
-capabilities (`Mint` syscall, badge delivered in `rdx`), a verified one-shot
-`Reply` state machine in jos-core, SMEP/SMAP with an explicit user-access
-window, DF cleared in the naked timer stub.
+capabilities (`Mint` syscall, badge delivered in `rdx`), request-response IPC
+(`Call` / `RecvReply` / `Reply` over a one-shot reply object whose state machine
+is Kani-proved in jos-core), SMEP/SMAP with an explicit user-access window, no-execute pages
+(`EFER.NXE`, which W^X mappings needed but never had), DF cleared in the naked
+timer stub.
 
 ## Milestones (in order)
 
@@ -40,7 +42,8 @@ speak IPC.
 
 - [x] badges on capabilities; `Mint` syscall; badge delivered to the receiver
 - [x] `Reply` object state machine in jos-core (Kani: one reply per bind)
-- [ ] `Reply` kernel object + `Call` / `ReplyRecv` syscalls (seL4 MCS model)
+- [x] `Reply` kernel object + `Call` / `RecvReply` / `Reply` syscalls (seL4 MCS model)
+- [ ] `ReplyRecv` combined syscall
 - [ ] per-TCB IPC buffer page (message words 1..N, read inside the SMAP window)
 - [ ] capability transfer over IPC (needs the cross-CSpace derivation decision,
       see "open decisions")

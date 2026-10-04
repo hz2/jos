@@ -30,8 +30,9 @@ Everything the kernel manages is one of these:
 | `Tcb` | `cap.rs` | 512 / 64 bytes | Thread control block: saved register context plus CSpace and VSpace roots |
 | `Endpoint` | `cap.rs` | 128 / 64 bytes | Synchronous IPC endpoint with parked-sender and parked-receiver waker slots |
 | `Notification` | `cap.rs` | 64 / 64 bytes | Asynchronous signal word: badges OR together, one parked waiter |
+| `Reply` | `cap.rs` | 128 / 64 bytes | One-shot reply: bound to a caller by `Call`, answered once by `Reply` |
 
-`Endpoint`, `Notification`, and `Tcb` are cache-line (64-byte) aligned: in
+`Endpoint`, `Notification`, `Reply`, and `Tcb` are cache-line (64-byte) aligned: in
 both cases size and alignment are powers of two and alignment divides size, so
 a 64-aligned watermark satisfies the placement constraint. `PageTable` and `CNode` are page-sized and
 page-aligned so they can serve directly as hardware page-table frames or be
@@ -196,7 +197,8 @@ reaching a stale object. There is no cached `CapRef` in user space that could
 outlive the capability it names.
 
 The current syscalls are `add` and `exit` (test probes), `ipc_send` /
-`ipc_recv` and their blocking variants, `retype`, `invoke`, and `mint`. A
+`ipc_recv` and their blocking variants, `retype`, `invoke`, `mint`, and the
+`call` / `recv_reply` / `reply` trio for request-response IPC. A
 syscall returns its result in `rax` and a secondary result (the sender badge on
 a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit
 63). The authoritative list is `Syscall` in `kernel/src/syscall.rs`.

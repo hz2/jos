@@ -118,9 +118,12 @@ it. The take-or-park step happens under one lock, so wakeups are never lost.
   or timer arrives first wins, so a blocked receive never waits forever.
 - **Notifications** are asynchronous: a signal ORs a badge into a word and never
   blocks; a waiter collects the coalesced bits.
-- **Reply objects** (in progress): `Call` binds a one-shot reply capability the
-  server answers through exactly once (the seL4 MCS model; the state machine is
-  in `jos-core/src/reply.rs`).
+- **Reply objects**: a server receives with `RecvReply`, naming a reply object;
+  a `Call` binds it to the caller, who blocks until the server answers through
+  it exactly once with `Reply` (the seL4 MCS model; the state machine is in
+  `jos-core/src/reply.rs`). A call that can never be answered, because a plain
+  receive took it or its reply object was revoked, fails with `NoReply` instead
+  of blocking forever.
 - **Revocation**: a blocked IPC future holds a generation-checked `CapRef`.
   Revoking the capability wakes it, it finds the ref stale, and it fails with
   `InvalidCap` rather than hanging.
@@ -139,6 +142,8 @@ CR3 switch. User code pages are W^X (writable only while being loaded, then
 read-execute); stacks are non-executable. Kernel objects rely on the identity
 map: an object's physical address is its virtual address.
 
+**No-execute** (`EFER.NXE`) is enabled at init, so the `NO_EXECUTE` bit on W^X
+user mappings is honored rather than being a reserved bit that faults.
 **SMEP and SMAP** are enabled when the CPU has them (QEMU runs `-cpu max`).
 Ring 0 cannot execute user pages, and touches user pages only inside
 `arch::x86_64::with_user_access`, which opens the window with `stac` and closes

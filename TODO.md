@@ -6,11 +6,15 @@ Check items off in the same commit that finishes them.
 
 ## Now: finish real IPC (M1)
 
-- [ ] `Reply` kernel object wrapping `jos_core::reply::Reply` (retypeable,
-      `ObjectType::Reply`, kernel waker slot like `Endpoint`)
-- [ ] `Call` syscall: send, bind a reply object, block the caller
-- [ ] `ReplyRecv` syscall: answer through the reply cap, then receive
-- [ ] integration test: a ring-3 server answers two badged clients
+- [x] `Reply` kernel object wrapping `jos_core::reply::Reply` (`ObjectType::Reply`)
+- [x] `Call` (9), `RecvReply` (10), `Reply` (11) syscalls; revoking a bound reply
+      fails the caller with `NoReply`
+- [x] integration tests: a badged call answered once, in both handoff orders
+- [x] test the `NoReply` path where a plain receive takes a call (both orders)
+- [ ] test the `NoReply` path where a bound reply object is revoked (needs a
+      revoke syscall or a kernel-side test hook)
+- [ ] `ReplyRecv` fast path: answer, then receive, in one syscall
+- [ ] a server answering two clients by badge (needs `ReplyRecv` or a loop)
 - [ ] per-TCB IPC buffer page mapped at a fixed user address; copy words 1..3
       inside `arch::x86_64::with_user_access`
 - [ ] decide cross-CSpace derivation (ROADMAP open decision 1), then cap transfer
@@ -41,6 +45,7 @@ Check items off in the same commit that finishes them.
 
 - [x] git hooks (`.githooks/`): style, clippy, tests on commit; full gate on push
 - [x] SMEP/SMAP on, QEMU runs `-cpu max` with a timeout
+- [x] `EFER.NXE` enabled: W^X `NO_EXECUTE` user pages were malformed before
 - [x] `scripts/check.sh` as the single entry point for every gate (hooks and CI call it)
 - [x] docs consolidated under `docs/`
 - [ ] knowledge notes on seL4, Hubris, Capsicum, APIC/ACPI in `~/srcs/knowledge`

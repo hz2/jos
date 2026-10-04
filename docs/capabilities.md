@@ -18,7 +18,7 @@ This is also why `cap-std` (the Bytecode Alliance crate) is a shipping
 demonstration that capability-based access control is natural Rust, not a
 stretch.
 
-## The five object types
+## The object types
 
 Everything the kernel manages is one of these:
 
@@ -29,8 +29,9 @@ Everything the kernel manages is one of these:
 | `CNode` (CSpace) | `cap.rs` | 4096 / 4096 bytes | A `KernelCNode` holding a `KernelCapSpace`; the per-task capability table |
 | `Tcb` | `cap.rs` | 512 / 64 bytes | Thread control block: saved register context plus CSpace and VSpace roots |
 | `Endpoint` | `cap.rs` | 128 / 64 bytes | Synchronous IPC endpoint with parked-sender and parked-receiver waker slots |
+| `Notification` | `cap.rs` | 64 / 64 bytes | Asynchronous signal word: badges OR together, one parked waiter |
 
-`Endpoint` and `Tcb` are cache-line (64-byte) aligned with a larger size: in
+`Endpoint`, `Notification`, and `Tcb` are cache-line (64-byte) aligned: in
 both cases size and alignment are powers of two and alignment divides size, so
 a 64-aligned watermark satisfies the placement constraint. `PageTable` and `CNode` are page-sized and
 page-aligned so they can serve directly as hardware page-table frames or be
@@ -144,9 +145,10 @@ The `jos-core` crate is what the Verus, Miri, and DST toolchains all see.
 
 ## Capability-mediated IPC
 
-jos uses synchronous rendezvous IPC modeled on seL4. An `Endpoint` object holds
-the rendezvous state (`Idle` or `SendBlocked`) plus one parked message and two
-`Waker` slots (one per direction) for the async executor.
+jos uses synchronous rendezvous IPC modeled on seL4. An `Endpoint` object wraps
+the verified state machine in `jos-core/src/endpoint.rs` (one message slot plus
+parked-sender and parked-receiver flags, never both set) and adds two `Waker`
+slots (one per direction) for the async executor.
 
 The non-blocking primitives are `cap_send` and `cap_recv` in
 `kernel/src/cap.rs`. Both call `resolve_endpoint`, which:
@@ -168,6 +170,22 @@ rather than hang. `revoke_and_wake` closes the gap for already-parked futures:
 it collects endpoint objects in the revoke subtree before removing capabilities,
 then fires their wakers after the generations are bumped.
 
+## Badges
+
+A server holds one unbadged endpoint capability and mints a badged copy per
+client (`CapSpace::mint_badged`, exposed as the `Mint` syscall). The badge rides
+along with every message sent through that copy: `cap_send` stamps it from the
+sending capability, and the receiver gets it back (`cap_recv_badged`, or `rdx`
+from the receive syscalls). Two rules make badges trustworthy, both Kani-proved
+in `cap_space.rs`:
+
+- a badge is set at most once; minting from a badged capability inherits the
+  badge, and re-badging is refused with `MintError::AlreadyBadged`;
+- badged mints still only attenuate rights, like every other mint.
+
+So a client cannot relabel itself as another client, and a server can route by
+badge without trusting anything in the message body.
+
 ## Syscall boundary
 
 Syscalls address capabilities by plain `u64` slot index. The kernel resolves
@@ -176,6 +194,12 @@ the resolution is always current: if a capability was revoked between two
 syscalls, the next call sees an empty slot and returns an error rather than
 reaching a stale object. There is no cached `CapRef` in user space that could
 outlive the capability it names.
+
+The current syscalls are `add` and `exit` (test probes), `ipc_send` /
+`ipc_recv` and their blocking variants, `retype`, `invoke`, and `mint`. A
+syscall returns its result in `rax` and a secondary result (the sender badge on
+a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit
+63). The authoritative list is `Syscall` in `kernel/src/syscall.rs`.
 
 ## Divergences from seL4
 

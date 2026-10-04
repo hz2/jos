@@ -1,5 +1,27 @@
 # Testing
 
+## Layers and gates (current)
+
+| layer | where | runs via | gate |
+|-------|-------|----------|------|
+| unit | `jos-core/src/*` `#[cfg(test)]` | `check.sh test` | pre-commit, CI |
+| deterministic simulation | `jos-core/tests/dst_*.rs` | `check.sh test` | pre-commit, CI |
+| undefined behavior | jos-core | `check.sh miri` | pre-push, CI |
+| bounded proofs | `#[cfg(kani)] mod kani_proofs` | `check.sh kani` | pre-push, CI |
+| functional proofs | `jos-core/src/proof.rs` | `check.sh verus` | manual |
+| boot / integration | `kernel/tests/*.rs`, one QEMU image each | `check.sh qemu` | pre-push, CI |
+
+QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
+a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
+instead of halting. Ring-3 test programs are written as `global_asm!` between
+two labels and copied into the user code page (see `kernel/tests/badged_ipc.rs`).
+
+Every new oracle or proof gets a negative control: break the property, confirm
+the test fails, revert.
+
+## Background notes (blog_os era)
+
+
 - `test` crate depends on stdlib, so we need `custom_test_frameworks`
   - as a result, many advanced features are not available
 
@@ -29,3 +51,10 @@
   no longer support
   - we will use the `uart_16550` crate
 
+
+## VGA text mode
+
+- `volatile` gives a `Volatile` wrapper type with `read` and `write` methods so
+  the compiler does not optimize away writes to the VGA buffer.
+- [`format_args`](https://doc.rust-lang.org/nightly/std/macro.format_args.html)
+  builds the `fmt::Arguments` that `print!` hands to the writer.

@@ -362,11 +362,12 @@ either receives or times out) provable.
 
 ## Still ahead
 
-A real hardware `KernelClock` on the kernel side (over the timer IRQ or the TSC)
-and a `recv`-with-timeout syscall wiring the `TimerQueue` into the async IPC
-path; record/replay built on the live trace (reset and re-present the recorded
-`SyscallEvent` stream, now that off-box capture exists); and a small host-side
-decoder for the `TRACE` serial lines.
+The hardware `KernelClock` (TSC-backed, `kernel/src/clock.rs`) and
+receive-with-timeout on the async IPC path are done. Remaining: replay built on
+the live trace (reset and re-present the recorded `SyscallEvent` stream), a
+small host-side decoder for the `TRACE` serial lines, and a pure model of the
+blocking-IPC handoff tables so the syscall path gets the same simulation
+coverage as the async path.
 
 [^1]: [FoundationDB deterministic simulation](https://apple.github.io/foundationdb/testing.html)
 [^2]: [TigerBeetle VOPR](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/vopr.zig)

@@ -1,5 +1,5 @@
 //! Deterministic Simulation Testing of IPC receive-with-timeout: the
-//! deadlock-freedom capstone (VERIFICATION-TARGETS IPC-1).
+//! deadlock-freedom capstone (docs/verification.md IPC-1).
 //!
 //! Conservation (`dst_ipc.rs`) proves the IPC layer never loses, duplicates, or
 //! corrupts a message. Its dual is PROGRESS: a receiver that blocks on an

@@ -13,11 +13,13 @@ toolchain and the QEMU / GRUB tooling so the build is reproducible:
 
 ```bash
 nix develop                 # default shell: rust nightly, qemu, grub2, xorriso
-nix develop .#verify        # adds Kani (and the Verus toolchain) for proofs
+nix develop .#verify        # adds Kani and Verus for proofs
 ```
 
-Prefix any cargo command with `nix develop --command`, or enter the shell once
-and run cargo normally inside it. The toolchain version is pinned in `flake.nix`
+Enter the shell once and run cargo normally, or prefix a single command with
+`nix develop --command`. Entering the shell also points git at `.githooks/`.
+The checks live in `scripts/check.sh`, which enters the dev shell itself (and
+the verify shell for `kani` and `verus`). The toolchain version is pinned in `flake.nix`
 (via fenix); `rust-toolchain` records the channel.
 
 ## Workspace layout
@@ -77,11 +79,9 @@ built-in `-kernel` loader (which is multiboot1-only and rejects an elf64 image):
 
 ## Building and running
 
-From `kernel/`:
-
 ```bash
-nix develop --command bash -c 'cd kernel && cargo build'   # build the kernel elf
-nix develop --command bash -c 'cd kernel && cargo run'     # build + boot under qemu
+cd kernel && cargo build   # build the kernel elf
+cd kernel && cargo run     # build and boot under qemu
 ```
 
 `cargo run` and `cargo test` go through the runner wired in
@@ -97,18 +97,24 @@ rescue ISO around it (`grub-mkrescue`, with `xorriso` as the backend), and boots
 it headless:
 
 ```bash
-qemu-system-x86_64 -machine q35 -m 128M -cdrom jos.iso \
+timeout 120 qemu-system-x86_64 -machine q35 -cpu max -m 128M -cdrom jos.iso \
     -serial mon:stdio -display none \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot
 ```
 
+`-cpu max` exposes SMEP and SMAP, which `jos::init` turns on, so every test runs
+with ring 0 barred from executing or touching user pages. The timeout
+(`JOS_QEMU_TIMEOUT`, default 120 s) turns a wedged guest into a failure, and a
+fatal page fault exits QEMU with the failure code instead of halting.
+
 ## Testing
 
 Tests are headless QEMU integration tests; output comes back over the serial
-port and the guest exits via the `isa-debug-exit` device. From `kernel/`:
+port and the guest exits via the `isa-debug-exit` device:
 
 ```bash
-nix develop --command bash -c 'cd kernel && cargo test'
+scripts/check.sh qemu              # every kernel test
+scripts/check.sh qemu badged_ipc   # one test
 ```
 
 The `isa-debug-exit` device maps a guest write of `N` at port `0xf4` to a host
@@ -117,14 +123,15 @@ exit code of `(N << 1) | 1`. The kernel writes `0x10` on success, giving exit
 fail correctly. Anything else (for example the `35` the kernel writes on a test
 failure) propagates as a failure. See `testing.md` for the harness details.
 
-The pure-logic crate is tested on the host, with no QEMU, from the workspace
-root:
+The pure-logic crate is tested on the host, with no QEMU:
 
 ```bash
-nix develop --command cargo test -p jos-core
-nix develop --command cargo miri test -p jos-core               # UB checking
-nix develop --command cargo clippy -p jos-core --all-targets -- -D warnings
-nix develop .#verify --command cargo kani -p jos-core           # bounded proofs
+scripts/check.sh test     # unit + deterministic simulation tests
+scripts/check.sh miri     # undefined-behavior checking
+scripts/check.sh clippy   # both crates, -D warnings
+scripts/check.sh kani     # bounded proofs
+scripts/check.sh fast     # style + clippy + test: the pre-commit gate
+scripts/check.sh ci       # everything ci runs
 ```
 
 [^1]: [Philipp Oppermann's blog_os](https://os.phil-opp.com/)

@@ -15,7 +15,7 @@
 //! [`IrqFrame`] exactly; passing `rsp` as `rdi` gives `timer_irq_handler` a
 //! typed `&mut IrqFrame` pointer.
 //!
-//! For same-privilege (ring-0 → ring-0) timer ticks the CPU only pushes 3 words
+//! For same-privilege (ring-0 -> ring-0) timer ticks the CPU only pushes 3 words
 //! (RFLAGS, CS, RIP); the stub still pushes the same 15 GPRs, but
 //! `IrqFrame::user_rsp` / `IrqFrame::ss` will be garbage. The Rust handler checks
 //! `frame.cs & 3 != 3` and returns early before touching those fields.
@@ -24,7 +24,7 @@
 //!
 //! With a 16-byte-aligned RSP0, the CPU's 5-word push leaves RSP % 16 == 8.
 //! 15 more pushes add 120 bytes (120 % 16 == 8), yielding RSP % 16 == 0.
-//! The `call` instruction then makes RSP % 16 == 8 at `timer_irq_handler` entry —
+//! The `call` instruction then makes RSP % 16 == 8 at `timer_irq_handler` entry -
 //! exactly the System V AMD64 ABI requirement.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -46,7 +46,7 @@ const NO_THREAD: usize = usize::MAX;
 /// Raw TCB pointers indexed by scheduler thread ID.
 ///
 /// Written once during `register_thread` (before any thread runs), read from
-/// the timer IRQ. Single-CPU + interrupts disabled at write time → no races.
+/// the timer IRQ. Single-CPU + interrupts disabled at write time -> no races.
 static mut THREAD_TABLE: [*mut Tcb; MAX_THREADS] = [core::ptr::null_mut(); MAX_THREADS];
 static mut THREAD_COUNT: usize = 0;
 
@@ -157,9 +157,9 @@ impl IrqFrame {
 /// `id` must be a value previously returned by [`register_thread`]. The
 /// returned pointer is valid for the kernel's lifetime.
 pub unsafe fn thread_table_entry(id: usize) -> *mut Tcb {
-    // SAFETY: caller ensures id is valid; THREAD_TABLE[id] was set by
-    // register_thread and is never modified after that.
     if id < MAX_THREADS {
+        // SAFETY: id is in range and came from register_thread per the caller
+        // contract; THREAD_TABLE[id] is never modified after that.
         unsafe { THREAD_TABLE[id] }
     } else {
         core::ptr::null_mut()
@@ -212,8 +212,8 @@ pub fn set_current(id: usize) {
 /// The Rust half of the timer IRQ.
 ///
 /// Called from [`timer_preempt_entry`] with `frame` pointing to the full
-/// saved state on the kernel stack. Handles EOI, fires software timers, and —
-/// when interrupted from ring 3 — runs the round-robin policy: re-enqueues the
+/// saved state on the kernel stack. Handles EOI, fires software timers, and -
+/// when interrupted from ring 3 - runs the round-robin policy: re-enqueues the
 /// current thread and, if a different thread is next, saves the current context
 /// and overwrites `frame` with the new thread's context so the stub's epilogue
 /// resumes it.
@@ -352,7 +352,7 @@ pub extern "C" fn enter_idle_from_syscall() -> ! {
 ///
 /// Declared as `extern "x86-interrupt"` so it can be passed to
 /// `Entry::set_handler_fn`; `#[naked]` prevents LLVM from emitting any
-/// prologue or epilogue — only the `naked_asm!` body is emitted.
+/// prologue or epilogue - only the `naked_asm!` body is emitted.
 ///
 /// Layout invariants (see module doc):
 /// - conditional `swapgs` on entry and exit keyed on saved CS
@@ -384,6 +384,9 @@ pub extern "x86-interrupt" fn timer_preempt_entry(_frame: InterruptStackFrame) {
             "push rcx",
             "push rbx",
             "push rax",
+            // sysv requires DF=0 at a call; ring 3 may have set it. iretq
+            // restores the interrupted RFLAGS, so clearing it here is safe.
+            "cld",
             // rsp now == &IrqFrame. pass as first argument (System V rdi).
             "mov rdi, rsp",
             "call {handler}",

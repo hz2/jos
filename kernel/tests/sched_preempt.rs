@@ -179,8 +179,8 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
 
     // register both TCBs. thread A will run first (set_current); thread B is
     // placed in the ready set so the scheduler can pick it on the first tick.
-    // SAFETY: TCBs are live 'static; interrupts disabled before the PIC fires.
     x86_64::instructions::interrupts::disable();
+    // SAFETY: TCBs are live 'static; interrupts disabled before the PIC fires.
     let id_a = unsafe { sched::register_thread(tcb_a_ptr) };
     let id_b = unsafe { sched::register_thread(tcb_b_ptr) };
     sched::mark_ready(id_b); // B is waiting; A is about to run

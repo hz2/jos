@@ -154,7 +154,8 @@ CR3 switch. Userspace builds the rest from capabilities, the seL4 way: a
 intermediate table), `MapPageTable` installs a PageTable capability at the first
 missing level on the path to an address, and `MapFrame` maps a Frame at the
 leaf, refusing writable-and-executable mappings and writable mappings through a
-capability without `WRITE`. The kernel never allocates a table itself. A verified
+capability without `WRITE`. The kernel never allocates a table itself. `Unmap`
+removes a mapping again (and everything beneath a table). A verified
 registry (`jos-core/src/mapping.rs`) keeps each table and frame mapped at most
 once, and revoking its capability unmaps it and everything beneath it, deepest
 level first, so a table never comes back carrying stale entries. User code pages are W^X (writable only while being loaded, then

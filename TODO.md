@@ -25,14 +25,14 @@ Check items off in the same commit that finishes them.
       address spaces from table and frame capabilities; a verified registry
       keeps each object mapped once, and revoking a table or frame unmaps it
       and everything beneath it
-- [ ] an `Unmap` syscall (today only revocation unmaps)
+- [x] `Unmap` (16): unmap a frame or table (and everything beneath a table)
 - [x] per-thread address spaces: `switch_to` loads each thread's VSpace into
       `CR3`, so threads in different VSpaces are isolated
 - [ ] configure a TCB from userspace (its VSpace, CSpace, IPC buffer, and
       entry point) through a TCB capability; today kernel setup code does it
 - [ ] revoking a VSpace capability while a thread still runs in it
-- [ ] retyping a CNode through the syscall still builds a 4 KiB value on the
-      kernel stack (the overflow class fixed for frames and page tables)
+- [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized
+      object is built by value on a syscall stack any more
 - [ ] decide cross-CSpace derivation (ROADMAP open decision 1), then cap transfer
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)
 

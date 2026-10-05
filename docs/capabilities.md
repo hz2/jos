@@ -203,7 +203,8 @@ The current syscalls are `add` and `exit` (test probes), `ipc_send` /
 `call` / `recv_reply` / `reply` trio for request-response IPC (plus
 `reply_recv`, the server loop in one call), and
 `set_ipc_buffer` to register a Frame as the caller's IPC buffer, and
-`map_page_table` / `map_frame` to build an address space from capabilities. A
+`map_page_table` / `map_frame` to build an address space from capabilities
+(and `unmap` to take a mapping down again). A
 syscall returns its result in `rax` and a secondary result (the sender badge on
 a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit
 63). The authoritative list is `Syscall` in `kernel/src/syscall.rs`.

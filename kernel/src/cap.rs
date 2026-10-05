@@ -984,19 +984,18 @@ impl UntypedRegion {
     ///
     /// [`retype_page_table`]: Self::retype_page_table
     pub fn retype_cnode(&mut self) -> Option<ObjectId> {
-        self.retype(
-            ObjectType::CNode {
-                size_bits: KERNEL_CNODE_SIZE_BITS,
-            },
-            KernelCNode::new(),
-            ObjectKind::CNode,
-        )
+        // reserve the page zeroed, then build the capability space in place: a
+        // KernelCNode is 4 KiB, too big to build by value on a syscall stack.
+        let ty = ObjectType::CNode { size_bits: KERNEL_CNODE_SIZE_BITS };
+        let id = self.retype_zeroed(ty, ObjectKind::CNode)?;
+        let ptr = core::ptr::with_exposed_provenance_mut::<KernelCNode>(id.addr);
+        // SAFETY: id names the page just reserved for this CNode, aligned for
+        // KernelCNode, and nothing else refers to it yet. repr(C) puts `space`
+        // first, and the padding after it is already zero.
+        unsafe { KernelCapSpace::init_in_place(core::ptr::addr_of_mut!((*ptr).space)) };
+        Some(id)
     }
 
-    /// Shared carving primitive: place `value` (whose layout must match `ty`)
-    /// into the region at the watermark, advance the watermark, and return an
-    /// ObjectId tagged `kind` whose address is the placement site. Factors out
-    /// the body retype_endpoint had so every object type carves identically.
     /// Records a successful placement at `start` and returns a handle to it.
     fn commit(&mut self, start: usize, new_watermark: usize, kind: ObjectKind) -> ObjectId {
         self.watermark = new_watermark;
@@ -1029,6 +1028,10 @@ impl UntypedRegion {
         }
     }
 
+    /// Shared carving primitive: places `value` (whose layout must match `ty`)
+    /// into the region at the watermark, advances the watermark, and returns an
+    /// `ObjectId` tagged `kind` whose address is the placement site. Only for
+    /// small objects; page-sized ones use [`retype_zeroed`](Self::retype_zeroed).
     fn retype<T>(&mut self, ty: ObjectType, value: T, kind: ObjectKind) -> Option<ObjectId> {
         match place(self.bytes, self.watermark, ty, value) {
             Ok((start, new_watermark)) => Some(self.commit(start, new_watermark, kind)),

@@ -98,6 +98,19 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         }
     }
 
+    /// Initializes an empty capability space in place at `ptr`, without
+    /// building it on the stack first. See [`CapTable::init_in_place`].
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be valid for writes of `Self` and properly aligned. Any value
+    /// previously there is overwritten without being dropped.
+    pub unsafe fn init_in_place(ptr: *mut Self) {
+        // SAFETY: per this function's contract `ptr` is valid and aligned for
+        // `Self`, and so for its only field.
+        unsafe { CapTable::init_in_place(core::ptr::addr_of_mut!((*ptr).table)) }
+    }
+
     /// Returns the total number of capability slots, `N`.
     #[inline]
     #[must_use]
@@ -460,6 +473,19 @@ mod tests {
         let a = space.insert(1, Rights::all()).unwrap();
         let _b = space.insert(2, Rights::all()).unwrap();
         assert_eq!(space.mint(a, Rights::READ), Err(MintError::SpaceFull));
+    }
+
+    #[test]
+    fn init_in_place_builds_an_empty_space() {
+        let mut slot = core::mem::MaybeUninit::<CapSpace<Obj, 8>>::uninit();
+        // SAFETY: the MaybeUninit is valid for writes of the space and aligned.
+        unsafe { CapSpace::init_in_place(slot.as_mut_ptr()) };
+        // SAFETY: init_in_place initialized every field.
+        let space = unsafe { slot.assume_init_mut() };
+        assert!(space.is_empty());
+        let r = space.insert(3, Rights::all()).unwrap();
+        assert_eq!(space.lookup(r).unwrap().object, 3);
+        assert_eq!(space.len(), 1);
     }
 
     #[test]

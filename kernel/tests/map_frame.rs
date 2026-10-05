@@ -70,6 +70,11 @@ core::arch::global_asm!(
     "mov eax, 15", "xor edi, edi", "mov esi, 5", "lea rdx, [r15 + 0x1001]", "syscall",
     "test rax, rax", "jne 9f",
     "cmp qword ptr [r15 + 0x1000], 0x1234", "jne 9f",
+    // retype a CNode (type 1, size_bits 12) into slot 8 (the mint took 7); a send
+    // to it must fail with NotEndpoint (3), so it really is a CNode
+    "mov eax, 4", "mov edi, 1", "mov esi, 0xc01", "mov edx, 8", "syscall",
+    "test rax, rax", "jne 9f",
+    "mov eax, 2", "mov edi, 8", "mov esi, 1", "syscall", "cmp rax, 3", "jne 9f",
     "mov eax, 1", "mov edi, 0x10", "syscall",
     "9:",
     "mov eax, 1", "mov edi, 0x11", "syscall",

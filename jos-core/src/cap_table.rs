@@ -114,6 +114,29 @@ impl<T, const N: usize> CapTable<T, N> {
         }
     }
 
+    /// Initializes an empty table in place at `ptr`, writing each vacant slot
+    /// directly instead of building the whole table as a value first.
+    ///
+    /// A kernel capability table is a page in size; building it by value and
+    /// moving it into place costs two pages of kernel stack.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be valid for writes of `Self` and properly aligned. Any value
+    /// previously there is overwritten without being dropped.
+    pub unsafe fn init_in_place(ptr: *mut Self) {
+        // SAFETY: per this function's contract `ptr` is valid and aligned for
+        // `Self`, so its fields are too; each slot pointer stays within the
+        // `slots` array (i < N), and `write` never reads or drops the old bytes.
+        unsafe {
+            let slots = core::ptr::addr_of_mut!((*ptr).slots).cast::<Slot<T>>();
+            for i in 0..N {
+                slots.add(i).write(Slot::empty());
+            }
+            core::ptr::addr_of_mut!((*ptr).len).write(0);
+        }
+    }
+
     /// Returns the total number of slots, `N`.
     #[inline]
     #[must_use]

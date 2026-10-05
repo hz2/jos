@@ -38,7 +38,7 @@
 //! | `CNode { size_bits }` | `2^size_bits` | `2^size_bits` |
 //! | `Untyped { size_bits }` | `2^size_bits` | `2^size_bits` |
 //! | `PageTable` | 4096 | 4096 |
-//! | `Tcb` | 512 | 64 |
+//! | `Tcb` | 16384 | 4096 |
 //! | `Notification` | 64 | 64 |
 //! | `Reply` | 128 | 64 |
 //! | `Frame` | 4096 | 4096 |
@@ -92,13 +92,18 @@ pub const PAGE_TABLE_SIZE: usize = 4096;
 
 /// Size of one `Tcb` (thread control block) object in bytes.
 ///
-/// 512 bytes: room for the saved register context plus the `CSpace`/`VSpace`
-/// roots and scheduling state, with headroom for fields later sub-slices add.
-/// A multiple of [`TCB_ALIGN`], like [`ENDPOINT_SIZE`].
-pub const TCB_SIZE: usize = 512;
+/// 16 KiB: a [`TCB_HEADER_SIZE`]-byte header (the saved register context, the
+/// `CSpace`/`VSpace` roots, and scheduling state) followed by the thread's own
+/// kernel stack, which grows down from the end of the object. Carving one
+/// object gives a complete thread, so the kernel never allocates a stack.
+pub const TCB_SIZE: usize = 16 * 1024;
 
-/// Alignment requirement of a `Tcb` object in bytes (one cache line).
-pub const TCB_ALIGN: usize = 64;
+/// Size of the header at the start of a `Tcb` object; the rest of the object
+/// is the thread's kernel stack.
+pub const TCB_HEADER_SIZE: usize = 512;
+
+/// Alignment requirement of a `Tcb` object in bytes (page-aligned).
+pub const TCB_ALIGN: usize = 4096;
 
 /// Size of one `Notification` object in bytes.
 ///
@@ -200,7 +205,8 @@ pub enum ObjectType {
     /// A thread control block.
     ///
     /// Fixed size: [`TCB_SIZE`] bytes, [`TCB_ALIGN`]-byte aligned. Holds a
-    /// saved register context plus the thread's `CSpace`/`VSpace` roots.
+    /// saved register context plus the thread's `CSpace`/`VSpace` roots in a
+    /// [`TCB_HEADER_SIZE`]-byte header, and the thread's kernel stack after it.
     Tcb,
 
     /// An asynchronous notification (a coalescing signal word).
@@ -472,7 +478,7 @@ mod tests {
     #[test]
     fn page_table_and_tcb_fit_and_advance() {
         // both new object types place and advance the watermark like the others.
-        let region = 8192;
+        let region = 8192 + super::TCB_SIZE;
         let pt = retype_fits(region, 0, ObjectType::PageTable).expect("page table fits");
         assert_eq!(pt, super::PAGE_TABLE_SIZE);
         let tcb = retype_fits(region, pt, ObjectType::Tcb).expect("tcb fits after page table");

@@ -41,7 +41,7 @@ use jos_core::placement::{place, place_zeroed, PlaceError};
 use jos_core::untyped::{
     ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, FRAME_ALIGN, FRAME_SIZE,
     NOTIFICATION_ALIGN, NOTIFICATION_SIZE, PAGE_TABLE_SIZE, REPLY_ALIGN, REPLY_SIZE, TCB_ALIGN,
-    TCB_SIZE,
+    TCB_HEADER_SIZE, TCB_SIZE,
 };
 use spin::Mutex;
 
@@ -690,12 +690,12 @@ pub struct Tcb {
     /// The thread's run state. Last of the real fields (a small type), before
     /// the padding, so it introduces no interior alignment gap.
     pub state: TcbState,
-    /// Pad to the full TCB_SIZE so the layout matches ObjectType::Tcb exactly.
+    /// Pad to the full TCB_HEADER_SIZE: the header at the start of a TCB object.
     _pad: [u8; Tcb::PAD],
 }
 
 impl Tcb {
-    // bytes of padding so size_of::<Tcb>() == TCB_SIZE, from the sum of the real
+    // bytes of padding so size_of::<Tcb>() == TCB_HEADER_SIZE, from the sum of the real
     // fields' sizes. This is sound only because every field is 8-byte-sized and
     // 8-aligned, so repr(C) inserts NO inter-field padding and the sum equals the
     // true used-bytes offset. (offset_of!(Tcb, _pad) would be exact regardless,
@@ -711,7 +711,7 @@ impl Tcb {
         + core::mem::size_of::<TcbState>()
         + core::mem::size_of::<u64>()
         + core::mem::size_of::<*mut KernelCapSpace>();
-    const PAD: usize = TCB_SIZE - Self::USED;
+    const PAD: usize = TCB_HEADER_SIZE - Self::USED;
 
     /// Creates an inactive `Tcb` with a zeroed context and no roots.
     #[must_use]
@@ -756,8 +756,24 @@ impl Default for Tcb {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<Tcb>() == TCB_SIZE);
-const _: () = assert!(core::mem::align_of::<Tcb>() == TCB_ALIGN);
+const _: () = assert!(core::mem::size_of::<Tcb>() == TCB_HEADER_SIZE);
+
+/// A whole TCB object as placed in untyped memory: the [`Tcb`] header, then the
+/// thread's kernel stack, which grows down from the end of the object.
+///
+/// Sized and aligned to match [`ObjectType::Tcb`], so carving one object gives
+/// a complete thread and the kernel never allocates a stack.
+#[repr(C, align(4096))]
+pub struct TcbObject {
+    /// The thread control block itself.
+    pub tcb: Tcb,
+    /// The thread's kernel stack.
+    stack: [u8; TCB_SIZE - TCB_HEADER_SIZE],
+}
+
+const _: () = assert!(core::mem::size_of::<TcbObject>() == TCB_SIZE);
+const _: () = assert!(core::mem::align_of::<TcbObject>() == TCB_ALIGN);
+const _: () = assert!(core::mem::offset_of!(TcbObject, tcb) == 0);
 
 // --------------------------------------------------------------------------
 // CNode object
@@ -972,7 +988,19 @@ impl UntypedRegion {
     /// Carves a fresh inactive [`Tcb`] out of this region and returns its
     /// handle. Returns `None` if the region has no room for another `Tcb`.
     pub fn retype_tcb(&mut self) -> Option<ObjectId> {
-        self.retype(ObjectType::Tcb, Tcb::new(), ObjectKind::Tcb)
+        // reserve the whole object zeroed (the stack needs no other start), then
+        // write only the small header in place: the object is four pages, far
+        // too big to build by value on a syscall stack.
+        let id = self.retype_zeroed(ObjectType::Tcb, ObjectKind::Tcb)?;
+        let ptr = core::ptr::with_exposed_provenance_mut::<TcbObject>(id.addr);
+        // SAFETY: id names the object just reserved, aligned for TcbObject, and
+        // nothing else refers to it yet. the header is written field-wise in
+        // place, and the stack top is the end of the object.
+        unsafe {
+            core::ptr::addr_of_mut!((*ptr).tcb).write(Tcb::new());
+            (*ptr).tcb.kernel_stack_top = (id.addr + TCB_SIZE) as u64;
+        }
+        Some(id)
     }
 
     /// Carves a fresh empty [`KernelCNode`] (capability space) out of this

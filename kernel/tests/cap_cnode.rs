@@ -39,12 +39,12 @@ fn panic(info: &PanicInfo) -> ! {
 /// each test carves fresh objects so the watermark only advances.
 #[repr(align(4096))]
 struct UntypedBacking {
-    bytes: UnsafeCell<[u8; 32 * 1024]>,
+    bytes: UnsafeCell<[u8; 64 * 1024]>,
 }
 // SAFETY: single-threaded ring-0 kernel; handed out exactly once below.
 unsafe impl Sync for UntypedBacking {}
 static UNTYPED: UntypedBacking = UntypedBacking {
-    bytes: UnsafeCell::new([0u8; 32 * 1024]),
+    bytes: UnsafeCell::new([0u8; 64 * 1024]),
 };
 
 /// The tests run sequentially in one boot; a single UntypedRegion is shared so

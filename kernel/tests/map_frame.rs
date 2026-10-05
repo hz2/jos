@@ -5,7 +5,8 @@
 //! a frame, then maps them with `MapPageTable` and `MapFrame`, checking each
 //! refusal on the way (missing table, kernel address, table mapped twice, every
 //! level present, writable and executable, read-only capability mapped
-//! writable, frame mapped twice) before writing and reading the new page.
+//! writable, frame mapped twice) before writing and reading the new page. It then
+//! unmaps the frame and maps it one page up, where the same data must appear.
 #![no_std]
 #![no_main]
 
@@ -62,6 +63,13 @@ core::arch::global_asm!(
     // the same frame at a second address: AlreadyMapped (15)
     "mov eax, 15", "xor edi, edi", "mov esi, 5", "lea rdx, [r15 + 0x1001]", "syscall",
     "cmp rax, 15", "jne 9f",
+    // unmap it; a second unmap finds nothing mapped: NotMapped (19)
+    "mov eax, 16", "mov edi, 5", "syscall", "test rax, rax", "jne 9f",
+    "mov eax, 16", "mov edi, 5", "syscall", "cmp rax, 19", "jne 9f",
+    // map it again one page up: the same frame, so the same data
+    "mov eax, 15", "xor edi, edi", "mov esi, 5", "lea rdx, [r15 + 0x1001]", "syscall",
+    "test rax, rax", "jne 9f",
+    "cmp qword ptr [r15 + 0x1000], 0x1234", "jne 9f",
     "mov eax, 1", "mov edi, 0x10", "syscall",
     "9:",
     "mov eax, 1", "mov edi, 0x11", "syscall",

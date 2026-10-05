@@ -156,6 +156,10 @@ pub enum Syscall {
     /// `READ`, plus `WRITE` for a writable mapping, and a mapping is never both
     /// writable and executable.
     MapFrame = 15,
+    /// `unmap(object_slot) -> 0 | errno`. Removes the mapping of the frame or page
+    /// table named by `object_slot` (which needs `WRITE`); unmapping a table also
+    /// unmaps everything beneath it. The object can then be mapped again.
+    Unmap = 16,
 }
 
 impl Syscall {
@@ -178,6 +182,7 @@ impl Syscall {
             13 => Some(Self::ReplyRecv),
             14 => Some(Self::MapPageTable),
             15 => Some(Self::MapFrame),
+            16 => Some(Self::Unmap),
             _ => None,
         }
     }
@@ -231,6 +236,8 @@ pub enum IpcSyscallError {
     WritableExecutable = 17,
     /// The kernel's mapping registry is full.
     MappingsFull = 18,
+    /// `unmap` named a frame or table that is not mapped.
+    NotMapped = 19,
 }
 
 /// Bit OR-ed into an [`Syscall::IpcRecv`] return value to mark it an error
@@ -510,6 +517,8 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::MapPageTable) => sys_map_page_table(arg0, arg1, arg2).into(),
         // map_frame(vspace_slot = arg0, frame_slot = arg1, vaddr | flags = arg2).
         Some(Syscall::MapFrame) => sys_map_frame(arg0, arg1, arg2).into(),
+        // unmap(object_slot = arg0) -> 0 | errno.
+        Some(Syscall::Unmap) => sys_unmap(arg0).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -1196,6 +1205,24 @@ fn sys_map_frame(vspace_slot: u64, frame_slot: u64, vaddr_flags: u64) -> u64 {
         Err(e) => return e as u64,
     };
     mapping::map_frame(root, frame, vaddr_flags).map_or_else(map_errno, |()| 0)
+}
+
+/// Implements [`Syscall::Unmap`].
+fn sys_unmap(object_slot: u64) -> u64 {
+    let Some(cap) = current_cap(object_slot) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    if !matches!(cap.object.kind(), ObjectKind::Frame | ObjectKind::PageTable) {
+        return IpcSyscallError::NotPageTable as u64;
+    }
+    if !cap.rights.contains(Rights::WRITE) {
+        return IpcSyscallError::Denied as u64;
+    }
+    if mapping::unmap_object(cap.object.phys_addr()) {
+        0
+    } else {
+        IpcSyscallError::NotMapped as u64
+    }
 }
 
 /// Implements [`Syscall::ReplyRecv`]: answers the bound caller, if any, then

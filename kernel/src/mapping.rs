@@ -243,12 +243,13 @@ pub fn map_frame(root: ObjectId, frame: ObjectId, vaddr_flags: u64) -> Result<()
 }
 
 /// Removes the mapping of the object at physical address `object`, if it is
-/// mapped, and everything mapped beneath it. Called when a capability to a
-/// frame or page table is revoked, so revocation takes away the access too.
-pub fn unmap_object(object: u64) {
+/// mapped, and everything mapped beneath it, returning whether it was mapped.
+/// Called by the `Unmap` syscall and when a capability to a frame or page
+/// table is revoked, so revocation takes away the access too.
+pub fn unmap_object(object: u64) -> bool {
     let mut mappings = MAPPINGS.lock();
     let Some(mapping) = mappings.forget(object) else {
-        return;
+        return false;
     };
     let mut beneath = [None; MAX_MAPPINGS];
     let mut count = 0;
@@ -270,6 +271,7 @@ pub fn unmap_object(object: u64) {
     if Cr3::read().0.start_address().as_u64() == mapping.vspace {
         x86_64::instructions::tlb::flush_all();
     }
+    true
 }
 
 /// Clears the entry that holds `mapping`, if its path is still reachable.

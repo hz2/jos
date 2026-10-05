@@ -1708,11 +1708,11 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                 // capability for: unregister it everywhere.
                 crate::syscall::forget_ipc_buffer(obj.phys_addr());
                 // and the frame must stop being reachable through its mapping.
-                crate::mapping::unmap_object(obj.phys_addr());
+                let _ = crate::mapping::unmap_object(obj.phys_addr());
             }
             ObjectKind::PageTable => {
                 // unmap the table and everything mapped beneath it.
-                crate::mapping::unmap_object(obj.phys_addr());
+                let _ = crate::mapping::unmap_object(obj.phys_addr());
             }
             // only the kinds matched above are collected in the mark phase.
             _ => {}

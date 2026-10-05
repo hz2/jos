@@ -50,7 +50,9 @@ speak IPC.
 - [x] map Frames into a VSpace from userspace (`MapPageTable` / `MapFrame`, seL4
       style: userspace supplies every page table; the kernel never allocates)
 - [x] per-thread VSpaces switched on context switch
-- [ ] configure TCBs from userspace (the root task needs it to start programs)
+- [x] configure and start TCBs from userspace (TCB objects carry their own
+      kernel stack)
+- [ ] copy capabilities into another thread's CNode
 - [ ] capability transfer over IPC (needs the cross-CSpace derivation decision,
       see "open decisions")
 - [ ] JPC-1: Verus proof of rendezvous deadlock-freedom

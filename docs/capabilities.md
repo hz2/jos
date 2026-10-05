@@ -27,18 +27,19 @@ Everything the kernel manages is one of these:
 | `Untyped` | `cap.rs` / `untyped.rs` | `2^size_bits` bytes, naturally aligned | Raw memory region; all other objects carved from it |
 | `PageTable` | `cap.rs` | 4096 / 4096 bytes | One x86_64 page-table frame; used as PML4 root or intermediate table |
 | `CNode` (CSpace) | `cap.rs` | 4096 / 4096 bytes | A `KernelCNode` holding a `KernelCapSpace`; the per-task capability table |
-| `Tcb` | `cap.rs` | 512 / 64 bytes | Thread control block: saved register context plus CSpace and VSpace roots |
+| `Tcb` | `cap.rs` | 16384 / 4096 bytes | Thread control block: a 512-byte header (saved context, CSpace and VSpace roots) followed by the thread's own kernel stack |
 | `Endpoint` | `cap.rs` | 128 / 64 bytes | Synchronous IPC endpoint with parked-sender and parked-receiver waker slots |
 | `Notification` | `cap.rs` | 64 / 64 bytes | Asynchronous signal word: badges OR together, one parked waiter |
 | `Reply` | `cap.rs` | 128 / 64 bytes | One-shot reply: bound to a caller by `Call`, answered once by `Reply` |
 | `Frame` | `cap.rs` | 4096 / 4096 bytes | One page of memory; registered as an IPC buffer with `SetIpcBuffer` |
 | `VSpace` | `cap.rs` | 4096 / 4096 bytes | An address-space root; userspace maps tables and frames into it |
 
-`Endpoint`, `Notification`, `Reply`, and `Tcb` are cache-line (64-byte) aligned: in
-both cases size and alignment are powers of two and alignment divides size, so
-a 64-aligned watermark satisfies the placement constraint. `PageTable` and `CNode` are page-sized and
-page-aligned so they can serve directly as hardware page-table frames or be
-addressed by a plain page index. Every size and alignment is a compile-time
+`Endpoint`, `Notification`, and `Reply` are cache-line (64-byte) aligned: their
+sizes and alignments are powers of two and alignment divides size, so a
+64-aligned watermark satisfies the placement constraint. `PageTable`, `CNode`,
+`Frame`, and `VSpace` are page-sized and page-aligned, so they can serve
+directly as hardware frames or be addressed by a plain page index, and a `Tcb`
+is four pages, page-aligned. Every size and alignment is a compile-time
 constant in `jos-core::untyped` and is independently checked by `size_of`
 assertions in `kernel::cap`.
 
@@ -204,7 +205,8 @@ The current syscalls are `add` and `exit` (test probes), `ipc_send` /
 `reply_recv`, the server loop in one call), and
 `set_ipc_buffer` to register a Frame as the caller's IPC buffer, and
 `map_page_table` / `map_frame` to build an address space from capabilities
-(and `unmap` to take a mapping down again). A
+(and `unmap` to take a mapping down again). Threads are
+created with `tcb_configure`, `tcb_set_ipc_buffer`, and `tcb_start`. A
 syscall returns its result in `rax` and a secondary result (the sender badge on
 a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit
 63). The authoritative list is `Syscall` in `kernel/src/syscall.rs`.

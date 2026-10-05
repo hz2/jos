@@ -28,8 +28,14 @@ Check items off in the same commit that finishes them.
 - [x] `Unmap` (16): unmap a frame or table (and everything beneath a table)
 - [x] per-thread address spaces: `switch_to` loads each thread's VSpace into
       `CR3`, so threads in different VSpaces are isolated
-- [ ] configure a TCB from userspace (its VSpace, CSpace, IPC buffer, and
-      entry point) through a TCB capability; today kernel setup code does it
+- [x] start threads from userspace: a TCB object holds its own kernel stack,
+      and `TcbConfigure` (17), `TcbSetIpcBuffer` (18), `TcbStart` (19) set up
+      and launch it
+- [ ] copy or mint a capability into another CNode, so a new thread's CSpace
+      can hold something (today it starts empty)
+- [ ] revoking a started thread, or the CNode or VSpace it runs in
+- [ ] the root task must be registered with the scheduler like any thread, or
+      the timer never switches to the threads it starts
 - [ ] revoking a VSpace capability while a thread still runs in it
 - [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized
       object is built by value on a syscall stack any more

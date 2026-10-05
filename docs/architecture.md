@@ -194,6 +194,16 @@ IRQ: CPU pushes ss, rsp, rflags, cs, rip on the rsp0 stack
 `swapgs` must pair exactly once on entry and once on exit; an unpaired swap
 leaks the kernel GS base to user mode.
 
+## Starting Threads
+
+A TCB object is 16 KiB: a 512-byte header (the saved register context, the
+`CSpace` and `VSpace` roots, scheduling state) followed by the thread's own
+kernel stack, so carving one object gives a complete thread and the kernel
+never allocates a stack. A thread that holds the capabilities starts another in
+three steps, each checked on its own: `TcbConfigure` gives it a CNode and a
+`VSpace`, `TcbSetIpcBuffer` registers its buffer frame, and `TcbStart` sets its
+entry point and stack and hands it to the scheduler. A thread starts once.
+
 ## Per-CPU State and Context Switch
 
 `CpuLocal` is reached through the GS base after `swapgs`. It holds the current

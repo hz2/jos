@@ -30,6 +30,7 @@ confirm the proof fails, revert.
 | IPC-BADGE | a badge is set at most once and inherited unchanged; badged mints never escalate; the endpoint delivers the sender's badge with the message | Kani | `cap_space.rs`, `endpoint.rs` |
 | REPLY-1 | a reply object accepts at most one answer per bound caller and never delivers to an unbound one | Kani | `reply.rs` |
 | IPCBUF-1 | message words survive the trip through IPC buffers: the receiver sees word 0 and the sender's words 1 to 3; with no sender buffer it sees zeros, never stale data | Kani | `ipc_buffer.rs` |
+| MAP-1 | the mapping registry never holds two mappings of the same object, over any sequence of records and forgets; a recorded mapping is found and removed exactly | Kani | `mapping.rs` |
 | EP-1 | endpoint rendezvous: sender and receiver never both parked; parking is self-guarding; messages are neither fabricated nor corrupted | Kani | `endpoint.rs` |
 | NTFN-1 | notification state machine invariants | Kani | `notification.rs` |
 | CLOCK-1 | `KernelClock` is monotone; deadlines are never in the past | Kani | `clock.rs` |

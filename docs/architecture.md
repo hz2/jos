@@ -149,7 +149,15 @@ PML4 (512 entries, 512 GiB each)
 ```
 
 Each `VSpace` clones the kernel PML4 entries so the kernel stays mapped across a
-CR3 switch. User code pages are W^X (writable only while being loaded, then
+CR3 switch. Userspace builds the rest from capabilities, the seL4 way: a
+`VSpace` is its own object type (a root that can never be confused with an
+intermediate table), `MapPageTable` installs a PageTable capability at the first
+missing level on the path to an address, and `MapFrame` maps a Frame at the
+leaf, refusing writable-and-executable mappings and writable mappings through a
+capability without `WRITE`. The kernel never allocates a table itself. A verified
+registry (`jos-core/src/mapping.rs`) keeps each table and frame mapped at most
+once, and revoking its capability unmaps it and everything beneath it, deepest
+level first, so a table never comes back carrying stale entries. User code pages are W^X (writable only while being loaded, then
 read-execute); stacks are non-executable. Kernel objects rely on the identity
 map: an object's physical address is its virtual address.
 

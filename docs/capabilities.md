@@ -32,6 +32,7 @@ Everything the kernel manages is one of these:
 | `Notification` | `cap.rs` | 64 / 64 bytes | Asynchronous signal word: badges OR together, one parked waiter |
 | `Reply` | `cap.rs` | 128 / 64 bytes | One-shot reply: bound to a caller by `Call`, answered once by `Reply` |
 | `Frame` | `cap.rs` | 4096 / 4096 bytes | One page of memory; registered as an IPC buffer with `SetIpcBuffer` |
+| `VSpace` | `cap.rs` | 4096 / 4096 bytes | An address-space root; userspace maps tables and frames into it |
 
 `Endpoint`, `Notification`, `Reply`, and `Tcb` are cache-line (64-byte) aligned: in
 both cases size and alignment are powers of two and alignment divides size, so
@@ -201,7 +202,8 @@ The current syscalls are `add` and `exit` (test probes), `ipc_send` /
 `ipc_recv` and their blocking variants, `retype`, `invoke`, `mint`, and the
 `call` / `recv_reply` / `reply` trio for request-response IPC (plus
 `reply_recv`, the server loop in one call), and
-`set_ipc_buffer` to register a Frame as the caller's IPC buffer. A
+`set_ipc_buffer` to register a Frame as the caller's IPC buffer, and
+`map_page_table` / `map_frame` to build an address space from capabilities. A
 syscall returns its result in `rax` and a secondary result (the sender badge on
 a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit
 63). The authoritative list is `Syscall` in `kernel/src/syscall.rs`.

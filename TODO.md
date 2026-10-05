@@ -21,7 +21,14 @@ Check items off in the same commit that finishes them.
 - [x] `Frame` objects (retypeable from untyped) and `SetIpcBuffer` (12), which
       only accepts a Frame cap with READ and WRITE; revoking the cap
       unregisters the buffer
-- [ ] a syscall to map a Frame into a VSpace (today the kernel maps it)
+- [x] `VSpace` objects and `MapPageTable` (14) / `MapFrame` (15): userspace builds
+      address spaces from table and frame capabilities; a verified registry
+      keeps each object mapped once, and revoking a table or frame unmaps it
+      and everything beneath it
+- [ ] an `Unmap` syscall (today only revocation unmaps)
+- [ ] per-thread address spaces: the scheduler loads each thread's VSpace
+      into `CR3` on a switch (today threads share one)
+- [ ] revoking a VSpace capability while a thread still runs in it
 - [ ] retyping a CNode through the syscall still builds a 4 KiB value on the
       kernel stack (the overflow class fixed for frames and page tables)
 - [ ] decide cross-CSpace derivation (ROADMAP open decision 1), then cap transfer

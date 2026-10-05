@@ -667,8 +667,9 @@ pub enum TcbState {
 pub struct Tcb {
     /// The thread's saved register context.
     pub context: SavedContext,
-    /// Physical address of the thread's `VSpace` `PML4` (its address space
-    /// root). Zero means "no address space assigned yet".
+    /// Physical address of the thread's `VSpace` root, loaded into `CR3` by
+    /// [`switch_to`](crate::cpu_local::switch_to). Zero means "no address space
+    /// assigned yet": the thread runs in whatever address space is active.
     pub vspace_root: u64,
     /// Top of this thread's kernel stack (16-aligned). The per-CPU block's
     /// `kernel_rsp` is loaded from here on a context switch, so the `syscall`

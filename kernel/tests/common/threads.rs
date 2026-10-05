@@ -8,12 +8,16 @@
 //! code at offset 0, stack at `0x1000`, and its IPC buffer at `0x2000`. The
 //! buffer frame is registered in the thread's TCB and its address is passed in
 //! `rdi` at start. A zeroed page at [`SHARED_ADDR`] is mapped read-write for
-//! every thread.
+//! every thread. With [`Spaces::Separate`] every thread runs in its own
+//! address space and the scheduler switches `CR3` with the thread.
 //!
 //! When a test needs several threads' checks to pass and any may finish last,
 //! each program ends with `lock inc qword ptr [SHARED_ADDR]` and exits with
 //! success only if the counter then reads the number of checking threads; the
 //! others spin.
+
+// each test binary compiles this module on its own and uses only part of it.
+#![allow(dead_code)]
 
 use jos::cap::{KernelCapSpace, Tcb, UntypedRegion};
 use jos::cpu_local;
@@ -28,6 +32,9 @@ use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 pub const MAX_TEST_THREADS: usize = 4;
 /// User address of the zeroed data page every thread can read and write.
 pub const SHARED_ADDR: u64 = usermode::USER_BASE + 0x4000;
+/// User address of each thread's private page under [`Spaces::Separate`]: the
+/// same address in every address space, a different frame behind it.
+pub const PRIVATE_ADDR: u64 = usermode::USER_BASE + 0x8000;
 
 /// Returns the base of thread `i`'s 64 KiB user window.
 const fn window(i: usize) -> u64 {
@@ -73,20 +80,46 @@ unsafe fn load(program: Program, frame: PhysFrame) {
     }
 }
 
+/// Whether the threads share one address space or each get their own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Spaces {
+    /// One `VSpace` for every thread.
+    Shared,
+    /// A `VSpace` per thread. Each also gets a private page at
+    /// [`PRIVATE_ADDR`], backed by a different frame in every address space.
+    Separate,
+}
+
+/// Boots one thread per program in one shared address space; see [`boot_with`].
+///
+/// # Safety
+///
+/// As [`boot_with`].
+pub unsafe fn boot(
+    info_ptr: u32,
+    programs: &[Program],
+    caps: impl FnOnce(&mut UntypedRegion, &mut KernelCapSpace),
+) -> ! {
+    // SAFETY: forwarded unchanged; same contract.
+    unsafe { boot_with(info_ptr, programs, Spaces::Shared, caps) }
+}
+
 /// Boots one thread per program and enters ring 3 as thread 0. Never returns;
 /// the programs end the test through the exit syscall.
 ///
 /// `caps` fills the shared `CSpace`, carving objects from the test's untyped
-/// region.
+/// region. Each thread's `vspace_root` is set, so the scheduler switches
+/// address spaces with the thread.
 ///
 /// # Safety
 ///
 /// Call once, from `kernel_main`, with the multiboot `info_ptr` the boot
 /// trampoline passed in; each program must bound bytes emitted by a
 /// `global_asm!`, and there must be between 1 and [`MAX_TEST_THREADS`] of them.
-pub unsafe fn boot(
+pub unsafe fn boot_with(
     info_ptr: u32,
     programs: &[Program],
+    spaces: Spaces,
     caps: impl FnOnce(&mut UntypedRegion, &mut KernelCapSpace),
 ) -> ! {
     assert!(!programs.is_empty() && programs.len() <= MAX_TEST_THREADS, "1 to 4 threads");
@@ -97,26 +130,39 @@ pub unsafe fn boot(
     let mut frames = unsafe { BootstrapFrameAllocator::new(info_ptr) };
     // SAFETY: page-aligned static backing, handed out once.
     let mut untyped = unsafe { UntypedRegion::new(&mut (*core::ptr::addr_of_mut!(UNTYPED)).0) };
-    // SAFETY: untyped region is freshly initialized; called once before mappings.
-    let mut vspace = unsafe { VSpace::new(&mut untyped).expect("vspace") };
-
-    let code = PteFlags::PRESENT | PteFlags::USER;
-    let data = PteFlags::PRESENT | PteFlags::WRITABLE | PteFlags::USER | PteFlags::NO_EXECUTE;
-    let mut map = |vspace: &mut VSpace, untyped: &mut UntypedRegion, addr: u64, flags: PteFlags| {
+    let mut fresh_frame = || {
         let frame = frames.allocate_frame().expect("frame");
         // SAFETY: the frame is fresh and identity-mapped; zeroing it gives every
-        // data page (stacks, buffers, the shared counter) a known start, and
-        // each address is a distinct user page.
+        // data page (stacks, buffers, counters) a known start.
+        unsafe { core::ptr::write_bytes(frame.start_address().as_u64() as *mut u8, 0, 4096) };
+        frame
+    };
+    let map = |vspace: &mut VSpace, untyped: &mut UntypedRegion, addr: u64, frame: PhysFrame, flags| {
+        // SAFETY: the frame is identity-mapped and each address is a distinct
+        // user page in this address space.
         unsafe {
-            core::ptr::write_bytes(frame.start_address().as_u64() as *mut u8, 0, 4096);
             vspace
                 .map_page(untyped, addr, frame.start_address().as_u64(), flags)
                 .expect("map user page");
         }
-        frame
     };
 
-    map(&mut vspace, &mut untyped, SHARED_ADDR, data);
+    let count = if spaces == Spaces::Separate { programs.len() } else { 1 };
+    let mut vspaces: [Option<VSpace>; MAX_TEST_THREADS] = [None, None, None, None];
+    for slot in vspaces.iter_mut().take(count) {
+        // SAFETY: the untyped region is live; each root is carved fresh.
+        *slot = Some(unsafe { VSpace::new(&mut untyped).expect("vspace") });
+    }
+    let space_of = |i: usize| if spaces == Spaces::Separate { i } else { 0 };
+
+    let code = PteFlags::PRESENT | PteFlags::USER;
+    let data = PteFlags::PRESENT | PteFlags::WRITABLE | PteFlags::USER | PteFlags::NO_EXECUTE;
+    // the shared page is one frame mapped into every address space.
+    let shared = fresh_frame();
+    for vspace in vspaces.iter_mut().flatten() {
+        map(vspace, &mut untyped, SHARED_ADDR, shared, data);
+    }
+
     let sel = gdt::selectors();
     // SAFETY: the statics are written once here, before any context switch.
     let cspace_ptr = unsafe {
@@ -129,9 +175,15 @@ pub unsafe fn boot(
     let mut tcb_ptrs = [core::ptr::null_mut::<Tcb>(); MAX_TEST_THREADS];
     for (i, program) in programs.iter().enumerate() {
         let base = window(i);
-        let code_frame = map(&mut vspace, &mut untyped, base, code);
-        map(&mut vspace, &mut untyped, base + 0x1000, data);
-        let buffer = map(&mut vspace, &mut untyped, base + 0x2000, data);
+        let vspace = vspaces[space_of(i)].as_mut().unwrap();
+        let (code_frame, stack, buffer) = (fresh_frame(), fresh_frame(), fresh_frame());
+        map(vspace, &mut untyped, base, code_frame, code);
+        map(vspace, &mut untyped, base + 0x1000, stack, data);
+        map(vspace, &mut untyped, base + 0x2000, buffer, data);
+        if spaces == Spaces::Separate {
+            map(vspace, &mut untyped, PRIVATE_ADDR, fresh_frame(), data);
+        }
+        let root = vspace.root_phys();
         // SAFETY: program bounds emitted bytes (this function's contract); the
         // code frame was just allocated and is identity-mapped.
         unsafe { load(*program, code_frame) };
@@ -143,6 +195,7 @@ pub unsafe fn boot(
             (*tcb).kernel_stack_top =
                 core::ptr::addr_of!(KSTACKS[i]) as u64 + KSTACK_SIZE as u64;
             (*tcb).cspace_ptr = cspace_ptr;
+            (*tcb).vspace_root = root;
             (*tcb).ipc_buffer = buffer.start_address().as_u64();
             // threads other than 0 are entered by the scheduler's iretq.
             (*tcb).context.rip = base;
@@ -168,12 +221,11 @@ pub unsafe fn boot(
     }
     sched::set_current(first);
 
-    // SAFETY: thread 0's TCB is live; ring 0; interrupts disabled.
+    // SAFETY: thread 0's TCB is live, with its kernel stack, CSpace, and VSpace
+    // set; ring 0; interrupts disabled. switch_to loads its address space.
     unsafe { cpu_local::switch_to(tcb_ptrs[0]) };
-    // SAFETY: VSpace::new cloned the kernel PML4 entries.
-    unsafe { vspace.activate() };
     // SAFETY: pages mapped; init and init_syscall ran; switch_to installed
-    // thread 0's kernel stack.
+    // thread 0's kernel stack and address space.
     unsafe {
         usermode::enter_user_mode_with_arg(
             VirtAddr::new(window(0)),

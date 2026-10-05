@@ -33,6 +33,9 @@
 //! `interrupts.rs`.
 
 use crate::cap::{KernelCapSpace, Tcb};
+use x86_64::PhysAddr;
+use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::structures::paging::PhysFrame;
 
 /// Per-CPU kernel data, addressed via `gs:` after the entry stub's `swapgs`.
 ///
@@ -137,7 +140,8 @@ pub fn cpu_local_ptr() -> *mut CpuLocal {
 }
 
 /// Points the per-CPU block at `tcb`: the next `syscall` entry switches to
-/// `tcb`'s kernel stack and resolves capabilities in its capability space.
+/// `tcb`'s kernel stack and resolves capabilities in its capability space, and
+/// `tcb`'s address space (if it has one) becomes the active one.
 ///
 /// Does not save the outgoing thread's context (that is a preemption concern);
 /// it just selects which thread the kernel serves next.
@@ -146,8 +150,9 @@ pub fn cpu_local_ptr() -> *mut CpuLocal {
 ///
 /// `tcb` must point to a live, initialized [`Tcb`] whose `kernel_stack_top` is
 /// the top of a valid kernel stack and whose `cspace_ptr` is a live, `'static`
-/// [`KernelCapSpace`] (or null). Must be called from ring 0 with interrupts
-/// disabled.
+/// [`KernelCapSpace`] (or null). Its `vspace_root`, if non-zero, must be a
+/// `VSpace` root with the kernel entries copied in. Must be called from ring 0
+/// with interrupts disabled.
 pub unsafe fn switch_to(tcb: *mut Tcb) {
     // SAFETY: per this fn's contract tcb is live; single-CPU, interrupts
     // disabled, so the &mut CpuLocal does not alias another access.
@@ -157,6 +162,19 @@ pub unsafe fn switch_to(tcb: *mut Tcb) {
         local.kernel_rsp = tcb_ref.kernel_stack_top;
         local.current_cspace = tcb_ref.cspace_ptr;
         local.current_tcb = tcb;
+        // load the thread's address space. every VSpace carries the kernel's
+        // identity map and higher half, so the kernel keeps running across the
+        // switch; skipping an unchanged root avoids a needless TLB flush.
+        let root = tcb_ref.vspace_root;
+        if root != 0 && root != Cr3::read().0.start_address().as_u64() {
+            // SAFETY: root is the physical address of a VSpace the thread was
+            // given (a page-aligned root with the kernel entries copied in), so
+            // the code, stack, and data running this switch stay mapped.
+            Cr3::write(
+                PhysFrame::containing_address(PhysAddr::new(root)),
+                Cr3Flags::empty(),
+            );
+        }
         // keep TSS rsp0 in sync so ring-3 interrupts also land on this thread's
         // kernel stack, not the shared boot-time PRIVILEGE_STACK. the CPU reads
         // privilege_stack_table[0] from memory on every ring-3 -> ring-0

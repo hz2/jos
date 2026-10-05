@@ -387,7 +387,7 @@ impl Sim {
                         self.seed, self.seq,
                     );
                     assert_eq!(
-                        cap.parent, mc.parent,
+                        cap.parent.map(|link| link.cap), mc.parent,
                         "seed={} seq={}: slot {s} parent disagrees",
                         self.seed, self.seq,
                     );
@@ -477,7 +477,7 @@ fn snapshot(
         .map(|s| {
             space.ref_at(s).map(|r| {
                 let cap = space.lookup(r).expect("ref_at slot is live");
-                (cap.object, cap.rights, cap.parent.map(|p| p.slot()))
+                (cap.object, cap.rights, cap.parent.map(|p| p.cap.slot()))
             })
         })
         .collect()

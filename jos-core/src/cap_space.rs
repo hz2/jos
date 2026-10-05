@@ -36,6 +36,23 @@ use crate::cap_table::{CapRef, CapTable};
 use crate::notification::Badge;
 pub use crate::cap_table::InsertAtError;
 
+/// Identifies a capability space, so a derivation link can point into any of
+/// them. The kernel gives every space a distinct id when it registers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceId(pub u32);
+
+/// A link to one capability in some capability space: the space plus the
+/// generation-checked [`CapRef`] inside it. Parent links are `CapLink`s, so the
+/// derivation tree can span spaces (a capability copied into another thread's
+/// `CNode` still descends from its source, and revoking the source reaches it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapLink {
+    /// The space holding the capability.
+    pub space: SpaceId,
+    /// The capability within that space.
+    pub cap: CapRef,
+}
+
 /// A typed, rights-bearing capability: the entry stored in a [`CapSpace`] slot.
 ///
 /// `O` is the object-handle type (in the kernel, a reference into the object
@@ -47,10 +64,11 @@ pub struct Capability<O: Copy> {
     pub object: O,
     /// The operations the holder may invoke on the object.
     pub rights: Rights,
-    /// The capability this one was derived from, if any. `None` marks an
-    /// original capability (for example, the one produced by retyping untyped
-    /// memory). Used to find children during revocation.
-    pub parent: Option<CapRef>,
+    /// The capability this one was derived from, if any, possibly in another
+    /// capability space. `None` marks an original capability (for example, the
+    /// one produced by retyping untyped memory). Used to find descendants during
+    /// revocation.
+    pub parent: Option<CapLink>,
     /// The badge delivered to a receiver with every message sent through this
     /// capability, so a server can tell its clients apart. [`Badge::NONE`]
     /// means unbadged. Set at most once, by [`CapSpace::mint_badged`]; every
@@ -86,16 +104,44 @@ pub enum MintError {
 
 /// A single-level capability space backed by a [`CapTable`] of `N` slots.
 pub struct CapSpace<O: Copy, const N: usize> {
+    /// This space's id, recorded in the parent links of capabilities derived
+    /// from it.
+    id: SpaceId,
     table: CapTable<Capability<O>, N>,
 }
 
 impl<O: Copy, const N: usize> CapSpace<O, N> {
-    /// Creates an empty capability space.
+    /// Creates an empty capability space with id 0. Use
+    /// [`with_id`](Self::with_id) when several spaces must link to each other.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_id(SpaceId(0))
+    }
+
+    /// Creates an empty capability space with the given id.
+    #[must_use]
+    pub fn with_id(id: SpaceId) -> Self {
         Self {
+            id,
             table: CapTable::new(),
         }
+    }
+
+    /// Returns this space's id.
+    #[must_use]
+    pub const fn id(&self) -> SpaceId {
+        self.id
+    }
+
+    /// Sets this space's id. Only for a space that holds no capabilities yet,
+    /// since existing links record the old id; returns `false` (changing
+    /// nothing) otherwise.
+    pub fn set_id(&mut self, id: SpaceId) -> bool {
+        if !self.is_empty() {
+            return false;
+        }
+        self.id = id;
+        true
     }
 
     /// Initializes an empty capability space in place at `ptr`, without
@@ -107,8 +153,11 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
     /// previously there is overwritten without being dropped.
     pub unsafe fn init_in_place(ptr: *mut Self) {
         // SAFETY: per this function's contract `ptr` is valid and aligned for
-        // `Self`, and so for its only field.
-        unsafe { CapTable::init_in_place(core::ptr::addr_of_mut!((*ptr).table)) }
+        // `Self`, and so for each of its fields.
+        unsafe {
+            core::ptr::addr_of_mut!((*ptr).id).write(SpaceId(0));
+            CapTable::init_in_place(core::ptr::addr_of_mut!((*ptr).table));
+        }
     }
 
     /// Returns the total number of capability slots, `N`.
@@ -211,7 +260,7 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
             object: parent.object,
             // monotone: the result is a subset of the parent's rights.
             rights: parent.rights.attenuate(mask),
-            parent: Some(source),
+            parent: Some(CapLink { space: self.id, cap: source }),
             // a plain mint inherits the badge, never changes it.
             badge: parent.badge,
         };
@@ -244,10 +293,43 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         let derived = Capability {
             object: parent.object,
             rights: parent.rights.attenuate(mask),
-            parent: Some(source),
+            parent: Some(CapLink { space: self.id, cap: source }),
             badge,
         };
         self.table.insert(derived).map_err(|_| MintError::SpaceFull)
+    }
+
+    /// Derives a copy of the capability at `source` into slot `slot` of another
+    /// space, `dest`, with rights attenuated by `mask` and the badge inherited.
+    ///
+    /// The copy's parent link points back to `source` in this space, so
+    /// revoking the source with [`revoke_across`] reaches the copy. Like
+    /// [`mint`](Self::mint), a copy can only lose rights, never gain them.
+    ///
+    /// # Errors
+    ///
+    /// See [`CopyError`].
+    pub fn copy_into<const M: usize>(
+        &self,
+        source: CapRef,
+        dest: &mut CapSpace<O, M>,
+        slot: usize,
+        mask: Rights,
+    ) -> Result<CapRef, CopyError> {
+        if dest.id == self.id {
+            return Err(CopyError::SameSpace);
+        }
+        let parent = self.table.get(source).ok_or(CopyError::InvalidSource)?;
+        let derived = Capability {
+            object: parent.object,
+            rights: parent.rights.attenuate(mask),
+            parent: Some(CapLink { space: self.id, cap: source }),
+            badge: parent.badge,
+        };
+        dest.table.insert_at(slot, derived).map_err(|e| match e {
+            InsertAtError::OutOfRange => CopyError::OutOfRange,
+            InsertAtError::Occupied => CopyError::Occupied,
+        })
     }
 
     /// Removes the capability named by `cap_ref`, returning it if it was live.
@@ -322,8 +404,10 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         // bound the walk by the slot count so a corrupted cycle cannot hang.
         for _ in 0..N {
             match self.table.get(current).and_then(|cap| cap.parent) {
-                Some(p) if p == ancestor => return true,
-                Some(p) => current = p,
+                // a link into another space leaves this space's tree.
+                Some(p) if p.space != self.id => return false,
+                Some(p) if p.cap == ancestor => return true,
+                Some(p) => current = p.cap,
                 None => return false,
             }
         }
@@ -335,6 +419,113 @@ impl<O: Copy, const N: usize> Default for CapSpace<O, N> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Errors from [`CapSpace::copy_into`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyError {
+    /// The source `CapRef` does not name a live capability.
+    InvalidSource,
+    /// The destination slot is out of range.
+    OutOfRange,
+    /// The destination slot already holds a capability.
+    Occupied,
+    /// Both spaces carry the same id, so a link could not tell them apart.
+    SameSpace,
+}
+
+/// Returns the capability `link` names among `spaces`, if it is live.
+fn resolve<'a, O: Copy, const N: usize>(
+    spaces: &'a [&mut CapSpace<O, N>],
+    link: CapLink,
+) -> Option<&'a Capability<O>> {
+    spaces.iter().find(|s| s.id == link.space)?.lookup(link.cap)
+}
+
+/// Returns `true` if `link` is `ancestor`, or descends from it through parent
+/// links that may cross between `spaces`.
+fn descends_across<O: Copy, const N: usize>(
+    spaces: &[&mut CapSpace<O, N>],
+    link: CapLink,
+    ancestor: CapLink,
+) -> bool {
+    let mut current = link;
+    // bound the walk by the total slot count so a corrupted cycle cannot hang.
+    for _ in 0..=spaces.len() * N {
+        if current == ancestor {
+            return true;
+        }
+        match resolve(spaces, current).and_then(|cap| cap.parent) {
+            Some(parent) => current = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Returns `true` if any capability in `spaces` names `link` as its parent.
+fn has_child<O: Copy, const N: usize>(spaces: &[&mut CapSpace<O, N>], link: CapLink) -> bool {
+    let mut found = false;
+    for space in spaces {
+        space.table.for_each(|_, cap| found |= cap.parent == Some(link));
+    }
+    found
+}
+
+/// Calls `f` with every live capability in the subtree rooted at `root` (the
+/// root included), wherever in `spaces` it lives, without removing anything.
+///
+/// This visits exactly the set [`revoke_across`] would remove, so a caller can
+/// act on those capabilities' objects first (for example, waking IPC waiters
+/// parked on an endpoint about to be revoked).
+pub fn for_each_descendant_across<O: Copy, const N: usize>(
+    spaces: &[&mut CapSpace<O, N>],
+    root: CapLink,
+    mut f: impl FnMut(CapLink, &Capability<O>),
+) {
+    for space in spaces {
+        space.table.for_each(|cap_ref, cap| {
+            let link = CapLink { space: space.id, cap: cap_ref };
+            if descends_across(spaces, link, root) {
+                f(link, cap);
+            }
+        });
+    }
+}
+
+/// Revokes `root` and everything derived from it, in every space in `spaces`,
+/// and returns how many capabilities were removed.
+///
+/// It removes the subtree leaves first: each step finds a capability in the
+/// subtree that no other capability names as its parent and removes it. Every
+/// link it follows to decide membership therefore stays intact until the
+/// capability holding it is itself removed, with no scratch storage needed.
+pub fn revoke_across<O: Copy, const N: usize>(
+    spaces: &mut [&mut CapSpace<O, N>],
+    root: CapLink,
+) -> usize {
+    let mut removed = 0;
+    while let Some(leaf) = find_leaf(spaces, root) {
+        if let Some(space) = spaces.iter_mut().find(|s| s.id == leaf.space) {
+            space.table.remove(leaf.cap);
+        }
+        removed += 1;
+    }
+    removed
+}
+
+/// Returns a capability in the subtree rooted at `root` that has no children.
+fn find_leaf<O: Copy, const N: usize>(spaces: &[&mut CapSpace<O, N>], root: CapLink) -> Option<CapLink> {
+    let mut found = None;
+    for space in spaces {
+        space.table.for_each(|cap_ref, _| {
+            let link = CapLink { space: space.id, cap: cap_ref };
+            if found.is_none() && descends_across(spaces, link, root) && !has_child(spaces, link) {
+                found = Some(link);
+            }
+        });
+    }
+    found
 }
 
 #[cfg(test)]
@@ -375,7 +566,7 @@ mod tests {
         let ro = space.mint(full, Rights::READ).unwrap();
         assert!(space.check(ro, Rights::READ));
         assert!(!space.check(ro, Rights::WRITE));
-        assert_eq!(space.lookup(ro).unwrap().parent, Some(full));
+        assert_eq!(space.lookup(ro).unwrap().parent, Some(CapLink { space: space.id(), cap: full }));
         // minting cannot escalate: a read-only cap minted with WRITE stays empty.
         let escalated = space.mint(ro, Rights::WRITE).unwrap();
         assert_eq!(space.lookup(escalated).unwrap().rights, Rights::empty());
@@ -473,6 +664,56 @@ mod tests {
         let a = space.insert(1, Rights::all()).unwrap();
         let _b = space.insert(2, Rights::all()).unwrap();
         assert_eq!(space.mint(a, Rights::READ), Err(MintError::SpaceFull));
+    }
+
+    #[test]
+    fn copy_into_attenuates_and_links_back() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
+        let src = a.insert(7, Rights::all()).unwrap();
+        let copy = a.copy_into(src, &mut b, 3, Rights::READ).unwrap();
+        assert_eq!(copy.slot(), 3);
+        let cap = b.lookup(copy).unwrap();
+        assert_eq!((cap.object, cap.rights), (7, Rights::READ));
+        assert_eq!(cap.parent, Some(CapLink { space: SpaceId(1), cap: src }));
+    }
+
+    #[test]
+    fn copy_into_refuses_a_space_with_the_same_id() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let src = a.insert(7, Rights::all()).unwrap();
+        assert_eq!(a.copy_into(src, &mut b, 0, Rights::all()), Err(CopyError::SameSpace));
+    }
+
+    #[test]
+    fn revoke_across_reaches_copies_in_other_spaces() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
+        let root = a.insert(7, Rights::all()).unwrap();
+        let child = a.mint(root, Rights::READ_WRITE).unwrap();
+        // a copy of the child in b, and a copy of that copy back in a.
+        let in_b = a.copy_into(child, &mut b, 0, Rights::all()).unwrap();
+        b.copy_into(in_b, &mut a, 3, Rights::READ).unwrap();
+        // an unrelated original in b survives.
+        let other = b.insert(9, Rights::all()).unwrap();
+        let removed = revoke_across(&mut [&mut a, &mut b], CapLink { space: SpaceId(1), cap: root });
+        assert_eq!(removed, 4);
+        assert!(a.is_empty());
+        assert_eq!(b.len(), 1);
+        assert!(b.lookup(other).is_some());
+    }
+
+    #[test]
+    fn revoking_a_copy_leaves_its_source() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
+        let src = a.insert(7, Rights::all()).unwrap();
+        let copy = a.copy_into(src, &mut b, 0, Rights::all()).unwrap();
+        let removed = revoke_across(&mut [&mut a, &mut b], CapLink { space: SpaceId(2), cap: copy });
+        assert_eq!(removed, 1);
+        assert!(a.lookup(src).is_some());
+        assert!(b.is_empty());
     }
 
     #[test]
@@ -643,6 +884,38 @@ mod kani_proofs {
                     == Err(MintError::AlreadyBadged)
             );
         }
+    }
+
+    /// A copy into another space never grants a right the source lacked.
+    #[kani::proof]
+    fn copy_never_escalates() {
+        let mut a: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(2));
+        let src_rights = Rights::from_bits_truncate(kani::any());
+        let mask = Rights::from_bits_truncate(kani::any());
+        let src = a.insert(kani::any(), src_rights).unwrap();
+        if let Ok(copy) = a.copy_into(src, &mut b, kani::any(), mask) {
+            let rights = b.lookup(copy).unwrap().rights;
+            assert!(src_rights.contains(rights));
+            assert!(mask.contains(rights));
+        }
+    }
+
+    /// Revoking an original removes every copy of it in another space, and of
+    /// those copies, while an unrelated capability survives.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn revoke_across_removes_every_copy() {
+        let mut a: CapSpace<u32, 3> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<u32, 3> = CapSpace::with_id(SpaceId(2));
+        let root = a.insert(kani::any(), Rights::from_bits_truncate(kani::any())).unwrap();
+        let copy = a.copy_into(root, &mut b, 0, Rights::from_bits_truncate(kani::any())).unwrap();
+        let _ = b.mint(copy, Rights::from_bits_truncate(kani::any()));
+        let other = b.insert_at(2, kani::any(), Rights::all()).unwrap();
+        revoke_across(&mut [&mut a, &mut b], CapLink { space: SpaceId(1), cap: root });
+        assert!(a.is_empty());
+        assert!(b.len() == 1);
+        assert!(b.lookup(other).is_some());
     }
 
     /// Badging is still a mint: it never grants a right the source lacked.

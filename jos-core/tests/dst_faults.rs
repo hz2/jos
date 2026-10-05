@@ -417,7 +417,7 @@ impl FaultSim {
                         self.regime, self.seed, self.seq,
                     );
                     assert_eq!(
-                        cap.parent, mc.parent,
+                        cap.parent.map(|link| link.cap), mc.parent,
                         "{} seed={} seq={}: slot {s} parent disagrees",
                         self.regime, self.seed, self.seq,
                     );

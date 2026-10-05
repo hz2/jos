@@ -215,11 +215,15 @@ a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit
 
 jos intentionally departs from seL4 in three places:
 
-- **Generation-counted CapRefs instead of CDT-walk revocation.** seL4 maintains
-  a Capability Derivation Tree and walks it on revoke. jos bumps a per-slot
-  generation counter on remove, so the common revocation case is O(1) without
-  a CDT walk. The subtree revoke still does a scan, but it traverses the
-  in-table `parent` links rather than a separate CDT.
+- **Generation-counted CapRefs alongside a derivation tree.** Like seL4, jos
+  keeps a capability derivation tree that spans capability spaces: each
+  capability's `parent` link names a space and a generation-checked slot, so a
+  capability copied into another thread's CNode (`CNodeCopy`) still descends
+  from its source, and revoking the source removes it. Unlike seL4, the links
+  live in the capabilities themselves rather than a separate structure, and
+  removing one capability is O(1): its slot's generation bumps, so every
+  outstanding ref to it goes stale at once. A subtree revoke removes the
+  subtree leaves first across every registered space.
 
 - **Two-level addressing (global object table + per-CSpace cap table).** seL4
   addresses objects via raw CNode pointers traversed from a root CNode. jos

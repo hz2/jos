@@ -52,9 +52,12 @@ speak IPC.
 - [x] per-thread VSpaces switched on context switch
 - [x] configure and start TCBs from userspace (TCB objects carry their own
       kernel stack)
-- [ ] copy capabilities into another thread's CNode
-- [ ] capability transfer over IPC (needs the cross-CSpace derivation decision,
-      see "open decisions")
+- [x] copy capabilities into another thread's CNode (`CNodeCopy`)
+- [x] cross-space derivation tree: parent links name a space and a slot, so
+      revoking a capability reaches its copies in other CNodes (decided: a
+      global tree, the seL4 model)
+- [ ] capability transfer over IPC (copying works; sending one with a message
+      does not yet)
 - [ ] JPC-1: Verus proof of rendezvous deadlock-freedom
 
 ### M2. Userspace crate, ELF loader, root task
@@ -125,12 +128,7 @@ speak IPC.
 
 ## Open decisions
 
-1. **Cross-CSpace derivation**: `CapSpace` tracks parent links within one
-   space, so a cap transferred over IPC cannot be revoked from the sender's
-   side today. Options: a global derivation tree (seL4 CDT, most faithful), or
-   a back-link (space id + ref) recorded on each transferred copy. Blocks cap
-   transfer in M1.
-2. **Bootloader**: keep the hand-rolled multiboot2 trampoline, or move to
+1. **Bootloader**: keep the hand-rolled multiboot2 trampoline, or move to
    Limine for UEFI + SMP handoff before M5.
 
 ## How to build and test

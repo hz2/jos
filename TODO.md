@@ -31,15 +31,18 @@ Check items off in the same commit that finishes them.
 - [x] start threads from userspace: a TCB object holds its own kernel stack,
       and `TcbConfigure` (17), `TcbSetIpcBuffer` (18), `TcbStart` (19) set up
       and launch it
-- [ ] copy or mint a capability into another CNode, so a new thread's CSpace
-      can hold something (today it starts empty)
+- [x] `CNodeCopy` (20): copy an attenuated capability into another CNode; the
+      copy stays in a global derivation tree, so revoking the source reaches it
 - [ ] revoking a started thread, or the CNode or VSpace it runs in
 - [ ] the root task must be registered with the scheduler like any thread, or
       the timer never switches to the threads it starts
 - [ ] revoking a VSpace capability while a thread still runs in it
 - [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized
       object is built by value on a syscall stack any more
-- [ ] decide cross-CSpace derivation (ROADMAP open decision 1), then cap transfer
+- [ ] capability transfer with an IPC message (the derivation tree supports it)
+- [ ] a revoke syscall (today revocation is kernel-internal)
+- [ ] `revoke_across` rescans every space per removed capability; fine at 64
+      slots, worth an index once spaces grow
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)
 
 ## Next: userspace that is not hand-assembled (M2)

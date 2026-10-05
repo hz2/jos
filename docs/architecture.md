@@ -220,7 +220,9 @@ running across the switch.
 
 A `CapRef` is `(slot, generation)`. Removing a capability bumps the slot's
 generation, so every outstanding ref to it goes stale in O(1); `revoke` removes
-a capability and every capability derived from it. Rights only ever shrink
+a capability and every capability derived from it. The derivation tree spans
+capability spaces: a capability copied into another CNode with `CNodeCopy`
+links back to its source, so revoking the source removes the copy too. Rights only ever shrink
 along a derivation chain, which is proved globally (CAP-1).
 
 ## x86_64 Reference

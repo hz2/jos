@@ -82,6 +82,8 @@ pub enum ObjectKind {
     Reply,
     /// One page of memory granted to a thread, for example as its IPC buffer.
     Frame,
+    /// The root of an address space (a top-level page table).
+    VSpace,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -180,13 +182,14 @@ impl ObjectId {
     ///
     /// # Safety
     ///
-    /// The caller must ensure (1) `self.kind == ObjectKind::PageTable`, (2) the
+    /// The caller must ensure (1) `self.kind` is `ObjectKind::PageTable` or
+    /// `ObjectKind::VSpace` (a root is a page table too), (2) the
     /// untyped region that owns the table is still live, and (3) no other live
     /// reference (shared or exclusive) to this table exists. Unlike an endpoint
     /// (whose state is behind a `Mutex`), a page table has no interior
     /// mutability, so mutation requires a genuinely exclusive `&mut`.
     pub(crate) unsafe fn as_page_table_mut(self) -> &'static mut PageTable {
-        debug_assert_eq!(self.kind, ObjectKind::PageTable);
+        debug_assert!(matches!(self.kind, ObjectKind::PageTable | ObjectKind::VSpace));
         let ptr = core::ptr::with_exposed_provenance_mut::<PageTable>(self.addr);
         // SAFETY: the address was captured in retype (kind PageTable) from a
         // pointer derived from the region base where a PageTable was placed; it
@@ -894,6 +897,7 @@ impl UntypedRegion {
             ObjectType::Notification => self.retype_notification(),
             ObjectType::Reply => self.retype_reply(),
             ObjectType::Frame => self.retype_frame(),
+            ObjectType::VSpace => self.retype_vspace(),
             ObjectType::PageTable => self.retype_page_table(),
             ObjectType::Tcb => self.retype_tcb(),
             ObjectType::CNode { size_bits } if size_bits == KERNEL_CNODE_SIZE_BITS => {
@@ -925,6 +929,18 @@ impl UntypedRegion {
             Notification::new(),
             ObjectKind::Notification,
         )
+    }
+
+    /// Carves a fresh address-space root out of this region: a zeroed top-level
+    /// table with the kernel's own root entries copied in, so the kernel stays
+    /// mapped when it is loaded. Returns `None` if the region has no room or is
+    /// not page aligned.
+    pub fn retype_vspace(&mut self) -> Option<ObjectId> {
+        let root = self.retype_zeroed(ObjectType::VSpace, ObjectKind::VSpace)?;
+        // SAFETY: root was just carved as a VSpace and nothing else refers to it;
+        // CR3 holds the kernel's boot root, which every VSpace copies from.
+        unsafe { crate::vspace::clone_kernel_entries(root) };
+        Some(root)
     }
 
     /// Carves a fresh zeroed [`Frame`] out of this region and returns its handle.
@@ -1627,7 +1643,11 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
         let kind = cap.object.kind();
         if matches!(
             kind,
-            ObjectKind::Endpoint | ObjectKind::Notification | ObjectKind::Reply | ObjectKind::Frame
+            ObjectKind::Endpoint
+                | ObjectKind::Notification
+                | ObjectKind::Reply
+                | ObjectKind::Frame
+                | ObjectKind::PageTable
         )
             && count < CSPACE_SLOTS
         {
@@ -1686,8 +1706,14 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                 // a thread must not keep using a buffer it no longer has the
                 // capability for: unregister it everywhere.
                 crate::syscall::forget_ipc_buffer(obj.phys_addr());
+                // and the frame must stop being reachable through its mapping.
+                crate::mapping::unmap_object(obj.phys_addr());
             }
-            // only Endpoint, Notification, Reply, and Frame are collected above.
+            ObjectKind::PageTable => {
+                // unmap the table and everything mapped beneath it.
+                crate::mapping::unmap_object(obj.phys_addr());
+            }
+            // only the kinds matched above are collected in the mark phase.
             _ => {}
         }
     }

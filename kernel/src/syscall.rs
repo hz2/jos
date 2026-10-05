@@ -53,6 +53,7 @@ use crate::cap::{
     self, Badge, cap_recv_badged, cap_recv, cap_send, IpcError, KernelCapSpace, Message, ObjectId,
     ObjectKind, RetypeError,
 };
+use crate::mapping;
 use crate::cpu_local::{
     self, OFF_KERNEL_RSP, OFF_NEED_YIELD, OFF_SAVED_USER_RFLAGS, OFF_SAVED_USER_RBP,
     OFF_SAVED_USER_RBX, OFF_SAVED_USER_RIP, OFF_SAVED_USER_R12, OFF_SAVED_USER_R13,
@@ -144,6 +145,17 @@ pub enum Syscall {
     /// exactly like [`RecvReply`](Syscall::RecvReply). If no caller is bound the
     /// answer is skipped, so a loop can use it from its first iteration.
     ReplyRecv = 13,
+    /// `map_page_table(vspace_slot, table_slot, vaddr) -> 0 | errno`. Installs
+    /// the page table at the first missing level on the path to `vaddr` in the
+    /// address space. Both capabilities need `WRITE`. Call it once per missing
+    /// level; the kernel never allocates a table itself.
+    MapPageTable = 14,
+    /// `map_frame(vspace_slot, frame_slot, vaddr | flags) -> 0 | errno`. Maps
+    /// the frame at the page-aligned `vaddr`; the low bits carry
+    /// [`map_flags`](crate::mapping::map_flags). The frame capability needs
+    /// `READ`, plus `WRITE` for a writable mapping, and a mapping is never both
+    /// writable and executable.
+    MapFrame = 15,
 }
 
 impl Syscall {
@@ -164,6 +176,8 @@ impl Syscall {
             11 => Some(Self::Reply),
             12 => Some(Self::SetIpcBuffer),
             13 => Some(Self::ReplyRecv),
+            14 => Some(Self::MapPageTable),
+            15 => Some(Self::MapFrame),
             _ => None,
         }
     }
@@ -201,6 +215,22 @@ pub enum IpcSyscallError {
     NotFrame = 9,
     /// The call needs a current thread (a TCB) and there is none.
     NoThread = 10,
+    /// The slot does not name an address space (`VSpace`).
+    NotVSpace = 11,
+    /// The slot does not name a page table.
+    NotPageTable = 12,
+    /// The address is outside the user half, or carries unknown flag bits.
+    BadAddress = 13,
+    /// A page table is missing on the path to the address; map one first.
+    MissingTable = 14,
+    /// The table or frame is already mapped somewhere.
+    AlreadyMapped = 15,
+    /// The address already has every table level, or a frame, mapped there.
+    AlreadyPresent = 16,
+    /// A frame was asked to be mapped both writable and executable.
+    WritableExecutable = 17,
+    /// The kernel's mapping registry is full.
+    MappingsFull = 18,
 }
 
 /// Bit OR-ed into an [`Syscall::IpcRecv`] return value to mark it an error
@@ -276,6 +306,8 @@ pub mod object_type_id {
     pub const NOTIFICATION: u8 = 6;
     /// A one-shot reply object for `Call` IPC.
     pub const REPLY: u8 = 7;
+    /// The root of an address space.
+    pub const VSPACE: u8 = 8;
 }
 
 /// Decodes a retype `type_word` into an ObjectType. Bits [7:0] are the type
@@ -295,6 +327,7 @@ fn decode_object_type(type_word: u64) -> Option<ObjectType> {
         object_type_id::FRAME if size_bits == 0 => Some(ObjectType::Frame),
         object_type_id::NOTIFICATION if size_bits == 0 => Some(ObjectType::Notification),
         object_type_id::REPLY if size_bits == 0 => Some(ObjectType::Reply),
+        object_type_id::VSPACE if size_bits == 0 => Some(ObjectType::VSpace),
         object_type_id::CNODE => Some(ObjectType::CNode { size_bits }),
         object_type_id::UNTYPED => Some(ObjectType::Untyped { size_bits }),
         // unknown discriminant, or a fixed-size type given a non-zero size_bits.
@@ -473,6 +506,10 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::SetIpcBuffer) => sys_set_ipc_buffer(arg0).into(),
         // reply_recv(ep_slot = arg0, reply_slot = arg1, word = arg2).
         Some(Syscall::ReplyRecv) => sys_reply_recv(arg0, arg1, arg2),
+        // map_page_table(vspace_slot = arg0, table_slot = arg1, vaddr = arg2).
+        Some(Syscall::MapPageTable) => sys_map_page_table(arg0, arg1, arg2).into(),
+        // map_frame(vspace_slot = arg0, frame_slot = arg1, vaddr | flags = arg2).
+        Some(Syscall::MapFrame) => sys_map_frame(arg0, arg1, arg2).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -1080,6 +1117,85 @@ fn sys_recv_reply(ep_slot: u64, reply_slot: u64) -> SyscallRet {
         return err(IpcSyscallError::ReplyBusy);
     }
     recv_blocking(ep_slot, Some(reply))
+}
+
+/// Resolves `slot` to a capability of `kind` carrying `rights`.
+///
+/// # Errors
+///
+/// [`IpcSyscallError::BadCap`] if the slot is empty, `wrong_kind` if it names
+/// another kind of object, or [`IpcSyscallError::Denied`] if a right is missing.
+fn resolve_object(
+    slot: u64,
+    kind: ObjectKind,
+    rights: Rights,
+    wrong_kind: IpcSyscallError,
+) -> Result<ObjectId, IpcSyscallError> {
+    let cap = current_cap(slot).ok_or(IpcSyscallError::BadCap)?;
+    if cap.object.kind() != kind {
+        return Err(wrong_kind);
+    }
+    if !cap.rights.contains(rights) {
+        return Err(IpcSyscallError::Denied);
+    }
+    Ok(cap.object)
+}
+
+/// Maps a [`mapping::MapError`] to its syscall error code.
+fn map_errno(e: mapping::MapError) -> u64 {
+    use mapping::MapError;
+    let code = match e {
+        MapError::WrongKind => IpcSyscallError::NotPageTable,
+        MapError::BadAddress | MapError::HugePage => IpcSyscallError::BadAddress,
+        MapError::MissingTable => IpcSyscallError::MissingTable,
+        MapError::AlreadyMapped => IpcSyscallError::AlreadyMapped,
+        MapError::AlreadyPresent => IpcSyscallError::AlreadyPresent,
+        MapError::WritableExecutable => IpcSyscallError::WritableExecutable,
+        MapError::Full => IpcSyscallError::MappingsFull,
+    };
+    code as u64
+}
+
+/// Resolves `slot` to an address space the capability grants `WRITE` on.
+fn resolve_vspace(slot: u64) -> Result<ObjectId, IpcSyscallError> {
+    resolve_object(slot, ObjectKind::VSpace, Rights::WRITE, IpcSyscallError::NotVSpace)
+}
+
+/// Implements [`Syscall::MapPageTable`].
+fn sys_map_page_table(vspace_slot: u64, table_slot: u64, vaddr: u64) -> u64 {
+    let root = match resolve_vspace(vspace_slot) {
+        Ok(root) => root,
+        Err(e) => return e as u64,
+    };
+    let table = match resolve_object(
+        table_slot,
+        ObjectKind::PageTable,
+        Rights::WRITE,
+        IpcSyscallError::NotPageTable,
+    ) {
+        Ok(table) => table,
+        Err(e) => return e as u64,
+    };
+    mapping::map_table(root, table, vaddr).map_or_else(map_errno, |()| 0)
+}
+
+/// Implements [`Syscall::MapFrame`].
+fn sys_map_frame(vspace_slot: u64, frame_slot: u64, vaddr_flags: u64) -> u64 {
+    let root = match resolve_vspace(vspace_slot) {
+        Ok(root) => root,
+        Err(e) => return e as u64,
+    };
+    // a writable mapping needs WRITE on the frame as well as READ.
+    let rights = if vaddr_flags & mapping::map_flags::WRITE == 0 {
+        Rights::READ
+    } else {
+        Rights::READ_WRITE
+    };
+    let frame = match resolve_object(frame_slot, ObjectKind::Frame, rights, IpcSyscallError::NotFrame) {
+        Ok(frame) => frame,
+        Err(e) => return e as u64,
+    };
+    mapping::map_frame(root, frame, vaddr_flags).map_or_else(map_errno, |()| 0)
 }
 
 /// Implements [`Syscall::ReplyRecv`]: answers the bound caller, if any, then

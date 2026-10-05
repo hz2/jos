@@ -42,6 +42,7 @@
 //! | `Notification` | 64 | 64 |
 //! | `Reply` | 128 | 64 |
 //! | `Frame` | 4096 | 4096 |
+//! | `VSpace` | 4096 | 4096 |
 //!
 //! `CNode { size_bits }` uses byte-size semantics (`size = 2^size_bits` bytes),
 //! like `Untyped`: `size_bits` is the log2 of the byte size, not a slot count.
@@ -223,6 +224,14 @@ pub enum ObjectType {
     /// frame is carved from untyped memory like every other object, it can never
     /// overlap a kernel object (the MEM-1 non-overlap property).
     Frame,
+
+    /// The root of an address space: a top-level page table with the kernel's
+    /// own mappings already in place.
+    ///
+    /// Fixed size: [`PAGE_TABLE_SIZE`] bytes, page-aligned. A distinct type from
+    /// [`PageTable`](ObjectType::PageTable), so a capability can never confuse a
+    /// root with an intermediate table (the seL4 PML4 object).
+    VSpace,
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +275,7 @@ pub const fn object_layout(ty: ObjectType) -> (usize, usize) {
             };
             (size, size)
         }
-        ObjectType::PageTable => (PAGE_TABLE_SIZE, PAGE_TABLE_SIZE),
+        ObjectType::PageTable | ObjectType::VSpace => (PAGE_TABLE_SIZE, PAGE_TABLE_SIZE),
         ObjectType::Tcb => (TCB_SIZE, TCB_ALIGN),
         ObjectType::Notification => (NOTIFICATION_SIZE, NOTIFICATION_ALIGN),
         ObjectType::Reply => (REPLY_SIZE, REPLY_ALIGN),
@@ -688,7 +697,7 @@ mod kani_proofs {
         let size_bits: u8 = kani::any();
         // keep size_bits small: 2^12 = 4096 bytes max, well inside MAX_REGION.
         kani::assume(size_bits <= 12);
-        match tag % 8 {
+        match tag % 9 {
             0 => ObjectType::Endpoint,
             1 => ObjectType::CNode { size_bits },
             2 => ObjectType::Untyped { size_bits },
@@ -696,7 +705,8 @@ mod kani_proofs {
             4 => ObjectType::Tcb,
             5 => ObjectType::Notification,
             6 => ObjectType::Reply,
-            _ => ObjectType::Frame,
+            7 => ObjectType::Frame,
+            _ => ObjectType::VSpace,
         }
     }
 

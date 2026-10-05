@@ -35,6 +35,8 @@ pub mod interrupts;
 #[cfg(target_arch = "x86_64")]
 pub mod keyboard;
 #[cfg(target_arch = "x86_64")]
+pub mod mapping;
+#[cfg(target_arch = "x86_64")]
 pub mod memory;
 pub mod serial;
 #[cfg(target_arch = "x86_64")]

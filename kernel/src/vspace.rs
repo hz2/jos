@@ -97,31 +97,19 @@ impl VSpace {
     /// reference to the newly carved table aliases it. The cloned higher-half
     /// entries must remain valid for the lifetime of this `VSpace`.
     pub unsafe fn new(untyped: &mut UntypedRegion) -> Result<Self, VSpaceError> {
-        let pml4_id = untyped.retype_page_table().ok_or(VSpaceError::OutOfTables)?;
-        if pml4_id.kind() != ObjectKind::PageTable {
+        // retype_vspace copies the kernel's root entries in.
+        let pml4_id = untyped.retype_vspace().ok_or(VSpaceError::OutOfTables)?;
+        if pml4_id.kind() != ObjectKind::VSpace {
             return Err(VSpaceError::NotAPageTable);
         }
-
-        // SAFETY: pml4_id was just carved as a PageTable and is not aliased; the
-        // mapper is the sole owner. clone the kernel's higher-half entries so
-        // kernel code/data/heap stay mapped once this PML4 is loaded into CR3.
-        unsafe {
-            let pml4 = pml4_id.as_page_table_mut();
-            let (kernel_frame, _) = Cr3::read();
-            let kernel_pml4 = kernel_frame.start_address().as_u64() as *const PageTable;
-            // clone PML4[0] (the low identity map: kernel image, stacks, GDT/
-            // IDT/TSS, untyped regions) so the kernel keeps executing across the
-            // CR3 load, and PML4[256..512] (the higher-half heap). the lower-half
-            // user slots in between start empty; map_page fills them on demand.
-            // SAFETY: kernel_pml4 points at the live boot PML4 (identity mapped,
-            // so phys == virt), readable for all 512 entries.
-            pml4.entries[IDENTITY_PML4_INDEX] = (*kernel_pml4).entries[IDENTITY_PML4_INDEX];
-            for i in KERNEL_HALF_START..512 {
-                pml4.entries[i] = (*kernel_pml4).entries[i];
-            }
-        }
-
         Ok(Self { pml4: pml4_id })
+    }
+
+    /// Returns the handle of this address space's root, for installing a
+    /// `VSpace` capability that names it.
+    #[must_use]
+    pub fn root(&self) -> ObjectId {
+        self.pml4
     }
 
     /// Maps `virt` (a 4 KiB-aligned, lower-half user virtual address) to the
@@ -195,6 +183,30 @@ impl VSpace {
     #[must_use]
     pub fn root_phys(&self) -> u64 {
         self.pml4.phys_addr()
+    }
+}
+
+/// Copies the kernel's own root entries into the fresh address-space root
+/// `root`: entry 0 (the low identity map with the kernel image, stacks, and
+/// untyped regions) and entries 256 and up (the higher half), so the kernel
+/// keeps running when `root` is loaded into `CR3`. The user half in between
+/// starts empty.
+///
+/// # Safety
+///
+/// `root` must be a freshly carved `VSpace` that nothing else refers to, and
+/// `CR3` must hold the kernel's boot root (identity mapped, so phys == virt).
+pub(crate) unsafe fn clone_kernel_entries(root: ObjectId) {
+    // SAFETY: per this function's contract root is unaliased and the boot root
+    // is live and readable for all 512 entries.
+    unsafe {
+        let pml4 = root.as_page_table_mut();
+        let (kernel_frame, _) = Cr3::read();
+        let kernel_pml4 = kernel_frame.start_address().as_u64() as *const PageTable;
+        pml4.entries[IDENTITY_PML4_INDEX] = (*kernel_pml4).entries[IDENTITY_PML4_INDEX];
+        for i in KERNEL_HALF_START..512 {
+            pml4.entries[i] = (*kernel_pml4).entries[i];
+        }
     }
 }
 

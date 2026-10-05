@@ -26,8 +26,10 @@ Check items off in the same commit that finishes them.
       keeps each object mapped once, and revoking a table or frame unmaps it
       and everything beneath it
 - [ ] an `Unmap` syscall (today only revocation unmaps)
-- [ ] per-thread address spaces: the scheduler loads each thread's VSpace
-      into `CR3` on a switch (today threads share one)
+- [x] per-thread address spaces: `switch_to` loads each thread's VSpace into
+      `CR3`, so threads in different VSpaces are isolated
+- [ ] configure a TCB from userspace (its VSpace, CSpace, IPC buffer, and
+      entry point) through a TCB capability; today kernel setup code does it
 - [ ] revoking a VSpace capability while a thread still runs in it
 - [ ] retyping a CNode through the syscall still builds a 4 KiB value on the
       kernel stack (the overflow class fixed for frames and page tables)

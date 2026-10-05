@@ -49,7 +49,8 @@ speak IPC.
 - [x] register the IPC buffer from userspace through a Frame capability
 - [x] map Frames into a VSpace from userspace (`MapPageTable` / `MapFrame`, seL4
       style: userspace supplies every page table; the kernel never allocates)
-- [ ] per-thread VSpaces switched on context switch
+- [x] per-thread VSpaces switched on context switch
+- [ ] configure TCBs from userspace (the root task needs it to start programs)
 - [ ] capability transfer over IPC (needs the cross-CSpace derivation decision,
       see "open decisions")
 - [ ] JPC-1: Verus proof of rendezvous deadlock-freedom

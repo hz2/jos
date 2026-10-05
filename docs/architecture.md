@@ -200,7 +200,10 @@ thread's kernel stack top, a scratch slot for the user rsp, the current CSpace
 and TCB, and the user registers captured on syscall entry (for resuming a
 thread that blocked). `cpu_local::switch_to(tcb)` updates it together with the
 TSS `rsp0`, so both the next syscall and the next ring-3 interrupt land on the
-new thread's kernel stack.
+new thread's kernel stack. It also loads the thread's VSpace into `CR3` when it
+differs from the active one, so threads in different address spaces are
+isolated; every VSpace carries the kernel's own mappings, so the kernel keeps
+running across the switch.
 
 ## Generation-Counted Revocation
 

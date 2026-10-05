@@ -5,8 +5,9 @@
 //! frame, maps the frame, checks each refusal (start before configure, a
 //! non-CNode as the CSpace, a kernel entry address, a second start, configuring
 //! a started thread), then configures and starts the child at a label in its
-//! own code page. The child proves its stack works and that it runs in its own,
-//! empty capability space, then exits with success; the creator spins, so the
+//! own code page, after copying an endpoint into the child's CNode. The child
+//! proves its stack works, that the copied endpoint arrived, and that it runs in
+//! its own capability space, then exits with success; the creator spins, so the
 //! test only passes if the child really ran.
 #![no_std]
 #![no_main]
@@ -41,6 +42,13 @@ core::arch::global_asm!(
     // a VSpace where the CNode belongs: NotCNode (21)
     "mov eax, 17", "mov edi, 2", "xor esi, esi", "xor edx, edx", "syscall",
     "cmp rax, 21", "jne 9f",
+    // retype an endpoint (type 0) into slot 5 and copy it, WRITE only, into slot
+    // 0 of the child's CNode; a second copy into that slot: SlotOccupied (26)
+    "mov eax, 4", "mov edi, 1", "xor esi, esi", "mov edx, 5", "syscall", "test rax, rax", "jne 9f",
+    "mov eax, 20", "mov edi, 3", "mov esi, 5", "mov edx, 0x20000", "syscall",
+    "test rax, rax", "jne 9f",
+    "mov eax, 20", "mov edi, 3", "mov esi, 5", "mov edx, 0x20000", "syscall",
+    "cmp rax, 26", "jne 9f",
     // configure with the empty CNode and our own address space
     "mov eax, 17", "mov edi, 2", "mov esi, 3", "xor edx, edx", "syscall",
     "test rax, rax", "jne 9f",
@@ -63,11 +71,13 @@ core::arch::global_asm!(
     // wait for the child to end the test
     "2:",
     "jmp 2b",
-    // the child: its stack works, and its slot 0 is empty (BadCap = 1), where
-    // the creator's slot 0 would answer NotFrame
+    // the child: its stack works, the endpoint copied into its slot 0 is there
+    // (a send succeeds), and its slot 1 is empty (BadCap = 1), where the
+    // creator's slot 1 holds an untyped region
     "5:",
     "push 0x55", "pop rax", "cmp rax, 0x55", "jne 9f",
-    "mov eax, 12", "xor edi, edi", "syscall", "cmp rax, 1", "jne 9f",
+    "mov eax, 2", "xor edi, edi", "mov esi, 0x77", "syscall", "test rax, rax", "jne 9f",
+    "mov eax, 12", "mov edi, 1", "syscall", "cmp rax, 1", "jne 9f",
     "mov eax, 1", "mov edi, 0x10", "syscall",
     "9:",
     "mov eax, 1", "mov edi, 0x11", "syscall",
@@ -140,10 +150,12 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
     let tcb_ptr = unsafe {
         USER_UNTYPED = Some(UntypedRegion::new(&mut (*core::ptr::addr_of_mut!(USER_UNTYPED_BACKING)).0));
         let user_untyped = (*core::ptr::addr_of_mut!(USER_UNTYPED)).as_mut().unwrap().as_object_id();
-        let mut cspace = KernelCapSpace::new();
+        CSPACE = Some(KernelCapSpace::new());
+        let cspace = (*core::ptr::addr_of_mut!(CSPACE)).as_mut().unwrap();
+        // register while empty, so copies out of it stay revocable across spaces.
+        jos::cap::register_cspace(core::ptr::from_mut(cspace)).expect("register cspace");
         cspace.insert_at(0, vspace.root(), Rights::all()).expect("vspace cap");
         cspace.insert_at(1, user_untyped, Rights::all()).expect("untyped cap");
-        CSPACE = Some(cspace);
 
         let tcb = core::ptr::addr_of_mut!(TCB);
         (*tcb).kernel_stack_top = core::ptr::addr_of!(KSTACK) as u64 + KSTACK_SIZE as u64;

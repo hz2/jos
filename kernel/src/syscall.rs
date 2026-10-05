@@ -172,6 +172,13 @@ pub enum Syscall {
     /// thread in ring 3 at `entry` with stack pointer `stack_top`, and hands it
     /// to the scheduler. A thread starts once.
     TcbStart = 19,
+    /// `cnode_copy(dest_cnode_slot, src_slot, dest_slot | rights << 16) -> 0 |
+    /// errno`. Copies the capability at `src_slot` of the caller's space into
+    /// slot `dest_slot` of another capability space, with rights attenuated by
+    /// the mask in bits 16 to 23 (use [`Mint`](Syscall::Mint) first to badge it).
+    /// The destination CNode capability needs `WRITE`. The copy stays in the
+    /// derivation tree, so revoking the source reaches it.
+    CNodeCopy = 20,
 }
 
 impl Syscall {
@@ -198,6 +205,7 @@ impl Syscall {
             17 => Some(Self::TcbConfigure),
             18 => Some(Self::TcbSetIpcBuffer),
             19 => Some(Self::TcbStart),
+            20 => Some(Self::CNodeCopy),
             _ => None,
         }
     }
@@ -263,6 +271,12 @@ pub enum IpcSyscallError {
     NotConfigured = 23,
     /// The scheduler has no room for another thread.
     ThreadsFull = 24,
+    /// A capability cannot be copied into the space it comes from.
+    SameSpace = 25,
+    /// The destination slot already holds a capability.
+    SlotOccupied = 26,
+    /// The destination slot is out of range.
+    SlotOutOfRange = 27,
 }
 
 /// Bit OR-ed into an [`Syscall::IpcRecv`] return value to mark it an error
@@ -550,6 +564,8 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::TcbSetIpcBuffer) => sys_tcb_set_ipc_buffer(arg0, arg1).into(),
         // tcb_start(tcb_slot = arg0, entry = arg1, stack_top = arg2).
         Some(Syscall::TcbStart) => sys_tcb_start(arg0, arg1, arg2).into(),
+        // cnode_copy(dest_cnode_slot = arg0, src_slot = arg1, packed = arg2).
+        Some(Syscall::CNodeCopy) => sys_cnode_copy(arg0, arg1, arg2).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -1337,6 +1353,46 @@ fn sys_tcb_start(tcb_slot: u64, entry: u64, stack_top: u64) -> u64 {
         Ok(())
     })();
     started.map_or_else(|e: IpcSyscallError| e as u64, |()| 0)
+}
+
+/// Implements [`Syscall::CNodeCopy`].
+fn sys_cnode_copy(dest_cnode_slot: u64, src_slot: u64, packed: u64) -> u64 {
+    use jos_core::cap_space::CopyError;
+    if packed >> 24 != 0 {
+        return IpcSyscallError::BadAddress as u64;
+    }
+    let dest = match resolve_object(
+        dest_cnode_slot,
+        ObjectKind::CNode,
+        Rights::WRITE,
+        IpcSyscallError::NotCNode,
+    ) {
+        Ok(dest) => dest,
+        Err(e) => return e as u64,
+    };
+    let Some(space) = current_cspace() else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    let Some(src) = usize::try_from(src_slot).ok().and_then(|s| space.ref_at(s)) else {
+        return IpcSyscallError::BadCap as u64;
+    };
+    // the low 16 bits are the destination slot, the next 8 the rights mask.
+    let dest_slot = (packed & 0xFFFF) as usize;
+    let mask = Rights::from_bits_truncate(packed.to_le_bytes()[2]);
+    // SAFETY: dest names a live CNode (kind checked above) in a static untyped
+    // region; single-CPU syscall path.
+    let dest_space = unsafe { dest.as_cnode_mut() };
+    if core::ptr::eq(dest_space, space) {
+        // an exclusive reference to the caller's own space would alias `space`.
+        return IpcSyscallError::SameSpace as u64;
+    }
+    match space.copy_into(src, dest_space, dest_slot, mask) {
+        Ok(_) => 0,
+        Err(CopyError::InvalidSource) => IpcSyscallError::BadCap as u64,
+        Err(CopyError::OutOfRange) => IpcSyscallError::SlotOutOfRange as u64,
+        Err(CopyError::Occupied) => IpcSyscallError::SlotOccupied as u64,
+        Err(CopyError::SameSpace) => IpcSyscallError::SameSpace as u64,
+    }
 }
 
 /// Implements [`Syscall::ReplyRecv`]: answers the bound caller, if any, then

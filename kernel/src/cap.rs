@@ -22,7 +22,7 @@ use core::task::{Context, Poll, Waker};
 
 use crate::clock;
 use jos_core::cap_rights::Rights;
-use jos_core::cap_space::CapSpace;
+use jos_core::cap_space::{CapLink, CapSpace, SpaceId, for_each_descendant_across, revoke_across};
 use jos_core::cap_table::CapRef;
 use jos_core::clock::Instant;
 use jos_core::timer::TimerId;
@@ -54,6 +54,59 @@ pub const CSPACE_SLOTS: usize = 64;
 
 /// The capability space type used by jos: a flat `CapSpace` of [`ObjectId`]s.
 pub type KernelCapSpace = CapSpace<ObjectId, CSPACE_SLOTS>;
+
+/// The most capability spaces the kernel tracks for copying and cross-space
+/// revocation.
+pub const MAX_CSPACES: usize = 32;
+
+/// Every registered capability space; entry `i` has id `i + 1` (id 0 means
+/// unregistered, which keeps revocation local to that space).
+static mut CSPACES: [*mut KernelCapSpace; MAX_CSPACES] = [core::ptr::null_mut(); MAX_CSPACES];
+/// How many entries of [`CSPACES`] are in use.
+static mut CSPACE_COUNT: usize = 0;
+
+/// Registers `space` so capabilities can be copied into it and revoked across
+/// spaces, giving it a unique [`SpaceId`]. Returns `None` if the registry is
+/// full or `space` already holds capabilities (their links would carry the old
+/// id).
+///
+/// # Safety
+///
+/// `space` must stay live for the kernel's lifetime, and the caller must run
+/// single-CPU with interrupts disabled (or during boot).
+pub unsafe fn register_cspace(space: *mut KernelCapSpace) -> Option<SpaceId> {
+    // SAFETY: per this function's contract, nothing else touches the registry
+    // or `space` concurrently.
+    unsafe {
+        if CSPACE_COUNT >= MAX_CSPACES {
+            return None;
+        }
+        let id = SpaceId(u32::try_from(CSPACE_COUNT + 1).ok()?);
+        if !(*space).set_id(id) {
+            return None;
+        }
+        CSPACES[CSPACE_COUNT] = space;
+        CSPACE_COUNT += 1;
+        Some(id)
+    }
+}
+
+/// Runs `f` with every registered capability space.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled, and the caller must hold no other
+/// reference into a registered space while `f` runs (or never use it again).
+unsafe fn with_registered_spaces<R>(f: impl FnOnce(&mut [&mut KernelCapSpace]) -> R) -> R {
+    // SAFETY: every registered entry is a non-null, aligned pointer to a space
+    // that lives for the kernel lifetime, and `*mut T` and `&mut T` share a
+    // layout, so the first CSPACE_COUNT entries form a valid slice of `&mut`.
+    // distinct registrations name distinct spaces, so the `&mut`s do not alias.
+    unsafe {
+        let ptr = core::ptr::addr_of_mut!(CSPACES).cast::<&mut KernelCapSpace>();
+        f(core::slice::from_raw_parts_mut(ptr, CSPACE_COUNT))
+    }
+}
 
 // --------------------------------------------------------------------------
 // Object handle
@@ -1021,6 +1074,11 @@ impl UntypedRegion {
         // KernelCNode, and nothing else refers to it yet. repr(C) puts `space`
         // first, and the padding after it is already zero.
         unsafe { KernelCapSpace::init_in_place(core::ptr::addr_of_mut!((*ptr).space)) };
+        // register it so capabilities can be copied in and revoked across spaces;
+        // if the registry is full the space just keeps local-only revocation.
+        // SAFETY: the space lives in the static untyped region for the kernel's
+        // lifetime; retype runs single-CPU with interrupts disabled.
+        let _ = unsafe { register_cspace(core::ptr::addr_of_mut!((*ptr).space)) };
         Some(id)
     }
 
@@ -1665,32 +1723,47 @@ pub fn wait(space: &KernelCapSpace, cap_ref: CapRef) -> CapWait<'_> {
 /// the marked set is collected (via `for_each_in_subtree`) before `revoke`
 /// clears the slots, the endpoint objects are still reachable to wake.
 pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
-    // mark phase: collect the endpoint, notification, and reply objects in the
-    // revoke subtree while the parent links are still intact. each may hold a
-    // blocked waiter that must be woken so it observes the cancellation. fixed-
-    // size scratch sized to the space (no heap); CSPACE_SLOTS bounds the subtree.
-    let mut blockers: [Option<ObjectId>; CSPACE_SLOTS] = [None; CSPACE_SLOTS];
+    // mark phase: collect the objects in the revoke subtree that need action
+    // (endpoints, notifications, and replies may hold a blocked waiter to wake;
+    // frames and page tables must be unmapped) while the parent links are still
+    // intact. fixed-size scratch, no heap; MAX_BLOCKERS bounds what is acted on.
+    const MAX_BLOCKERS: usize = 2 * CSPACE_SLOTS;
+    let mut blockers: [Option<ObjectId>; MAX_BLOCKERS] = [None; MAX_BLOCKERS];
     let mut count = 0;
-    space.for_each_in_subtree(cap_ref, |_r, cap| {
-        let kind = cap.object.kind();
-        if matches!(
-            kind,
+    let mut collect = |object: ObjectId| {
+        let acted_on = matches!(
+            object.kind(),
             ObjectKind::Endpoint
                 | ObjectKind::Notification
                 | ObjectKind::Reply
                 | ObjectKind::Frame
                 | ObjectKind::PageTable
-        )
-            && count < CSPACE_SLOTS
-        {
-            blockers[count] = Some(cap.object);
+        );
+        if acted_on && count < MAX_BLOCKERS {
+            blockers[count] = Some(object);
             count += 1;
         }
-    });
+    };
 
     // revoke: removes the capability entries and bumps their generations, so any
-    // outstanding ref (including one a blocked future holds) is now stale.
-    let removed = space.revoke(cap_ref);
+    // outstanding ref (including one a blocked future holds) is now stale. a
+    // registered space revokes across every registered space, so copies in other
+    // threads' CNodes go too; an unregistered one (id 0) stays local.
+    let removed = if space.id() == SpaceId(0) {
+        space.for_each_in_subtree(cap_ref, |_r, cap| collect(cap.object));
+        space.revoke(cap_ref)
+    } else {
+        let root = CapLink { space: space.id(), cap: cap_ref };
+        // SAFETY: single-CPU with interrupts disabled on every revoke path, and
+        // `space` is not used again below, so the registry's references are the
+        // only live ones into the registered spaces.
+        unsafe {
+            with_registered_spaces(|spaces| {
+                for_each_descendant_across(spaces, root, |_link, cap| collect(cap.object));
+                revoke_across(spaces, root)
+            })
+        }
+    };
 
     // wake phase: take and fire each parked waiter, AFTER releasing the object
     // lock (the wake transport is lock-free, but keep the wake off the locked

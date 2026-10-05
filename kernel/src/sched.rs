@@ -193,6 +193,21 @@ pub unsafe fn register_thread(tcb: *mut Tcb) -> usize {
     }
 }
 
+/// Registers `tcb` like [`register_thread`], but returns `None` instead of
+/// panicking when the thread table is full, for paths userspace can reach.
+///
+/// # Safety
+///
+/// As [`register_thread`].
+pub unsafe fn try_register_thread(tcb: *mut Tcb) -> Option<usize> {
+    // SAFETY: single-CPU; the caller ensures interrupts are off.
+    if unsafe { THREAD_COUNT } >= MAX_THREADS {
+        return None;
+    }
+    // SAFETY: as above, and the table has room.
+    Some(unsafe { register_thread(tcb) })
+}
+
 /// Add a registered thread to the ready set so the scheduler can pick it.
 ///
 /// Call after [`register_thread`] for every thread that is not the initial

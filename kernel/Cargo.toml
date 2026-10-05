@@ -81,6 +81,10 @@ harness = false
 name = "vspace_isolation"
 harness = false
 
+[[test]]
+name = "tcb_start"
+harness = false
+
 # retype_invoke drops to ring 3 and exits qemu from inside the user program
 # (after retype/invoke syscalls), so it likewise runs without the framework.
 [[test]]

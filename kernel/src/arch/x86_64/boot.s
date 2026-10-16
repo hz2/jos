@@ -70,6 +70,30 @@ _start32:
     add $8, %edi
     loop .fill_pd
 
+    /* split the 2 MiB page holding the stack guard into 4 KiB pages and leave
+       the guard unmapped, so a stack overflow faults instead of silently
+       corrupting .bss. ebx is the region base (mb_info is already saved). */
+    mov $stack_guard, %ebx
+    and $~0x1fffff, %ebx
+    mov $stack_pt, %edi
+    mov %ebx, %eax
+    or $0x3, %eax
+    mov $512, %ecx
+.fill_stack_pt:
+    mov %eax, (%edi)
+    movl $0, 4(%edi)
+    add $0x1000, %eax
+    add $8, %edi
+    loop .fill_stack_pt
+    /* entry (guard - base) / 4 KiB, at 8 bytes each */
+    mov $stack_guard, %eax
+    sub %ebx, %eax
+    shr $9, %eax
+    movl $0, stack_pt(%eax)
+    /* pd entry base / 2 MiB, at 8 bytes each, now points at the split table */
+    shr $18, %ebx
+    movl $(stack_pt + 0x3), PD(%ebx)
+
     /* load cr3 with the pml4 base */
     mov $PML4, %eax
     mov %eax, %cr3
@@ -136,13 +160,16 @@ mb_magic:
     .skip 4
 mb_info:
     .skip 4
-.align 16
+.align 4096
+stack_pt:
+    /* the 4 KiB page table _start32 splits the stack guard's 2 MiB page into */
+    .skip 4096
+stack_guard:
+    /* left unmapped by _start32: an overflow of the boot stack faults here, and
+       the double-fault handler (on its own IST stack) reports it. */
+    .skip 4096
 stack_bottom:
-    /* 64 KiB boot stack. this is the kernel's only stack today, and it sits in
-       .bss with no guard page, so an overflow silently corrupts adjacent .bss
-       (it manifested as a smashed heap free-list and a fault on the NEXT alloc).
-       it was raised from 16 KiB once the async executor put multi-KiB by-value
-       objects (the task slab) on the stack in debug builds. a real guard-page'd
-       per-task stack arrives with the userspace thread model. */
+    /* 64 KiB boot stack. it was raised from 16 KiB once the async executor put
+       multi-KiB by-value objects (the task slab) on the stack in debug builds. */
     .skip 65536
 stack_top:

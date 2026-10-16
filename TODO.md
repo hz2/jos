@@ -54,6 +54,10 @@ Check items off in the same commit that finishes them.
 ## Hardening (small, do alongside)
 
 - [ ] FPU/SSE save on context switch (latent bug once user code touches xmm)
+- [x] guard page under the boot stack, so an overflow double-faults instead of
+      corrupting .bss
+- [ ] guard pages under per-thread kernel stacks (TCB objects and the test
+      harness stacks); a syscall path that overflows one corrupts memory silently
 - [ ] NMI / #MC on IST stacks
 - [ ] give the blocking-IPC tables (`BLOCKED_SENDS` / `BLOCKED_RECVS`) a pure
       model in jos-core so the direct-handoff path is covered by Kani like the

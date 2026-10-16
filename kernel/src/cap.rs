@@ -1769,7 +1769,9 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
     // lock (the wake transport is lock-free, but keep the wake off the locked
     // path as the cap_send/cap_recv primitives do). a woken future re-polls,
     // sees the stale cap, and returns InvalidCap.
-    for obj in blockers.into_iter().take(count).flatten() {
+    // index, not into_iter: moving the array costs whole frames in debug builds
+    for slot in &blockers[..count] {
+        let Some(obj) = *slot else { continue };
         match obj.kind() {
             ObjectKind::Endpoint => {
                 // SAFETY: obj.kind == Endpoint (checked in the mark phase), the

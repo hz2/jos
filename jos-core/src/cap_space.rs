@@ -367,7 +367,7 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         // sweep phase: remove every marked ref. order does not matter now that
         // membership is already decided.
         let mut removed = 0;
-        for r in marked.into_iter().take(count).flatten() {
+        for &r in marked[..count].iter().flatten() {
             if self.table.remove(r).is_some() {
                 removed += 1;
             }

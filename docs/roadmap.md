@@ -53,6 +53,7 @@ speak IPC.
 - [x] configure and start TCBs from userspace (TCB objects carry their own
       kernel stack)
 - [x] copy capabilities into another thread's CNode (`CNodeCopy`)
+- [x] revoke from userspace (`Revoke`), across every capability space
 - [x] cross-space derivation tree: parent links name a space and a slot, so
       revoking a capability reaches its copies in other CNodes (decided: a
       global tree, the seL4 model)

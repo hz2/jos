@@ -223,7 +223,8 @@ jos intentionally departs from seL4 in three places:
   live in the capabilities themselves rather than a separate structure, and
   removing one capability is O(1): its slot's generation bumps, so every
   outstanding ref to it goes stale at once. A subtree revoke removes the
-  subtree leaves first across every registered space.
+  subtree leaves first across every registered space; userspace asks for it
+  with the `Revoke` syscall.
 
 - **Two-level addressing (global object table + per-CSpace cap table).** seL4
   addresses objects via raw CNode pointers traversed from a root CNode. jos

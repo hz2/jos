@@ -11,8 +11,7 @@ Check items off in the same commit that finishes them.
       fails the caller with `NoReply`
 - [x] integration tests: a badged call answered once, in both handoff orders
 - [x] test the `NoReply` path where a plain receive takes a call (both orders)
-- [ ] test the `NoReply` path where a bound reply object is revoked (needs a
-      revoke syscall or a kernel-side test hook)
+- [x] test the `NoReply` path where a bound reply object is revoked
 - [x] `ReplyRecv` (13): answer, then receive, in one syscall
 - [x] a server answering two badged clients in a `ReplyRecv` loop
 - [x] per-thread IPC buffer: a registered frame (`Tcb::ipc_buffer`) carries
@@ -40,7 +39,8 @@ Check items off in the same commit that finishes them.
 - [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized
       object is built by value on a syscall stack any more
 - [ ] capability transfer with an IPC message (the derivation tree supports it)
-- [ ] a revoke syscall (today revocation is kernel-internal)
+- [x] `Revoke` (21): revoke a capability and everything derived from it,
+      in every capability space, from userspace
 - [ ] `revoke_across` rescans every space per removed capability; fine at 64
       slots, worth an index once spaces grow
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)

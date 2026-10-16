@@ -179,6 +179,12 @@ pub enum Syscall {
     /// The destination CNode capability needs `WRITE`. The copy stays in the
     /// derivation tree, so revoking the source reaches it.
     CNodeCopy = 20,
+    /// `revoke(slot) -> count | (errno | ERR_FLAG)`. Removes the capability in
+    /// `slot` and every capability derived from it, in every capability space
+    /// (copies included), and returns how many were removed. Threads blocked on
+    /// a revoked object are woken with an error, and revoked frames and page
+    /// tables are unmapped.
+    Revoke = 21,
 }
 
 impl Syscall {
@@ -206,6 +212,7 @@ impl Syscall {
             18 => Some(Self::TcbSetIpcBuffer),
             19 => Some(Self::TcbStart),
             20 => Some(Self::CNodeCopy),
+            21 => Some(Self::Revoke),
             _ => None,
         }
     }
@@ -566,6 +573,8 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::TcbStart) => sys_tcb_start(arg0, arg1, arg2).into(),
         // cnode_copy(dest_cnode_slot = arg0, src_slot = arg1, packed = arg2).
         Some(Syscall::CNodeCopy) => sys_cnode_copy(arg0, arg1, arg2).into(),
+        // revoke(slot = arg0) -> count removed.
+        Some(Syscall::Revoke) => sys_revoke(arg0).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it
@@ -1353,6 +1362,17 @@ fn sys_tcb_start(tcb_slot: u64, entry: u64, stack_top: u64) -> u64 {
         Ok(())
     })();
     started.map_or_else(|e: IpcSyscallError| e as u64, |()| 0)
+}
+
+/// Implements [`Syscall::Revoke`].
+fn sys_revoke(slot: u64) -> u64 {
+    let Some(space) = current_cspace_mut() else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    let Some(cap_ref) = usize::try_from(slot).ok().and_then(|s| space.ref_at(s)) else {
+        return IpcSyscallError::BadCap as u64 | IPC_ERR_FLAG;
+    };
+    cap::revoke_and_wake(space, cap_ref) as u64
 }
 
 /// Implements [`Syscall::CNodeCopy`].

@@ -121,7 +121,9 @@ The `isa-debug-exit` device maps a guest write of `N` at port `0xf4` to a host
 exit code of `(N << 1) | 1`. The kernel writes `0x10` on success, giving exit
 `33`; `run-qemu.sh` maps `33` back to shell `0` so `cargo test` reports pass and
 fail correctly. Anything else (for example the `35` the kernel writes on a test
-failure) propagates as a failure. See `testing.md` for the harness details.
+failure) propagates as a failure. QEMU itself exits `0` when the guest resets
+under `-no-reboot`, which is what a triple fault does, so `run-qemu.sh` reports
+a plain `0` as a failure too. See `testing.md` for the harness details.
 
 The pure-logic crate is tested on the host, with no QEMU:
 

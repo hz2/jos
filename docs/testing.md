@@ -13,7 +13,7 @@
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
-instead of halting. Ring-3 test programs are written as `global_asm!` between
+instead of halting, and a triple fault (a guest reset) fails rather than passing. Ring-3 test programs are written as `global_asm!` between
 two labels and copied into the user code page (see `kernel/tests/badged_ipc.rs`).
 
 Every new oracle or proof gets a negative control: break the property, confirm

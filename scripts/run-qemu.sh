@@ -49,4 +49,10 @@ set -e
 if [ "$QEMU_EXIT" -eq 33 ]; then
     exit 0
 fi
+# qemu itself exits 0 when the guest resets under -no-reboot (a triple fault),
+# so a plain 0 means the kernel crashed, not that it passed.
+if [ "$QEMU_EXIT" -eq 0 ]; then
+    echo "run-qemu: guest reset without reporting a result (triple fault?)" >&2
+    exit 1
+fi
 exit "$QEMU_EXIT"

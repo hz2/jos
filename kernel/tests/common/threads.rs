@@ -1,6 +1,7 @@
 //! Shared harness for kernel tests that run several ring-3 threads.
 //!
-//! All threads share one `VSpace` and one `CSpace`. Thread 0 is entered first
+//! By default all threads share one `VSpace` and one `CSpace`; [`boot_isolated`]
+//! gives each its own registered `CSpace`. Thread 0 is entered first
 //! through `enter_user_mode_with_arg`; the others wait in the ready set and are
 //! entered by the scheduler's `iretq` when a timer tick switches to them.
 //!
@@ -63,6 +64,8 @@ static mut KSTACKS: [KernelStack; MAX_TEST_THREADS] = [KernelStack([0; KSTACK_SI
 
 static mut TCBS: [Tcb; MAX_TEST_THREADS] = [const { Tcb::new() }; MAX_TEST_THREADS];
 static mut CSPACE: Option<KernelCapSpace> = None;
+/// Per-thread capability spaces for [`boot_isolated`], built in place.
+static mut CSPACES: core::mem::MaybeUninit<[KernelCapSpace; MAX_TEST_THREADS]> = core::mem::MaybeUninit::uninit();
 
 /// Copies `program` into the identity-mapped `frame`.
 ///
@@ -122,6 +125,63 @@ pub unsafe fn boot_with(
     spaces: Spaces,
     caps: impl FnOnce(&mut UntypedRegion, &mut KernelCapSpace),
 ) -> ! {
+    // SAFETY: forwarded unchanged; the closure writes CSPACE once, before any
+    // context switch reads it.
+    unsafe {
+        start(info_ptr, programs, spaces, |untyped| {
+            let mut cspace = KernelCapSpace::new();
+            caps(untyped, &mut cspace);
+            CSPACE = Some(cspace);
+            let ptr = (*core::ptr::addr_of_mut!(CSPACE)).as_mut().unwrap() as *mut KernelCapSpace;
+            [ptr; MAX_TEST_THREADS]
+        })
+    }
+}
+
+/// Boots like [`boot_with`], but thread `i` gets a capability space of its own,
+/// `cspaces[i]`, registered so capabilities can move between threads (copied
+/// or sent with a message) and be revoked across them.
+///
+/// # Safety
+///
+/// As [`boot_with`].
+pub unsafe fn boot_isolated(
+    info_ptr: u32,
+    programs: &[Program],
+    spaces: Spaces,
+    caps: impl FnOnce(&mut UntypedRegion, &mut [KernelCapSpace]),
+) -> ! {
+    // SAFETY: forwarded unchanged; CSPACES is built in place here once, before
+    // any context switch reads it, and lives for the test.
+    unsafe {
+        start(info_ptr, programs, spaces, |untyped| {
+            let base = core::ptr::addr_of_mut!(CSPACES).cast::<KernelCapSpace>();
+            let mut ptrs = [core::ptr::null_mut(); MAX_TEST_THREADS];
+            for (i, ptr) in ptrs.iter_mut().enumerate().take(programs.len()) {
+                *ptr = base.add(i);
+                KernelCapSpace::init_in_place(*ptr);
+                // registration must precede any capability in the space.
+                jos::cap::register_cspace(*ptr).expect("register cspace");
+            }
+            caps(untyped, core::slice::from_raw_parts_mut(base, programs.len()));
+            ptrs
+        })
+    }
+}
+
+/// The shared body of [`boot_with`] and [`boot_isolated`]: `cspaces` fills the
+/// capability spaces and returns thread `i`'s at index `i`.
+///
+/// # Safety
+///
+/// As [`boot_with`]; every pointer `cspaces` returns for a running thread must
+/// be a live capability space.
+unsafe fn start(
+    info_ptr: u32,
+    programs: &[Program],
+    spaces: Spaces,
+    cspaces: impl FnOnce(&mut UntypedRegion) -> [*mut KernelCapSpace; MAX_TEST_THREADS],
+) -> ! {
     assert!(!programs.is_empty() && programs.len() <= MAX_TEST_THREADS, "1 to 4 threads");
     jos::init();
     syscall::init_syscall();
@@ -164,13 +224,7 @@ pub unsafe fn boot_with(
     }
 
     let sel = gdt::selectors();
-    // SAFETY: the statics are written once here, before any context switch.
-    let cspace_ptr = unsafe {
-        let mut cspace = KernelCapSpace::new();
-        caps(&mut untyped, &mut cspace);
-        CSPACE = Some(cspace);
-        (*core::ptr::addr_of_mut!(CSPACE)).as_mut().unwrap() as *mut KernelCapSpace
-    };
+    let cspace_ptrs = cspaces(&mut untyped);
 
     let mut tcb_ptrs = [core::ptr::null_mut::<Tcb>(); MAX_TEST_THREADS];
     for (i, program) in programs.iter().enumerate() {
@@ -194,7 +248,7 @@ pub unsafe fn boot_with(
             let tcb = core::ptr::addr_of_mut!(TCBS[i]);
             (*tcb).kernel_stack_top =
                 core::ptr::addr_of!(KSTACKS[i]) as u64 + KSTACK_SIZE as u64;
-            (*tcb).cspace_ptr = cspace_ptr;
+            (*tcb).cspace_ptr = cspace_ptrs[i];
             (*tcb).vspace_root = root;
             (*tcb).ipc_buffer = buffer.start_address().as_u64();
             // threads other than 0 are entered by the scheduler's iretq.

@@ -29,7 +29,7 @@ confirm the proof fails, revert.
 | CAP-1 | no authority amplification: along any mint chain no descendant holds, or can check, a right its root lacked | Kani | `cap_space.rs` |
 | IPC-BADGE | a badge is set at most once and inherited unchanged; badged mints never escalate; the endpoint delivers the sender's badge with the message | Kani | `cap_space.rs`, `endpoint.rs` |
 | REPLY-1 | a reply object accepts at most one answer per bound caller and never delivers to an unbound one | Kani | `reply.rs` |
-| IPCBUF-1 | message words survive the trip through IPC buffers: the receiver sees word 0 and the sender's words 1 to 3; with no sender buffer it sees zeros, never stale data | Kani | `ipc_buffer.rs` |
+| IPCBUF-1 | message words survive the trip through IPC buffers: the receiver sees word 0 and the sender's words 1 to 3; with no sender buffer it sees zeros, never stale data; delivery clears `caps_received` and leaves the capability fields alone, and slot fields decode zero as none | Kani | `ipc_buffer.rs` |
 | MAP-1 | the mapping registry never holds two mappings of the same object, over any sequence of records and forgets; a recorded mapping is found and removed exactly | Kani | `mapping.rs` |
 | CAP-2 | a copy into another capability space never gains a right; revoking an original removes every copy of it in another space, and copies of those, while unrelated capabilities survive | Kani | `cap_space.rs` |
 | EP-1 | endpoint rendezvous: sender and receiver never both parked; parking is self-guarding; messages are neither fabricated nor corrupted | Kani | `endpoint.rs` |

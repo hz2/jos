@@ -29,27 +29,31 @@
 //! each operation establishing its half of the parking precondition. The
 //! `#[cfg(kani)]` harnesses discharge them over arbitrary bounded op sequences.
 
+use crate::cap_space::CapLink;
 use crate::notification::Badge;
 
-/// A small inline IPC message: a tag plus four data words.
+/// A small inline IPC message: a tag, four data words, and optionally one
+/// capability.
 ///
-/// Mirrors seL4's short register-passed messages and the kernel's `Message`
-/// type exactly (a tag/label plus four inline words); no IPC buffer or page
-/// transfer yet. `Copy`, so depositing and taking it move a value with no
-/// aliasing.
+/// Mirrors seL4's short register-passed messages (a tag/label plus four inline
+/// words). `Copy`, so depositing and taking it move a value with no aliasing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message {
     /// Message tag or method label.
     pub label: u64,
     /// Up to four inline data words.
     pub words: [u64; 4],
+    /// A capability sent with the message, named by its place in the sender's
+    /// space. The receiver gets a copy derived from it on delivery; if the
+    /// sender's capability is revoked first, nothing arrives.
+    pub cap: Option<CapLink>,
 }
 
 impl Message {
-    /// Creates a message with the given label and data words.
+    /// Creates a message with the given label and data words and no capability.
     #[must_use]
     pub const fn new(label: u64, words: [u64; 4]) -> Self {
-        Self { label, words }
+        Self { label, words, cap: None }
     }
 }
 

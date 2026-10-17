@@ -119,10 +119,7 @@ fn receiver_parks_then_sender_wakes_it() {
     }
 
     // sender task: deposits a message, which wakes the parked receiver.
-    let sent = Message {
-        label: 0xBEEF,
-        words: [9, 8, 7, 6],
-    };
+    let sent = Message::new(0xBEEF, [9, 8, 7, 6]);
     {
         let space = space.clone();
         executor
@@ -146,10 +143,7 @@ fn sender_first_then_receiver_drains() {
     let space = Rc::new(space);
     let got: Rc<RefCell<Option<Message>>> = Rc::new(RefCell::new(None));
 
-    let sent = Message {
-        label: 1,
-        words: [1, 2, 3, 4],
-    };
+    let sent = Message::new(1, [1, 2, 3, 4]);
 
     let mut executor = Executor::new();
     {
@@ -193,7 +187,7 @@ fn sender_blocks_on_full_endpoint_until_drained() {
         let order = order.clone();
         executor
             .spawn(Task::new(async move {
-                send(&space, send_cap, Message { label, words: [0; 4] })
+                send(&space, send_cap, Message::new(label, [0; 4]))
                     .await
                     .unwrap();
                 order.borrow_mut().push(label);

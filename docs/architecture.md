@@ -120,6 +120,14 @@ it. The take-or-park step happens under one lock, so wakeups are never lost.
   untyped memory, so a buffer can never alias a kernel object, and revoking
   the capability unregisters the buffer. A thread without a buffer sends zeros
   and receives word 0 only.
+- **Capability transfer**: a message can carry one capability. The sender names
+  a slot in its buffer's `send_cap` field, which needs `GRANT` on the endpoint
+  capability; the receiver names the slot it lands in with `recv_slot`, and the
+  kernel reports in `caps_received` whether it did. The received capability is
+  a copy derived from the sender's, so revoking the original reaches it. A
+  receiver that accepts nothing still gets the message, only without the
+  capability, and so does one whose sender revoked the capability while the
+  message waited. Replies carry no capability yet.
 - **Badges**: a server mints one badged copy of its endpoint capability per
   client (`Mint` syscall). The badge can be set once and is inherited by every
   further derivation, and the receiver gets it in `rdx` with each message, so a

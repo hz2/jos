@@ -38,7 +38,10 @@ Check items off in the same commit that finishes them.
 - [ ] revoking a VSpace capability while a thread still runs in it
 - [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized
       object is built by value on a syscall stack any more
-- [ ] capability transfer with an IPC message (the derivation tree supports it)
+- [x] capability transfer with an IPC message: the sender names a slot in its
+      IPC buffer (needs `GRANT` on the endpoint), the receiver names where it
+      lands, and the copy stays in the derivation tree
+- [ ] capability transfer on `Reply` (replies carry words only today)
 - [x] `Revoke` (21): revoke a capability and everything derived from it,
       in every capability space, from userspace
 - [ ] `revoke_across` rescans every space per removed capability; fine at 64

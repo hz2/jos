@@ -108,6 +108,33 @@ unsafe fn with_registered_spaces<R>(f: impl FnOnce(&mut [&mut KernelCapSpace]) -
     }
 }
 
+/// Copies the capability `source` names into `slot` of `dest`, for a capability
+/// sent with an IPC message. The copy keeps the source's rights and badge and
+/// descends from it, so revoking the source reaches it. Returns `false` if the
+/// source is gone (revoked since the send), lives in `dest` itself, or the slot
+/// is out of range or taken.
+///
+/// # Safety
+///
+/// `dest` must point to a live capability space, and the caller must run
+/// single-CPU with interrupts disabled and hold no reference into `dest`.
+pub unsafe fn transfer_cap(source: CapLink, dest: *mut KernelCapSpace, slot: usize) -> bool {
+    // SAFETY: per this function's contract; the registered entries live for the
+    // kernel lifetime, and the source is distinct from dest (checked), so the
+    // shared and exclusive references below do not alias.
+    unsafe {
+        let all: &[*mut KernelCapSpace; MAX_CSPACES] = &*core::ptr::addr_of!(CSPACES);
+        let registered = &all[..CSPACE_COUNT];
+        let Some(&src) = registered.iter().find(|&&s| (*s).id() == source.space) else {
+            return false;
+        };
+        if core::ptr::eq(src, dest) {
+            return false;
+        }
+        (*src).copy_into(source.cap, &mut *dest, slot, Rights::ALL).is_ok()
+    }
+}
+
 // --------------------------------------------------------------------------
 // Object handle
 // --------------------------------------------------------------------------

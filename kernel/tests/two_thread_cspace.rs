@@ -92,13 +92,13 @@ pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
         let ep_a = untyped.retype_endpoint().expect("ep a");
         let a0 = ca.insert(ep_a, Rights::all()).expect("ca slot0");
         assert_eq!(a0.slot(), 0);
-        cap_send(ca, a0, Message { label: 0, words: [0xA0A0, 0, 0, 0] }).expect("preload a");
+        cap_send(ca, a0, Message::new(0, [0xA0A0, 0, 0, 0])).expect("preload a");
 
         // thread B's endpoint, full cap in slot 0, pre-loaded with 0xB0B0.
         let ep_b = untyped.retype_endpoint().expect("ep b");
         let b0 = cb.insert(ep_b, Rights::all()).expect("cb slot0");
         assert_eq!(b0.slot(), 0);
-        cap_send(cb, b0, Message { label: 0, words: [0xB0B0, 0, 0, 0] }).expect("preload b");
+        cap_send(cb, b0, Message::new(0, [0xB0B0, 0, 0, 0])).expect("preload b");
 
         (
             core::ptr::from_mut::<KernelCapSpace>(ca),

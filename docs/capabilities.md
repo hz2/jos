@@ -204,6 +204,8 @@ The current syscalls are `add` and `exit` (test probes), `ipc_send` /
 `call` / `recv_reply` / `reply` trio for request-response IPC (plus
 `reply_recv`, the server loop in one call), and
 `set_ipc_buffer` to register a Frame as the caller's IPC buffer, and
+`revoke` and `cnode_copy` for capability management (a capability can also
+ride along with a send or call; see `jos_core::ipc_buffer`), and
 `map_page_table` / `map_frame` to build an address space from capabilities
 (and `unmap` to take a mapping down again). Threads are
 created with `tcb_configure`, `tcb_set_ipc_buffer`, and `tcb_start`. A

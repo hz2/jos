@@ -57,8 +57,8 @@ speak IPC.
 - [x] cross-space derivation tree: parent links name a space and a slot, so
       revoking a capability reaches its copies in other CNodes (decided: a
       global tree, the seL4 model)
-- [ ] capability transfer over IPC (copying works; sending one with a message
-      does not yet)
+- [x] capability transfer over IPC: one capability per message, through the
+      IPC buffer, gated by `GRANT`, linked into the derivation tree
 - [ ] JPC-1: Verus proof of rendezvous deadlock-freedom
 
 ### M2. Userspace crate, ELF loader, root task

@@ -77,13 +77,10 @@ fn capability_endpoint_lifecycle() {
     // rights are enforced: a send-only cap cannot receive, a recv-only cap
     // cannot send. this is the confused-deputy defense in action.
     assert!(cap_recv(&space, send_cap).is_err());
-    assert!(cap_send(&space, recv_cap, Message { label: 1, words: [0; 4] }).is_err());
+    assert!(cap_send(&space, recv_cap, Message::new(1, [0; 4])).is_err());
 
     // the message round-trips through the capability chain.
-    let msg = Message {
-        label: 0xCAFE,
-        words: [1, 2, 3, 4],
-    };
+    let msg = Message::new(0xCAFE, [1, 2, 3, 4]);
     cap_send(&space, send_cap, msg).expect("send with WRITE right should succeed");
     let got = cap_recv(&space, recv_cap).expect("recv with READ right should succeed");
     assert_eq!(got, msg);
@@ -107,7 +104,7 @@ fn revoke_makes_capability_stale() {
     assert!(space.lookup(full).is_none());
     assert!(space.lookup(child).is_none());
     // a stale capability cannot be used for IPC.
-    assert!(cap_send(&space, child, Message { label: 0, words: [0; 4] }).is_err());
+    assert!(cap_send(&space, child, Message::new(0, [0; 4])).is_err());
 }
 
 /// A second static region so the two tests do not share watermark state (each

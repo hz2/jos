@@ -61,7 +61,7 @@ use crate::cpu_local::{
 };
 use crate::gdt;
 use jos_core::cap_rights::Rights;
-use jos_core::cap_space::{Capability, InsertAtError, MintError};
+use jos_core::cap_space::{CapLink, Capability, InsertAtError, MintError, SpaceId};
 use jos_core::ipc_buffer::{self, IpcBuffer};
 use jos_core::untyped::ObjectType;
 
@@ -83,6 +83,10 @@ pub enum Syscall {
     /// through the capability in slot `cap_slot` of the current task's
     /// `CSpace`. Returns 0 on success or an [`IpcSyscallError`] code. Requires
     /// the capability to carry `WRITE`; the kernel enforces this per call.
+    /// If the IPC buffer names a capability in `send_cap`, a copy travels with
+    /// the message on this, [`IpcSendBlocking`](Syscall::IpcSendBlocking), and
+    /// [`Call`](Syscall::Call); that requires `GRANT` on the endpoint
+    /// capability. See [`jos_core::ipc_buffer`] for the receiving side.
     IpcSend = 2,
     /// `ipc_recv(cap_slot) -> word | (errno | ERR_FLAG)`. Receives a one-word
     /// message through the capability in slot `cap_slot`. On success returns
@@ -284,6 +288,9 @@ pub enum IpcSyscallError {
     SlotOccupied = 26,
     /// The destination slot is out of range.
     SlotOutOfRange = 27,
+    /// A capability was sent from a space that is not registered, so its copy
+    /// could not stay linked to it for revocation.
+    NotRegistered = 28,
 }
 
 /// Bit OR-ed into an [`Syscall::IpcRecv`] return value to mark it an error
@@ -655,7 +662,10 @@ fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
     let Some(cap_ref) = space.ref_at(slot) else {
         return IpcSyscallError::BadCap as u64;
     };
-    let message = compose_current(word);
+    let message = match compose_with_cap(cap_slot, word) {
+        Ok(message) => message,
+        Err(e) => return e as u64,
+    };
     match cap_send(space, cap_ref, message) {
         Ok(()) => 0,
         Err(e) => ipc_errno(e),
@@ -678,7 +688,7 @@ fn sys_ipc_recv(cap_slot: u64) -> SyscallRet {
         return bad_cap;
     };
     match cap_recv_badged(space, cap_ref) {
-        Ok((message, badge)) => SyscallRet { rax: deliver_to(&message, current_buffer()), rdx: badge.0 },
+        Ok((message, badge)) => SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge.0 },
         Err(e) => (ipc_errno(e) | IPC_ERR_FLAG).into(),
     }
 }
@@ -873,6 +883,10 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
     }
     let endpoint_addr = cap.object.phys_addr();
     let badge = cap.badge.0;
+    let message = match compose_with_cap(cap_slot, word) {
+        Ok(message) => message,
+        Err(e) => return e as u64,
+    };
 
     // check for a waiting receiver and deliver directly (bypassing the endpoint
     // buffer so we don't deposit a message that the parked receiver will miss).
@@ -886,7 +900,7 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
                     drop(recvs);
                     // hand the message straight to the parked receiver: its
                     // buffer gets the words, its saved rax word 0, rdx the badge.
-                    resume_with(recv_tid, &compose_current(word), badge);
+                    resume_with(recv_tid, &message, badge);
                     return 0; // send succeeded immediately
                 }
         }
@@ -910,7 +924,7 @@ fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
             *entry = Some(BlockedSend {
                 endpoint_addr,
                 thread_id: cur,
-                message: compose_current(word),
+                message,
                 badge,
                 call: false,
             });
@@ -969,7 +983,7 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
             // a plain send completes now: wake the sender with success.
             resume(send.thread_id, 0, 0);
         }
-        return SyscallRet { rax: deliver_to(&send.message, current_buffer()), rdx: send.badge };
+        return SyscallRet { rax: deliver_to(&send.message, current_tcb()), rdx: send.badge };
     }
 
     // no sender waiting: try cap_recv in case a message was already deposited.
@@ -1054,23 +1068,15 @@ fn resume(thread_id: usize, rax: u64, rdx: u64) {
     crate::sched::mark_ready(thread_id);
 }
 
-/// Returns the IPC buffer registered by the scheduler thread `thread_id`, if any.
-fn thread_buffer(thread_id: usize) -> Option<*mut IpcBuffer> {
-    // SAFETY: thread_id came from register_thread, and THREAD_TABLE entries live
-    // for the kernel lifetime; a null entry is handled below.
-    let tcb = unsafe { crate::sched::thread_table_entry(thread_id) };
-    if tcb.is_null() {
-        return None;
-    }
-    // SAFETY: a non-null entry points at a live Tcb, read on the single-CPU,
-    // interrupts-disabled syscall path.
-    unsafe { (*tcb).ipc_buffer_ptr() }
+/// Returns the current thread's TCB, or null before any thread runs.
+fn current_tcb() -> *mut Tcb {
+    // SAFETY: the per-CPU block is read on the single-CPU syscall path.
+    unsafe { (*cpu_local::cpu_local_ptr()).current_tcb }
 }
 
 /// Returns the IPC buffer registered by the current thread, if any.
 fn current_buffer() -> Option<*mut IpcBuffer> {
-    // SAFETY: the per-CPU block is read on the single-CPU syscall path.
-    let tcb = unsafe { (*cpu_local::cpu_local_ptr()).current_tcb };
+    let tcb = current_tcb();
     if tcb.is_null() {
         return None;
     }
@@ -1088,17 +1094,67 @@ fn compose_current(word0: u64) -> Message {
     ipc_buffer::compose(word0, buffer.map(|p| unsafe { &*p }))
 }
 
-/// Writes `message` into the buffer at `buffer`, if any, returning word 0.
-fn deliver_to(message: &Message, buffer: Option<*mut IpcBuffer>) -> u64 {
+/// Builds the message the current thread sends on the endpoint at `ep_slot`:
+/// [`compose_current`], plus the capability its IPC buffer names in
+/// `send_cap`, if any. Replies never carry one.
+///
+/// # Errors
+///
+/// [`IpcSyscallError::Denied`] if a capability is named but the endpoint
+/// capability lacks `GRANT`, [`BadCap`](IpcSyscallError::BadCap) if the named
+/// slot is empty, and [`NotRegistered`](IpcSyscallError::NotRegistered) if the
+/// sender's space is not registered, so no copy could link back to it.
+fn compose_with_cap(ep_slot: u64, word0: u64) -> Result<Message, IpcSyscallError> {
+    let mut message = compose_current(word0);
+    // SAFETY: as in compose_current; the reference lives only for this read.
+    let Some(slot) = current_buffer().and_then(|p| unsafe { (*p).send_slot() }) else {
+        return Ok(message);
+    };
+    let endpoint = current_cap(ep_slot).ok_or(IpcSyscallError::BadCap)?;
+    if !endpoint.rights.contains(Rights::GRANT) {
+        return Err(IpcSyscallError::Denied);
+    }
+    let space = current_cspace().ok_or(IpcSyscallError::BadCap)?;
+    let cap = space.ref_at(slot).ok_or(IpcSyscallError::BadCap)?;
+    if space.id() == SpaceId(0) {
+        return Err(IpcSyscallError::NotRegistered);
+    }
+    message.cap = Some(CapLink { space: space.id(), cap });
+    Ok(message)
+}
+
+/// Delivers `message` to the thread `tcb`: its buffer, if any, gets the words,
+/// and a capability the message carries lands in the buffer's `recv_slot`, with
+/// `caps_received` reporting whether it did. Returns word 0.
+fn deliver_to(message: &Message, tcb: *mut Tcb) -> u64 {
+    if tcb.is_null() {
+        return message.words[0];
+    }
+    // SAFETY: a non-null tcb is the current thread or a thread table entry, both
+    // live; read on the single-CPU syscall path.
+    let (buffer, space) = unsafe { ((*tcb).ipc_buffer_ptr(), (*tcb).cspace_ptr) };
     // SAFETY: as in compose_current; the exclusive reference lives only for this
     // call, and the message was already copied out of any sender buffer.
-    ipc_buffer::deliver(message, buffer.map(|p| unsafe { &mut *p }))
+    let word0 = ipc_buffer::deliver(message, buffer.map(|p| unsafe { &mut *p }));
+    if let (Some(buf), Some(source)) = (buffer, message.cap) {
+        // SAFETY: as above; the reference from deliver has ended.
+        let slot = unsafe { (*buf).receive_slot() };
+        // SAFETY: the receiver's space lives as long as its thread; single-CPU
+        // syscall path, and no reference into it is held across this call.
+        let arrived = slot.is_some_and(|s| !space.is_null() && unsafe { cap::transfer_cap(source, space, s) });
+        // SAFETY: as above.
+        unsafe { (*buf).caps_received = u64::from(arrived) };
+    }
+    word0
 }
 
 /// Resumes a blocked thread with a delivered message: its buffer gets the
 /// words, its saved `rax` word 0, and its saved `rdx` the given value.
 fn resume_with(thread_id: usize, message: &Message, rdx: u64) {
-    let word0 = deliver_to(message, thread_buffer(thread_id));
+    // SAFETY: thread_id came from register_thread, and THREAD_TABLE entries live
+    // for the kernel lifetime; deliver_to handles a null entry.
+    let tcb = unsafe { crate::sched::thread_table_entry(thread_id) };
+    let word0 = deliver_to(message, tcb);
     resume(thread_id, word0, rdx);
 }
 
@@ -1131,7 +1187,10 @@ fn sys_call(cap_slot: u64, word: u64) -> u64 {
         Ok(found) => found,
         Err(e) => return err(e),
     };
-    let message = compose_current(word);
+    let message = match compose_with_cap(cap_slot, word) {
+        Ok(message) => message,
+        Err(e) => return err(e),
+    };
     let cur = crate::sched::current_thread_id();
     if cur == usize::MAX {
         return err(IpcSyscallError::WouldBlock);
@@ -1515,10 +1574,7 @@ fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
     match cap.object.kind() {
         ObjectKind::Endpoint => match method {
             ENDPOINT_SEND => {
-                let message = Message {
-                    label: 0,
-                    words: [arg0, 0, 0, 0],
-                };
+                let message = Message::new(0, [arg0, 0, 0, 0]);
                 match cap_send(space, cap_ref, message) {
                     Ok(()) => 0,
                     Err(e) => invoke_errno(e),

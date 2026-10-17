@@ -117,7 +117,7 @@ fn message_arrives_before_deadline() {
     // a deadline far ahead: 1e12 TSC ticks (~hundreds of ms at GHz), so the
     // immediately-spawned sender deposits well before it.
     let deadline = clock::now().saturating_add(Duration::new(1_000_000_000_000));
-    let sent = Message { label: 0xCAFE, words: [1, 2, 3, 4] };
+    let sent = Message::new(0xCAFE, [1, 2, 3, 4]);
 
     let mut executor = Executor::new();
     {

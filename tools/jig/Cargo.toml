@@ -1,0 +1,10 @@
+[package]
+name = "jig"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+# the host-side test harness: boots the kernel test images (and the real
+# kernel with the root task) under qemu in parallel, parses their KTAP, and
+# reports. std only, so it builds with nothing but the pinned toolchain.
+[dependencies]

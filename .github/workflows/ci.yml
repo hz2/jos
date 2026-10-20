@@ -25,10 +25,10 @@ jobs:
       - name: style
         run: scripts/check.sh style
 
-      - name: clippy (both crates, -D warnings)
+      - name: clippy (jos-core, jig, kernel, user, -D warnings)
         run: scripts/check.sh clippy
 
-      - name: test (jos-core, host)
+      - name: test (jos-core and jig, host)
         run: scripts/check.sh test
 
       - name: miri (jos-core)
@@ -37,5 +37,8 @@ jobs:
       - name: kani (jos-core)
         run: scripts/check.sh kani
 
-      - name: kernel boot tests (qemu)
+      - name: kernel boot tests (qemu, through jig)
         run: scripts/check.sh qemu
+
+      - name: root task across the machine matrix (qemu)
+        run: scripts/check.sh matrix

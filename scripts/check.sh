@@ -4,17 +4,18 @@
 #
 # usage: scripts/check.sh <gate> [arg]
 #   style [files]   ascii, no ai attribution, SAFETY on every unsafe
-#   clippy          clippy -D warnings on jos-core, the kernel, and user/
-#   test            jos-core unit + simulation tests (host)
+#   clippy          clippy -D warnings on jos-core, jig, the kernel, and user/
+#   test            jos-core unit + simulation tests and jig tests (host)
 #   miri            undefined-behavior check of jos-core
 #   kani [harness]  bounded proofs (all, or one harness)
 #   verus           verus proof module (jos-core/src/proof.rs)
 #   qemu [test]     boot kernel tests under qemu (all, or one by name)
 #   qemu-kvm [test] the same under kvm instead of tcg, skipped without /dev/kvm
 #   boot            the real kernel booting the real root task in test mode,
-#                   under tcg and (when /dev/kvm is usable) kvm
+#                   on a small machine matrix (kvm included when usable)
+#   matrix          the same across the full machine matrix
 #   fast            style + clippy + test (pre-commit)
-#   ci              fast + miri + kani + qemu + qemu-kvm + boot (pre-push to main, ci)
+#   ci              fast + miri + kani + qemu + qemu-kvm + matrix (pre-push to main, ci)
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -36,11 +37,11 @@ style() {
     scripts/check-style.sh "$@"
 }
 clippy() {
-    cargo clippy -q -p jos-core --all-targets -- -D warnings
+    cargo clippy -q -p jos-core -p jig --all-targets -- -D warnings
     (cd kernel && cargo clippy -q --all-targets -- -D warnings)
     (cd user && CARGO_TARGET_DIR="$(user_target)" cargo clippy -q -- -D warnings)
 }
-test() { cargo test -q -p jos-core; }
+test() { cargo test -q -p jos-core -p jig; }
 miri() { cargo miri test -q -p jos-core; }
 kani() {
     nix develop .#verify --command cargo kani -p jos-core ${1:+--harness "$1"}
@@ -49,13 +50,10 @@ verus() {
     nix develop .#verify --command bash -c \
         'verus --crate-type lib --edition 2024 -L "$VERUS_LIB_DIR" --verify-module proof jos-core/src/lib.rs'
 }
-qemu() {
-    if [ $# -eq 0 ]; then
-        (cd kernel && cargo test --all-targets)
-    else
-        (cd kernel && cargo test --test "$1")
-    fi
-}
+# the host-side harness (tools/jig): boots images in parallel, reads their
+# ktap, and prints a summary with log tails and reproduce commands.
+jig() { cargo run -q -p jig -- "$@"; }
+qemu() { jig test ${1:+--exact "$1"}; }
 qemu-kvm() {
     # timing differs a lot between accelerators, so a test that only passes
     # under one of them is caught here.
@@ -63,35 +61,27 @@ qemu-kvm() {
         echo "[check] qemu-kvm: no usable /dev/kvm, skipped"
         return 0
     fi
-    JOS_QEMU_ACCEL=kvm qemu "$@"
+    jig test --accel kvm ${1:+--exact "$1"}
 }
 boot() {
     # the production path end to end: the real kernel binary loads the real
     # root task from its boot module, and the root task's self-test decides
-    # the exit code.
-    (cd kernel && cargo build -q)
-    (cd user && CARGO_TARGET_DIR="$(user_target)" cargo build -q)
-    local kernel="${CARGO_TARGET_DIR:-$PWD/target}/x86_64-jos/debug/jos"
-    local root="$(user_target)/x86_64-unknown-none/debug/root"
-    JOS_MODULES="$root root test" scripts/run-qemu.sh "$kernel"
-    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-        JOS_QEMU_ACCEL=kvm JOS_MODULES="$root root test" scripts/run-qemu.sh "$kernel"
-    else
-        echo "[check] boot: no usable /dev/kvm, kvm run skipped"
-    fi
+    # the exit code, on a few unlike machines (kvm among them when usable).
+    jig boot --matrix-small
 }
+matrix() { jig boot --matrix; }
 fast() { style; clippy; test; }
-ci() { fast; miri; kani; qemu; qemu-kvm; boot; }
+ci() { fast; miri; kani; qemu; qemu-kvm; matrix; }
 
 if [ $# -eq 0 ]; then
-    sed -n '5,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '5,19p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
 gate=$1
 shift
 case "$gate" in
-    style|clippy|test|miri|kani|verus|qemu|qemu-kvm|boot|fast|ci)
+    style|clippy|test|miri|kani|verus|qemu|qemu-kvm|boot|matrix|fast|ci)
         echo "[check] $gate $*"
         "$gate" "$@"
         ;;

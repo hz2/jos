@@ -9,9 +9,10 @@
 | undefined behavior | jos-core | `check.sh miri` | pre-push to main, CI |
 | bounded proofs | `#[cfg(kani)] mod kani_proofs` | `check.sh kani` | pre-push to main, CI |
 | functional proofs | `jos-core/src/proof.rs` | `check.sh verus` | manual |
-| boot / integration | `kernel/tests/*.rs`, one QEMU image each | `check.sh qemu` | pre-push to main, CI |
-| boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push to main, CI (skipped without `/dev/kvm`) |
-| first light | the real kernel boots the real root task (`user/root`) in test mode; its ring-3 checks print KTAP and halt the machine with the result | `check.sh boot` | pre-push to main, CI (TCG, and KVM when available) |
+| host harness | `tools/jig` unit tests (KTAP parser, reports) | `check.sh test` | pre-commit, CI |
+| boot / integration | `kernel/tests/*.rs`, one QEMU image each, booted in parallel by jig | `check.sh qemu` | pre-push to main, CI |
+| boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push to main (skipped without `/dev/kvm`) |
+| first light | the real kernel boots the real root task (`user/root`) in test mode; its ring-3 checks print KTAP and halt the machine with the result | `check.sh boot` (4 machines), `check.sh matrix` (36) | matrix: pre-push to main, CI |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
@@ -21,13 +22,53 @@ two labels and copied into the user code page (see `kernel/tests/badged_ipc.rs`)
 Every new oracle or proof gets a negative control: break the property, confirm
 the test fails, revert.
 
-`check.sh boot` is the one gate that runs the production path end to end: it
-builds the kernel binary and the `user/` workspace, boots them with the root
-task module named `root test`, and lets the root task decide the exit code
-through its Machine capability. Its checks report in KTAP (`ok N name` /
-`not ok N name`, a `# run name` line before each, diagnostics as `#` lines),
-the format the host harness will parse. Removing the kernel's `WRITE` check
-on `console_write` makes it fail.
+`check.sh boot` and `check.sh matrix` run the production path end to end:
+they build the kernel binary and the `user/` workspace, boot them with the
+root task module named `root test`, and let the root task decide the exit
+code through its Machine capability. Removing the kernel's `WRITE` check on
+`console_write` makes them fail.
+
+## jig, the host harness
+
+`tools/jig` boots QEMU images in parallel and reads what each guest prints.
+Every kernel test and the root task's self-test report in KTAP version 1, the
+format Linux's KUnit uses: a `KTAP version 1` header, a `1..N` plan, a
+`# run name` line before each test, `#` diagnostics, then `ok N name` or
+`not ok N name`. A `harness = false` test registers its one name with
+`jos::ktap::single`, the custom test runner numbers `#[test_case]`s, and the
+test panic handler turns a panic into diagnostics and a `not ok`.
+
+```text
+jig test [FILTER...] [--exact] [--jobs N] [--repeat N] [--junit FILE] [machine flags]
+jig boot [--args ARGS] [--matrix | --matrix-small] [--jobs N] [--junit FILE] [machine flags]
+jig ktap FILE
+machine flags: --accel tcg|kvm --cpu MODEL --mem SIZE --smp N --machine TYPE --timeout SECS
+```
+
+- `test` builds the kernel tests (`cargo test --no-run`) and boots every image
+  whose name contains a filter, half the host's cores at a time by default.
+  `--repeat N` boots each one N times, to hunt flaky tests.
+- `boot` builds the kernel and `user/` and boots the root task with `ARGS`
+  (default `test`). `--matrix` covers cpu models with and without SMEP and
+  SMAP (`max`, `qemu64`), 64 MiB to 4 GiB of memory (past the identity map),
+  one and four cpus, the `q35` and `pc` machines, and the host cpu under KVM
+  when it is usable; `--matrix-small` is four of the most different ones.
+- A boot passes only if the runner's exit code says so and the KTAP agrees:
+  the header and plan appeared and every planned test reported `ok`. A missing
+  plan, a test that never reported, or a `not ok` behind a clean exit fails.
+- A failure prints its `not ok` lines with their diagnostics, the test that
+  was running when the guest stopped (a hang, a fault), the last 25 log lines,
+  where the whole log was saved (`<target>/jig/run-*/`), and a command that
+  reproduces it.
+- `--junit FILE` writes JUnit XML: a suite per boot, a case per KTAP test, and
+  for a boot cut short a failed case named after the test it was running.
+- `ktap FILE` reads a saved log.
+
+Run jig inside the dev shell (`nix develop`), where qemu and grub live, or
+through `check.sh`, which enters it: `qemu`, `qemu-kvm`, `boot` (the small
+matrix), and `matrix` all call it. On a 12-core host the 43 kernel test images
+take about 15 s under TCG and 6 s under KVM, and the 36-machine matrix about
+16 s.
 
 Running under both TCG and KVM matters because their timing differs by orders
 of magnitude: a loop that spans several timer ticks under TCG finishes inside

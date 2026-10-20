@@ -85,7 +85,9 @@ half, look at the other.
 | Verus proofs | `jos-core/src/proof.rs` |
 | deterministic simulation | `jos-core/tests/dst_*.rs`, with `rng.rs`, `fault.rs`, `trace.rs` |
 | QEMU integration tests | `kernel/tests/*.rs`; multi-thread ones share `kernel/tests/common/threads.rs` |
-| the root task booting end to end | `scripts/check.sh boot` |
+| KTAP output of kernel tests (runner, panic handler, single-check tests) | `kernel/src/ktap.rs`, `kernel/src/lib.rs` |
+| the host harness: parallel boots, KTAP parsing, reports, the machine matrix | `tools/jig/src/` (`run.rs` boots, `ktap.rs` parses, `main.rs` reports) |
+| the root task booting end to end | `scripts/check.sh boot`, `scripts/check.sh matrix` |
 | in-kernel trace ring | `kernel/src/trace.rs` |
 | gates and runner | `scripts/check.sh`, `scripts/run-qemu.sh`, `.githooks/` |
 

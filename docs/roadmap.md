@@ -81,8 +81,9 @@ speak IPC.
 - [x] survivable user faults (fault endpoints, demand paging from userspace)
       and reusable thread ids
 - [ ] a ring-3 test suite in the root task, and process spawning from userspace
-- [ ] `jig`, the host-side harness, and differential testing against an
-      executable spec
+- [x] `jig`, the host-side harness: parallel QEMU boots read as KTAP, JUnit,
+      reproduce commands, a machine matrix
+- [ ] differential testing against an executable spec
 
 ### M3. Hardware foundation
 

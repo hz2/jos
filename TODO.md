@@ -22,10 +22,11 @@ Check items off in the same commit that finishes them.
       `abi::root_slot` slots, a `BootInfo` page, registered with the scheduler
 - [x] Console and Machine capabilities: `console_write` (22) through the IPC
       buffer's data area, `machine_halt` (23)
-- [x] `check.sh boot`: the real kernel boots the real root task in test mode,
-      under TCG and KVM, in `ci`; `cargo run` boots into the root task
-- [ ] mark ELF-1 and BOOT-2 proved in `docs/verification.md` once their Kani
-      harnesses have run under the memory cap
+- [x] `check.sh boot`: the real kernel boots the real root task in test mode
+      (`check.sh matrix`, 36 machines under TCG and KVM, runs in `ci`);
+      `cargo run` boots into the root task
+- [x] ELF-1 and BOOT-2 proved (`docs/verification.md`), each harness small
+      enough to run in a minute and 2 GB
 - [x] survivable user faults: one entry stub path for every vector, seL4-style
       fault endpoints (`tcb_set_fault_handler`, 25) resolved at fault time, a
       reply resumes the faulting instruction with registers intact (userspace
@@ -48,8 +49,12 @@ Check items off in the same commit that finishes them.
       runner as its fault handler, nested KTAP, `root test [filter]`
 - [ ] userspace process spawning: boot modules mapped read-only into the root
       task and loaded with the same `jos_core::elf` planner
-- [ ] `jig`, the host harness: parallel QEMU runs, KTAP parsing, JUnit, log
-      tails and reproduce commands, a boot matrix (cpu, memory, smp, machine)
+- [x] `jig`, the host harness (`tools/jig`): every kernel test and the root
+      task report KTAP; parallel QEMU runs, JUnit, log tails and reproduce
+      commands, `--repeat`, and a 36-machine boot matrix (cpu, memory, smp,
+      machine) in `ci`
+- [ ] `jig run` (an interactive boot) and `jig expect` (scripted serial
+      sessions, for the shell)
 - [ ] an executable spec of the syscall API in jos-core, run against the live
       kernel from ring 3 (differential fuzzing) and against the core on the host
 - [ ] notification syscalls, console input (COM1 IRQ4), and the `jsh` shell

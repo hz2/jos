@@ -8,6 +8,14 @@ set -euo pipefail
 KERNEL="$1"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# the iso step below is quiet, so name a missing tool here instead.
+for tool in grub-mkrescue xorriso qemu-system-x86_64; do
+    if ! command -v "$tool" >/dev/null; then
+        echo "run-qemu.sh: $tool not found; run inside the dev shell (nix develop)" >&2
+        exit 127
+    fi
+done
+
 # every run builds its own iso tree, so concurrent runs never collide.
 BUILD_DIR="$(mktemp -d "$(dirname "$KERNEL")/jos-iso.XXXXXX")"
 ISO="$BUILD_DIR.iso"

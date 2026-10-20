@@ -66,6 +66,8 @@ pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     /// PS/2 keyboard on IRQ1, remapped to vector 33.
     Keyboard,
+    /// COM1, the serial console, on IRQ4, remapped to vector 36.
+    Com1 = PIC_1_OFFSET + COM1_IRQ,
 }
 
 impl InterruptIndex {
@@ -112,6 +114,7 @@ pub fn init_idt() {
         idt[InterruptIndex::Timer.as_usize()]
             .set_handler_fn(crate::sched::timer_preempt_entry);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
+        idt[InterruptIndex::Com1.as_usize()].set_handler_fn(com1_interrupt_handler);
         idt.load();
     }
 }
@@ -124,9 +127,17 @@ pub fn init_pics() {
     // overlap the CPU exception vectors, and the IDT entries for the remapped
     // vectors are installed by the time interrupts are enabled.
     unsafe {
-        PICS.lock().initialize();
+        let mut pics = PICS.lock();
+        pics.initialize();
+        // initialize keeps the firmware's masks, which leave COM1 masked:
+        // unmask it, so typed bytes reach the console.
+        let [primary, secondary] = pics.read_masks();
+        pics.write_masks(primary & !(1 << COM1_IRQ), secondary);
     }
 }
+
+/// The PIC line COM1 interrupts on.
+const COM1_IRQ: u8 = 4;
 
 /// Swaps GS if and only if the interrupt came from ring 3.
 ///
@@ -188,6 +199,21 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+    // SAFETY: exit swap; restores user GS before the implicit iretq.
+    unsafe { conditional_swapgs(cs); }
+}
+
+/// COM1 (IRQ4, vector 36): the UART received bytes. The handler moves them
+/// into the console input buffer, which hands them to a parked reader.
+extern "x86-interrupt" fn com1_interrupt_handler(stack_frame: InterruptStackFrame) {
+    let cs = stack_frame.code_segment;
+    // SAFETY: entry swap; no GS access before this point.
+    unsafe { conditional_swapgs(cs); }
+    crate::console::on_receive();
+    // SAFETY: Com1 is the correct vector for IRQ4.
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(InterruptIndex::Com1.as_u8());
     }
     // SAFETY: exit swap; restores user GS before the implicit iretq.
     unsafe { conditional_swapgs(cs); }

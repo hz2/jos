@@ -177,11 +177,19 @@ pub enum Syscall {
     /// [`IpcRecvBlocking`](Syscall::IpcRecvBlocking) does; otherwise as
     /// [`RecvReply`](Syscall::RecvReply), with that reply object.
     RecvTimeout = 26,
+    /// `console_read(console_slot, max, ms) -> len | errno`: moves up to `max`
+    /// bytes of console input (at most [`crate::ipc_buffer::DATA_LEN`]) into the
+    /// caller's IPC-buffer data area and returns how many. With no input yet it
+    /// waits for some: not at all when `ms` is 0 ([`IpcSyscallError::WouldBlock`]),
+    /// for `ms` milliseconds in whole timer ticks ([`IpcSyscallError::TimedOut`]),
+    /// or for as long as it takes when `ms` is [`NO_TIMEOUT`]. Needs `READ` on a
+    /// Console capability.
+    ConsoleRead = 27,
 }
 
 impl Syscall {
     /// Every syscall, in number order; the numbers are dense from 0.
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::Add,
         Self::Exit,
         Self::IpcSend,
@@ -209,6 +217,7 @@ impl Syscall {
         Self::ThreadExit,
         Self::TcbSetFaultHandler,
         Self::RecvTimeout,
+        Self::ConsoleRead,
     ];
 
     /// Maps a raw syscall number to its enum form, or `None` if it is unknown.
@@ -224,6 +233,9 @@ pub const ENOSYS: u64 = u64::MAX;
 
 /// The `reply_slot` of [`Syscall::RecvTimeout`] that names no reply object.
 pub const NO_REPLY: u64 = u64::MAX;
+
+/// The `ms` of a wait with no deadline, as for [`Syscall::ConsoleRead`].
+pub const NO_TIMEOUT: u64 = u64::MAX;
 
 /// Bit OR-ed into the result of a call that returns data, to mark it an error
 /// rather than a value. The high bit, so any real result below `1 << 63` is

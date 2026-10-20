@@ -174,6 +174,7 @@ A thread with no usable fault endpoint is stopped by its fault, and only it.
 |---|---|---|---|
 | 22 | `console_write` | console slot, length | `0` or an error |
 | 23 | `machine_halt` | machine slot, code | does not return; an error if refused |
+| 27 | `console_read` | console slot, max, milliseconds or `NO_TIMEOUT` | byte count; flagged errors |
 
 The console and the machine are singleton objects, not carved from untyped
 memory; only the root task is handed capabilities to them, and it can pass on
@@ -182,6 +183,14 @@ attenuated copies. `console_write` prints the first `length` bytes (at most
 code `0` reports success to a test harness (QEMU exits with `33`), anything
 else failure. Both need `WRITE`, so a copy minted without it is refused with
 `Denied`.
+
+`console_read` needs `READ`. It moves up to `max` bytes (at most 2048) of
+console input into the caller's IPC-buffer data area and returns how many.
+Input typed with no reader waiting is kept in a 256-byte buffer in the kernel
+(COM1 interrupts on IRQ4 fill it). With nothing waiting the call waits: not at
+all for `ms` 0 (`WouldBlock`), `ms` milliseconds in whole timer ticks
+(`TimedOut`), or until input comes for `NO_TIMEOUT` (`u64::MAX`). Readers are
+served oldest first, each with what it asked for.
 
 ## Error codes
 

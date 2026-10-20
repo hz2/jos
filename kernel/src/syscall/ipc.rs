@@ -115,6 +115,13 @@ static BLOCKED_SENDS: Mutex<WaitTable<Send, MAX_THREADS>> = Mutex::new(WaitTable
 /// deadline in timer ticks.
 static BLOCKED_RECVS: Mutex<WaitTable<Option<ObjectId>, MAX_THREADS>> = Mutex::new(WaitTable::new());
 
+/// Threads parked in `console_read`, each with the most bytes it takes. There
+/// is one console, so every reader waits on the same key.
+static CONSOLE_READERS: Mutex<WaitTable<usize, MAX_THREADS>> = Mutex::new(WaitTable::new());
+
+/// The console's key in [`CONSOLE_READERS`].
+const CONSOLE: u64 = 0;
+
 /// Milliseconds per timer tick, rounded down: the PIT runs at its power-on
 /// rate, a tick every 54.9 ms, so dividing by 54 never waits less than asked.
 const TICK_MS: u64 = 54;
@@ -126,7 +133,7 @@ fn ticks_now() -> Instant {
 
 /// The deadline of a wait of `ms` milliseconds starting now: whole ticks,
 /// rounded up, plus the tick in progress.
-fn deadline_after(ms: u64) -> Instant {
+pub(super) fn deadline_after(ms: u64) -> Instant {
     ticks_now().saturating_add(Duration::new(ms.div_ceil(TICK_MS).saturating_add(1)))
 }
 
@@ -296,12 +303,68 @@ pub(super) fn sys_recv_timeout(ep_slot: u64, reply_slot: u64, ms: u64) -> Syscal
 /// tick, and a tick that finds it busy only puts the wake off to the next one.
 pub fn expire_timed_waits() {
     let now = ticks_now();
+    let timed_out = IpcSyscallError::TimedOut as u64 | IPC_ERR_FLAG;
     loop {
         let expired = BLOCKED_RECVS.try_lock().and_then(|mut recvs| recvs.take_expired(now));
-        let Some(recv) = expired else {
-            return;
+        let Some(recv) = expired else { break };
+        resume(recv.thread, timed_out, 0);
+    }
+    loop {
+        let expired = CONSOLE_READERS.try_lock().and_then(|mut readers| readers.take_expired(now));
+        let Some(reader) = expired else { break };
+        resume(reader.thread, timed_out, 0);
+    }
+    // input a receive interrupt could not hand over waits at most a tick.
+    console_input_arrived();
+}
+
+/// Parks the current thread until console input arrives, or until
+/// `deadline`, to take up to `max` bytes of it (see `sys_console_read`).
+pub(super) fn park_console_reader(max: usize, deadline: Option<Instant>) -> SyscallRet {
+    let err = |e: IpcSyscallError| SyscallRet::from(e as u64 | IPC_ERR_FLAG);
+    let cur = crate::sched::current_thread_id();
+    if cur == usize::MAX || CONSOLE_READERS.lock().park(CONSOLE, cur, deadline, max).is_err() {
+        return err(IpcSyscallError::WouldBlock);
+    }
+    // whoever delivers the input sets rax to the byte count before readying us.
+    park_current();
+    0.into() // ignored: the stub yields instead of sysretq'ing
+}
+
+/// Hands waiting console input to the threads parked in `console_read`,
+/// oldest first, as much as each asked for. Called when input arrives and on
+/// every timer tick, from interrupt context, so it only tries its locks: a
+/// busy one puts the delivery off to the next tick.
+pub fn console_input_arrived() {
+    loop {
+        let reader = {
+            let Some(mut readers) = CONSOLE_READERS.try_lock() else { return };
+            if crate::console::try_pending() != Some(true) {
+                return;
+            }
+            readers.take_oldest(CONSOLE)
         };
-        resume(recv.thread, IpcSyscallError::TimedOut as u64 | IPC_ERR_FLAG, 0);
+        let Some(reader) = reader else { return };
+        // SAFETY: the id came from register_thread; a null entry is skipped.
+        let tcb = unsafe { crate::sched::thread_table_entry(reader.thread) };
+        let buffer = if tcb.is_null() {
+            None
+        } else {
+            // SAFETY: a parked thread's TCB is live and not running, so nothing
+            // else uses its buffer; interrupts are off on this path.
+            unsafe { (*tcb).ipc_buffer_ptr() }
+        };
+        let count = buffer.and_then(|buffer| {
+            // SAFETY: the buffer is a whole registered frame reached through
+            // the identity map, so its data area is in bounds; the reader asked
+            // for at most DATA_LEN bytes, and u8 has no invalid values.
+            let data = unsafe {
+                let start = buffer.cast::<u8>().add(ipc_buffer::DATA_OFFSET);
+                core::slice::from_raw_parts_mut(start, reader.data.min(ipc_buffer::DATA_LEN))
+            };
+            crate::console::try_take(data)
+        });
+        resume(reader.thread, count.unwrap_or(0) as u64, 0);
     }
 }
 
@@ -590,6 +653,7 @@ pub fn retire_threads(mut doomed: impl FnMut(&Tcb) -> bool) {
         // a parked sender or receiver must not be handed a message later.
         let _ = BLOCKED_SENDS.lock().take_thread(id);
         let _ = BLOCKED_RECVS.lock().take_thread(id);
+        let _ = CONSOLE_READERS.lock().take_thread(id);
         // SAFETY: id came from for_each_thread, so its entry is a live TCB;
         // single-CPU with interrupts disabled, as retire_thread requires.
         unsafe {

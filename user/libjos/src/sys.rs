@@ -309,6 +309,21 @@ pub fn console_write(console: Slot, len: usize) -> Result<(), IpcSyscallError> {
     status_call(Syscall::ConsoleWrite, console, len as u64, 0)
 }
 
+/// `console_read(console, max, ms)`: moves up to `max` bytes of console input
+/// into this thread's IPC-buffer data area and returns how many;
+/// [`crate::console::read`] copies them out. With nothing waiting it waits
+/// `ms` milliseconds, or for as long as it takes with
+/// [`NO_TIMEOUT`](crate::abi::NO_TIMEOUT).
+///
+/// # Errors
+///
+/// [`IpcSyscallError::WouldBlock`] if `ms` is 0 and nothing waits,
+/// [`IpcSyscallError::TimedOut`] if nothing came in time, or why the
+/// capability was refused.
+pub fn console_read(console: Slot, max: usize, ms: u64) -> Result<u64, IpcSyscallError> {
+    flagged(syscall3(Syscall::ConsoleRead as u64, console, max as u64, ms).0)
+}
+
 /// `machine_halt(machine, code)`: stops the machine; code 0 reports success.
 /// Returns only if the capability is refused, with the reason.
 ///

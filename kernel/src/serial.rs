@@ -23,8 +23,9 @@ pub fn write_bytes(bytes: &[u8]) {
     // same lock discipline as _print: no interrupt may land while it is held.
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut port = SERIAL1.lock();
+        // raw: userspace decides what each byte means, a backspace included.
         for &byte in bytes {
-            port.send(byte);
+            port.send_raw(byte);
         }
     });
 }

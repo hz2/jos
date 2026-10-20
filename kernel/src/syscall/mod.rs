@@ -83,8 +83,8 @@ mod thread;
 mod vm;
 
 pub use ipc::{
-    abort_call, cancel_waits_on, deliver_fault, expire_timed_waits, fault_endpoint, forget_ipc_buffer,
-    retire_threads,
+    abort_call, cancel_waits_on, console_input_arrived, deliver_fault, expire_timed_waits, fault_endpoint,
+    forget_ipc_buffer, retire_threads,
 };
 
 pub use jos_core::abi::{
@@ -290,6 +290,8 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::TcbSetFaultHandler) => thread::sys_tcb_set_fault_handler(arg0, arg1).into(),
         // recv_timeout(ep_slot = arg0, reply_slot = arg1, ms = arg2) -> word, badge in rdx.
         Some(Syscall::RecvTimeout) => ipc::sys_recv_timeout(arg0, arg1, arg2),
+        // console_read(console_slot = arg0, max = arg1, ms = arg2) -> byte count.
+        Some(Syscall::ConsoleRead) => platform::sys_console_read(arg0, arg1, arg2),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it

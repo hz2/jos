@@ -28,6 +28,7 @@ use libjos::jos_core::line::LineEditor;
 use libjos::jos_core::untyped::ObjectType;
 use libjos::mem::{self, Error};
 use libjos::sys::{self, Slot};
+use libjos::process::Process;
 use libjos::thread::Thread;
 use libjos::{console, ktap, println, rt};
 
@@ -37,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 22] = [
+const CHECKS: [(&str, Check); 26] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -60,6 +61,10 @@ const CHECKS: [(&str, Check); 22] = [
     ("a_timed_receive_takes_what_arrives_in_time", a_timed_receive_takes_what_arrives_in_time),
     ("revoking_an_endpoint_ends_its_waits", revoking_an_endpoint_ends_its_waits),
     ("calls_reach_the_longest_waiting_receiver", calls_reach_the_longest_waiting_receiver),
+    ("boot_modules_are_readable", boot_modules_are_readable),
+    ("a_process_runs_and_reports_its_exit", a_process_runs_and_reports_its_exit),
+    ("a_process_cannot_read_its_parents_memory", a_process_cannot_read_its_parents_memory),
+    ("a_process_holds_only_what_it_was_given", a_process_holds_only_what_it_was_given),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -84,7 +89,7 @@ const FAULT_BADGE: u64 = 0xF417;
 const CHECK_TIMEOUT_MS: u64 = 30_000;
 
 /// Pages of stack a check thread gets.
-const CHECK_STACK_PAGES: u64 = 8;
+const CHECK_STACK_PAGES: u64 = 4;
 
 /// The boot information, for the check threads: `main` stores it before it
 /// starts any.
@@ -127,6 +132,8 @@ commands:
   list             the first-light checks
   test [filter]    run the checks, or those whose name contains filter
   bench [rounds]   time call and reply round trips to another thread
+  modules          the boot modules
+  run name [arg]   start a boot module as a process, and wait for it
   echo text        print text
   halt [code]      stop the machine; code 0 reports success";
 
@@ -178,9 +185,33 @@ fn run_command(boot: &BootInfo, line: &str) {
                 Err(why) => println!("bench: {}", why),
             }
         }
+        "modules" => {
+            for module in boot.modules() {
+                let name = core::str::from_utf8(module.name()).unwrap_or("?");
+                let mapped = if module.vaddr == 0 { "not mapped" } else { "mapped" };
+                println!("  {} ({} bytes, {})", name, module.size, mapped);
+            }
+        }
+        "run" => run_command_process(rest),
         "echo" => println!("{}", rest),
         "halt" => rt::halt(rest.parse().unwrap_or(0)),
         _ => println!("unknown command {}; try help", command),
+    }
+}
+
+/// Runs `run name [arg]`: starts a boot module as a process and says how it
+/// ended.
+fn run_command_process(rest: &str) {
+    let (name, arg) = rest.split_once(' ').unwrap_or((rest, ""));
+    let arg = arg.trim().parse().unwrap_or(0);
+    match run_module(name.as_bytes(), arg) {
+        Ok(((code, PROCESS_BADGE), _)) => println!("{} exited with {}", name, code),
+        Ok(((vector, PROCESS_FAULT_BADGE), [_, address, rip, _])) => match FaultKind::from_vector(vector) {
+            Some(kind) => println!("{} faulted: {:?} at rip {:#x}, address {:#x}", name, kind, rip, address),
+            None => println!("{} faulted: vector {} at rip {:#x}", name, vector, rip),
+        },
+        Ok(((word, badge), _)) => println!("{}: unexpected message {:#x} with badge {:#x}", name, word, badge),
+        Err(why) => println!("run: {}", why),
     }
 }
 
@@ -886,4 +917,100 @@ fn calls_reach_the_longest_waiting_receiver(_: &BootInfo) -> Result<(), &'static
     ensure(woke == Ok((3, 0)), "the bystander did not take its message")?;
     ensure(answers.0 == Ok(first_reply), "the call skipped the receiver that waited longest")?;
     ensure(answers.1 == Ok(second_reply), "the second call did not reach the newer receiver")
+}
+
+/// What `hello`'s argument makes it do: greet and exit with 0.
+const HELLO_GREET: u64 = 0;
+
+/// What `hello`'s argument makes it do: try to halt the machine through the
+/// root task's machine slot, and exit with the error.
+const HELLO_TRY_HALT: u64 = 1;
+
+/// The badge of the endpoint a process reports on.
+const PROCESS_BADGE: u64 = 0x9C0C;
+
+/// The badge of the endpoint a process's faults reach.
+const PROCESS_FAULT_BADGE: u64 = 0x9FA7;
+
+/// How long a process check waits for its process.
+const PROCESS_TIMEOUT_MS: u64 = 10_000;
+
+/// A page the root task maps and its processes do not: 768 MiB into user
+/// space, clear of every other check's addresses.
+const PARENT_ONLY_PAGE: u64 = layout::USER_START + 0x3000_0000;
+
+/// Returns the image of the boot module named `name`, as the kernel mapped it.
+fn module_image(name: &[u8]) -> Result<&'static [u8], &'static str> {
+    let module = boot_info().module(name).ok_or("no such boot module")?;
+    ensure(module.vaddr != 0, "the module is not mapped")?;
+    let size = usize::try_from(module.size).map_err(|_| "the module is too big")?;
+    // SAFETY: the kernel mapped a read-only copy of the module at vaddr, size
+    // bytes long, for the root task's whole life, and nothing writes it.
+    Ok(unsafe { core::slice::from_raw_parts(module.vaddr as *const u8, size) })
+}
+
+/// Starts `hello` with `arg`; see [`run_module`].
+fn run_hello(arg: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
+    run_module(b"hello", arg)
+}
+
+/// Starts the boot module named `name` as a process with `arg`, waits for it
+/// to exit or fault, and stops it. Returns the word that came back (its exit
+/// code, or a fault's vector), its badge ([`PROCESS_BADGE`] or
+/// [`PROCESS_FAULT_BADGE`]), and the rest of a fault message.
+fn run_module(name: &[u8], arg: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
+    let image = module_image(name)?;
+    let inbox = object(ObjectType::Endpoint)?;
+    let parent = mem::mint(inbox, Rights::ALL, PROCESS_BADGE).map_err(|_| "mint")?;
+    let faults = mem::mint(inbox, Rights::ALL, PROCESS_FAULT_BADGE).map_err(|_| "mint")?;
+    let spawned = Process::spawn(image, parent, faults, arg);
+    let got = spawned.as_ref().map_err(|_| "spawn").and_then(|_| {
+        sys::recv_timeout(inbox, None, PROCESS_TIMEOUT_MS).map_err(|_| "the process neither exited nor faulted")
+    });
+    let words = sys::received_words();
+    if let Ok(process) = spawned {
+        process.reap();
+    }
+    release(&[parent, faults, inbox])?;
+    Ok((got?, words))
+}
+
+/// The kernel maps every boot module but the root task's own read-only into
+/// its module window, where the `hello` image reads as an ELF file.
+fn boot_modules_are_readable(_: &BootInfo) -> Result<(), &'static str> {
+    let image = module_image(b"hello")?;
+    ensure(image.starts_with(b"\x7fELF"), "the hello module does not read as an ELF image")?;
+    let root = boot_info().module(b"root").ok_or("no root module")?;
+    ensure(root.vaddr == 0, "the root task's own image was mapped again")
+}
+
+/// A process started from the `hello` module runs in an address space of its
+/// own, and its exit code reaches its parent through the endpoint it was
+/// given.
+fn a_process_runs_and_reports_its_exit(_: &BootInfo) -> Result<(), &'static str> {
+    let (got, _) = run_hello(HELLO_GREET)?;
+    ensure(got == (0, PROCESS_BADGE), "the process did not exit with 0")
+}
+
+/// A process cannot read a page its parent has mapped: in its own address
+/// space there is nothing there, so the read faults, and the fault reaches
+/// the parent with the address.
+fn a_process_cannot_read_its_parents_memory(_: &BootInfo) -> Result<(), &'static str> {
+    let page = mem::map_new_page(PARENT_ONLY_PAGE).map_err(|_| "map the page")?;
+    // SAFETY: the page was just mapped writable here and nothing else uses it.
+    unsafe { core::ptr::write_volatile(PARENT_ONLY_PAGE as *mut u64, 0x005E_C2E7) };
+    let outcome = run_hello(PARENT_ONLY_PAGE);
+    sys::unmap(page).map_err(|_| "unmap")?;
+    release(&[page])?;
+    let ((vector, badge), words) = outcome?;
+    ensure(badge == PROCESS_FAULT_BADGE, "the process read its parent's page")?;
+    ensure(vector == PAGE_FAULT && words[1] == PARENT_ONLY_PAGE, "not a page fault at the parent's page")
+}
+
+/// A process holds only the capabilities it was given: the slot where the
+/// root task keeps its machine capability is empty in the process's
+/// capability space, so its attempt to halt the machine is refused.
+fn a_process_holds_only_what_it_was_given(_: &BootInfo) -> Result<(), &'static str> {
+    let (got, _) = run_hello(HELLO_TRY_HALT)?;
+    ensure(got == (IpcSyscallError::BadCap as u64, PROCESS_BADGE), "the process did not find the machine slot empty")
 }

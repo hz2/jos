@@ -170,6 +170,7 @@ unsafe fn build(
     }
     map(memory, vspace, ipc_buffer, layout::ROOT_IPC_BUFFER, map_flags::WRITE)?;
     map(memory, vspace, boot_info, layout::ROOT_BOOT_INFO, 0)?;
+    let module_vaddrs = map_modules(memory, vspace, info, root.image)?;
 
     // SAFETY: cnode was just carved and nothing else refers to it.
     let space = unsafe { cnode.as_cnode_mut() };
@@ -193,7 +194,7 @@ unsafe fn build(
     // BootInfo) and is reached through the identity map; nothing else holds it.
     let page = unsafe { &mut *core::ptr::with_exposed_provenance_mut::<BootInfo>(boot_info.phys_addr() as usize) };
     // SAFETY: the first `count` entries of UNTYPED are initialized.
-    unsafe { describe(page, &plan, info, root.args, count, ignored) };
+    unsafe { describe(page, &plan, info, root.args, count, ignored, &module_vaddrs) };
 
     // SAFETY: tcb was just carved and nothing else refers to it.
     let thread = unsafe { tcb.as_tcb_mut() };
@@ -258,6 +259,42 @@ fn map(memory: &mut UntypedRegion, vspace: ObjectId, frame: ObjectId, vaddr: u64
     Err(RootError::Map(MapError::MissingTable))
 }
 
+/// Copies every boot module but the root task's own image into fresh frames,
+/// mapped read-only one after another in the root task's module window, so it
+/// can read them (to start one as a process). Returns where each module
+/// landed, by its index among the modules; zero for one that was left out.
+fn map_modules(
+    memory: &mut UntypedRegion,
+    vspace: ObjectId,
+    info: BootInformation<'static>,
+    root_image: &[u8],
+) -> Result<[u64; MAX_BOOT_MODULES], RootError> {
+    let mut vaddrs = [0; MAX_BOOT_MODULES];
+    let mut next = layout::ROOT_MODULES;
+    for (index, module) in info.modules().take(MAX_BOOT_MODULES).enumerate() {
+        // SAFETY: as in find_root: grub's module, its range kept out of use.
+        let Some(bytes) = (unsafe { multiboot2::module_bytes(&module) }) else {
+            continue;
+        };
+        let size = (bytes.len() as u64).next_multiple_of(PAGE_SIZE);
+        if core::ptr::eq(bytes.as_ptr(), root_image.as_ptr()) || size == 0 || next + size > layout::ROOT_MODULES_END {
+            continue;
+        }
+        for (page, chunk) in (0..).zip(bytes.chunks(PAGE_SIZE as usize)) {
+            let frame = memory.retype_frame().ok_or(RootError::NoRoom)?;
+            let dst = core::ptr::with_exposed_provenance_mut::<u8>(frame.phys_addr() as usize);
+            // SAFETY: the frame was just carved, zeroed, and is reached through
+            // the identity map with nothing else on it; a chunk fits a page.
+            unsafe { core::ptr::copy_nonoverlapping(chunk.as_ptr(), dst, chunk.len()) };
+            map(memory, vspace, frame, next + page * PAGE_SIZE, 0)?;
+        }
+        vaddrs[index] = next;
+        // a page left unmapped between modules.
+        next += size + PAGE_SIZE;
+    }
+    Ok(vaddrs)
+}
+
 /// Loads `image` into `vspace`: one fresh frame per page of every segment,
 /// filled through the identity map and mapped with the segment's own access,
 /// then the relocations applied in place.
@@ -319,6 +356,7 @@ unsafe fn describe(
     args: &[u8],
     count: usize,
     ignored: u64,
+    module_vaddrs: &[u64; MAX_BOOT_MODULES],
 ) {
     page.magic = BOOT_INFO_MAGIC;
     page.version = BOOT_INFO_VERSION;
@@ -346,6 +384,7 @@ unsafe fn describe(
     for module in info.modules().take(MAX_BOOT_MODULES) {
         let desc = &mut page.modules[modules];
         desc.phys = u64::from(module.start);
+        desc.vaddr = module_vaddrs[modules];
         desc.size = u64::from(module.end.saturating_sub(module.start));
         let len = module.cmdline.len().min(MODULE_CMDLINE_LEN);
         desc.cmdline[..len].copy_from_slice(&module.cmdline[..len]);

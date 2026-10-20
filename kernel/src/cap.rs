@@ -954,7 +954,7 @@ const _: () = assert!(core::mem::offset_of!(TcbObject, stack) == TCB_STACK_OFFSE
 
 /// `size_bits` of the kernel's `CNode` object: log2 of [`CNODE_SIZE`] (4096),
 /// the [`ObjectType::CNode`] argument used when carving one from untyped.
-pub const KERNEL_CNODE_SIZE_BITS: u8 = 12;
+pub const KERNEL_CNODE_SIZE_BITS: u8 = jos_core::abi::CNODE_SIZE_BITS;
 
 /// A kernel CNode: a [`KernelCapSpace`] padded and aligned to match
 /// [`ObjectType::CNode`] (`size_bits = 12`, i.e. [`CNODE_SIZE`] bytes), so it

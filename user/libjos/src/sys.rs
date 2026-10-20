@@ -284,7 +284,8 @@ pub fn tcb_start(tcb: Slot, entry: u64, stack_top: u64) -> Result<(), IpcSyscall
 /// # Errors
 ///
 /// Why a capability was refused, or why the destination slot cannot take it.
-pub fn cnode_copy(dest_cnode: Slot, src: Slot, dest_slot: u16, rights: Rights) -> Result<(), IpcSyscallError> {
+pub fn cnode_copy(dest_cnode: Slot, src: Slot, dest_slot: Slot, rights: Rights) -> Result<(), IpcSyscallError> {
+    let dest_slot = u16::try_from(dest_slot).map_err(|_| IpcSyscallError::SlotOutOfRange)?;
     status_call(Syscall::CNodeCopy, dest_cnode, src, pack_cnode_copy(dest_slot, rights.bits()))
 }
 

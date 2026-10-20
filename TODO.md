@@ -56,8 +56,13 @@ Check items off in the same commit that finishes them.
       `root list`
 - [ ] nested KTAP, once the root task's suite runs inside a larger plan (a
       process per suite, or the spec fuzzer)
-- [ ] userspace process spawning: boot modules mapped read-only into the root
-      task and loaded with the same `jos_core::elf` planner
+- [x] userspace process spawning: boot modules mapped read-only into the root
+      task, `libjos::process` builds a process (own VSpace, CNode, thread)
+      with the same `jos_core::elf` planner; `user/hello` and four checks; the
+      shell's `run`
+- [ ] capacity for many processes: a bigger root CNode (64 slots; a process
+      costs about 21) needs `CapSpace::revoke` and `revoke_and_wake` without
+      slot-sized stack arrays, and CSpace registry slots (32) reused
 - [x] `jig`, the host harness (`tools/jig`): every kernel test and the root
       task report KTAP; parallel QEMU runs, JUnit, log tails and reproduce
       commands, `--repeat`, and a 36-machine boot matrix (cpu, memory, smp,

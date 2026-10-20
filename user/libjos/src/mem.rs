@@ -139,12 +139,27 @@ pub fn release(slot: Slot) -> Result<(), Error> {
 ///
 /// Why a retype or a mapping was refused.
 pub fn map(frame: Slot, vaddr: u64, flags: u64) -> Result<(), Error> {
+    map_in(root_slot::VSPACE, frame, vaddr, flags, |_| {})
+}
+
+/// Like [`map`], in the address space in `vspace`, which may be another
+/// program's; `made` gets the slot of every page table it retypes for the
+/// path, so whoever builds that address space can revoke them later.
+///
+/// # Errors
+///
+/// Why a retype or a mapping was refused.
+pub fn map_in(vspace: Slot, frame: Slot, vaddr: u64, flags: u64, mut made: impl FnMut(Slot)) -> Result<(), Error> {
     // at most one table per level is missing: a PDPT, a PD, and a PT.
     for _ in 0..4 {
-        match sys::map_frame(root_slot::VSPACE, frame, vaddr, flags) {
+        match sys::map_frame(vspace, frame, vaddr, flags) {
             Err(IpcSyscallError::MissingTable) => {
                 let table = retype(ObjectType::PageTable)?;
-                sys::map_page_table(root_slot::VSPACE, table, vaddr)?;
+                if let Err(e) = sys::map_page_table(vspace, table, vaddr) {
+                    let _ = release(table);
+                    return Err(Error::Ipc(e));
+                }
+                made(table);
             }
             done => return done.map_err(Error::Ipc),
         }

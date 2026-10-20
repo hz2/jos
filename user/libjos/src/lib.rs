@@ -8,9 +8,11 @@
 //! - [`sys`] wraps every call in a typed function over the shared ABI in
 //!   `jos_core::abi`, so the kernel and userspace read one definition;
 //! - [`console`] prints through a Console capability ([`print!`], [`println!`]);
-//! - [`rt`] provides the entry point ([`root_entry!`]) and the panic handler;
+//! - [`rt`] provides the entry points ([`root_entry!`], [`process_entry!`]) and
+//!   the panic handler;
 //! - [`mem`] allocates slots, retypes objects, and maps pages;
 //! - [`thread`] starts more threads in the same spaces;
+//! - [`process`] starts a program from its ELF image as a process of its own;
 //! - [`ktap`] prints test results in KTAP, the format the host harness reads.
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -20,6 +22,7 @@
 pub mod console;
 pub mod ktap;
 pub mod mem;
+pub mod process;
 pub mod rt;
 pub mod sys;
 pub mod syscall;

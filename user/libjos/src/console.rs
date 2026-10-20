@@ -26,6 +26,12 @@ pub fn init(console: Slot) {
     CONSOLE.store(console + 1, Ordering::Relaxed);
 }
 
+/// Returns the slot of the console capability output goes to, if there is one.
+#[must_use]
+pub fn slot() -> Option<Slot> {
+    CONSOLE.load(Ordering::Relaxed).checked_sub(1)
+}
+
 /// Returns the virtual address of the calling thread's IPC buffer: the fixed
 /// offset in the thread block its stack lives in.
 #[must_use]

@@ -165,7 +165,8 @@ fn executable(line: &str) -> Option<Image> {
 }
 
 /// Builds the kernel binary and the user workspace, and returns the image
-/// that boots the root task with `args` after its name.
+/// that boots the root task with `args` after its name, and the programs it
+/// starts as processes as modules beside it.
 ///
 /// # Errors
 ///
@@ -184,11 +185,11 @@ pub fn root_image(repo: &Path, target: &Path, args: &str) -> Result<Image, Strin
             return Err(String::from_utf8_lossy(&output.stderr).into_owned());
         }
     }
-    let root = user_target.join("x86_64-unknown-none/debug/root");
+    let bin = user_target.join("x86_64-unknown-none/debug");
     Ok(Image {
         name: "boot".into(),
         kernel: target.join("x86_64-jos/debug/jos"),
-        modules: Some(format!("{} root {args}", root.display())),
+        modules: Some(format!("{} root {args};{} hello", bin.join("root").display(), bin.join("hello").display())),
         reproduce: format!("JOS_ROOT_ARGS='{args}' scripts/check.sh boot"),
     })
 }

@@ -590,6 +590,15 @@ pub mod layout {
     pub const THREAD_BLOCKS_START: u64 = USER_START + 0x4000_0000;
     /// One past the last thread block address.
     pub const THREAD_BLOCKS_END: u64 = USER_START + 0x8000_0000;
+    /// Where the root task finds read-only copies of the other boot modules,
+    /// one after another: the third GiB of user space.
+    pub const ROOT_MODULES: u64 = USER_START + 0x8000_0000;
+    /// One past the last address of the module window.
+    pub const ROOT_MODULES_END: u64 = USER_START + 0xC000_0000;
+    /// A page userspace maps a frame at briefly, to fill it before mapping it
+    /// somewhere else, such as into a process it is building: the first page
+    /// of the fourth GiB.
+    pub const SCRATCH: u64 = USER_START + 0xC000_0000;
 
     // everything in the window fits in it, and the image ends where it begins.
     const _: () = assert!(ROOT_BOOT_INFO + 0x1000 <= ROOT_WINDOW + 0x20_0000);
@@ -624,11 +633,52 @@ pub mod root_slot {
     pub const FIRST_UNTYPED: u64 = 8;
 }
 
+/// The capability slots a process the root task starts finds filled in its
+/// `CNode`, the only capabilities it holds. Like the root task, it runs at
+/// [`layout::ROOT_IMAGE_BASE`] with its stack and IPC buffer in the window
+/// at [`layout::ROOT_WINDOW`], in an address space of its own.
+pub mod process_slot {
+    /// The console, with `WRITE` only: it can print and nothing else.
+    pub const CONSOLE: u64 = 1;
+    /// An endpoint to its parent, with `WRITE` only: where it reports, and
+    /// where its runtime sends its exit code.
+    pub const PARENT: u64 = 2;
+    /// The endpoint its faults go to (its fault handler).
+    pub const FAULTS: u64 = 3;
+}
+
+/// What a process finds at its initial stack pointer: what to tell its
+/// runtime and its `main`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessStart {
+    /// [`PROCESS_START_MAGIC`].
+    pub magic: u64,
+    /// The argument its parent gave it.
+    pub arg: u64,
+}
+
+/// `b"jos proc"` read as a little-endian word: the first field of
+/// [`ProcessStart`].
+pub const PROCESS_START_MAGIC: u64 = u64::from_le_bytes(*b"jos proc");
+
+/// Where a process's [`ProcessStart`] sits, and its initial stack pointer:
+/// at the top of its stack, 16-byte aligned.
+pub const PROCESS_START: u64 = layout::ROOT_STACK_TOP - 16;
+
+const _: () = assert!(core::mem::size_of::<ProcessStart>() == 16);
+const _: () = assert!(PROCESS_START.is_multiple_of(16));
+
+/// The `size_bits` of a `CNode` object, as [`Syscall::Retype`] takes it for
+/// [`ObjectType::CNode`](crate::untyped::ObjectType::CNode): the kernel makes
+/// capability spaces of one size.
+pub const CNODE_SIZE_BITS: u8 = 12;
+
 /// `b"jos boot"` read as a little-endian word: the first field of [`BootInfo`].
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"jos boot");
 
 /// The [`BootInfo`] layout version; any incompatible change bumps it.
-pub const BOOT_INFO_VERSION: u64 = 1;
+pub const BOOT_INFO_VERSION: u64 = 2;
 
 /// How many untyped regions [`BootInfo`] can describe.
 pub const MAX_BOOT_UNTYPED: usize = 16;
@@ -673,6 +723,10 @@ pub struct UntypedDesc {
 pub struct ModuleDesc {
     /// Physical address of its first byte.
     pub phys: u64,
+    /// Where the root task can read it: a read-only copy in
+    /// [`layout::ROOT_MODULES`], or zero for the root task's own image and any
+    /// module that did not fit.
+    pub vaddr: u64,
     /// Its size in bytes.
     pub size: u64,
     /// Its command line (name first), NUL padded and possibly cut short.
@@ -746,6 +800,12 @@ impl BootInfo {
     pub fn cmdline(&self) -> &[u8] {
         until_nul(&self.cmdline)
     }
+
+    /// The module named `name`, if the boot loader loaded one.
+    #[must_use]
+    pub fn module(&self, name: &[u8]) -> Option<&ModuleDesc> {
+        self.modules().iter().find(|m| m.name() == name)
+    }
 }
 
 impl ModuleDesc {
@@ -753,6 +813,18 @@ impl ModuleDesc {
     #[must_use]
     pub fn cmdline(&self) -> &[u8] {
         until_nul(&self.cmdline)
+    }
+
+    /// The module's name: the first word of its command line, past a leading
+    /// path word (one starting with `/`) when more words follow it.
+    #[must_use]
+    pub fn name(&self) -> &[u8] {
+        let mut words = self.cmdline().split(|&b| b == b' ').filter(|w| !w.is_empty());
+        let first = words.next().unwrap_or_default();
+        match words.next() {
+            Some(second) if first.first() == Some(&b'/') => second,
+            _ => first,
+        }
     }
 }
 
@@ -888,7 +960,7 @@ mod tests {
             untyped_count: 99,
             untyped: [UntypedDesc::default(); MAX_BOOT_UNTYPED],
             module_count: 1,
-            modules: [ModuleDesc { phys: 0, size: 0, cmdline: [0; MODULE_CMDLINE_LEN] }; MAX_BOOT_MODULES],
+            modules: [ModuleDesc { phys: 0, vaddr: 0, size: 0, cmdline: [0; MODULE_CMDLINE_LEN] }; MAX_BOOT_MODULES],
             cmdline: [0; BOOT_CMDLINE_LEN],
         };
         // a corrupt count never reads past the array.
@@ -898,6 +970,13 @@ mod tests {
         assert_eq!(info.cmdline(), b"test ipc");
         info.modules[0].cmdline = [b'x'; MODULE_CMDLINE_LEN];
         assert_eq!(info.modules[0].cmdline().len(), MODULE_CMDLINE_LEN);
+        // a module is found by its name, past a leading path word.
+        info.modules[0].cmdline = [0; MODULE_CMDLINE_LEN];
+        info.modules[0].cmdline[..17].copy_from_slice(b"/boot/hello hello");
+        assert_eq!(info.modules[0].name(), b"hello");
+        assert!(info.module(b"hello").is_some() && info.module(b"root").is_none());
+        info.modules[0].cmdline[..17].copy_from_slice(b"hello x  y\0\0\0\0\0\0\0");
+        assert_eq!(info.modules[0].name(), b"hello");
     }
 
     #[test]

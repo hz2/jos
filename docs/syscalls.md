@@ -294,3 +294,30 @@ map was left out. The fixed addresses are in `abi::layout`:
 | `0x80_3FE0_1000` to `0x80_3FE1_1000` | the 64 KiB stack |
 | `0x80_3FE1_2000` | the IPC buffer |
 | `0x80_3FE1_3000` | the `BootInfo` page |
+| `0x80_8000_0000` | read-only copies of the other boot modules, one after another (`BootInfo.modules[i].vaddr`) |
+
+The kernel copies every boot module but the root task's own image into fresh
+frames, mapped read-only in that window, so the root task can read a program
+and start it as a process. It hands out no capabilities to those frames.
+
+## A process's starting state
+
+The kernel loads only the root task. Any other program is started by a
+program already running, out of its own untyped memory, with `libjos::process`
+(`Process::spawn`): it builds an address space with the program's image, a
+stack, and an IPC buffer in the root task's layout, a CNode, and a thread, all
+through the syscalls above. The process starts at its ELF entry point with
+`rsp` at `abi::PROCESS_START` (the top of its stack), where an
+`abi::ProcessStart` record holds a magic word and the argument its parent gave
+it. Its CNode holds three capabilities (`abi::process_slot`), and nothing
+else:
+
+| slot | capability |
+|---|---|
+| 1 | the console, with `WRITE` only |
+| 2 | an endpoint to its parent, with `WRITE` only |
+| 3 | the endpoint its faults go to |
+
+The `libjos` runtime for processes (`process_entry!`) sends the value `main`
+returns to the parent endpoint as the exit code, then exits the thread. A
+panic in a process faults (`ud2`), so its parent hears of that too.

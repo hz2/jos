@@ -19,7 +19,7 @@ use x86_64::registers::control::Cr3;
 use crate::cap::{ObjectId, ObjectKind, PageTable};
 
 /// How many mappings the kernel records at once.
-pub const MAX_MAPPINGS: usize = 128;
+pub const MAX_MAPPINGS: usize = 512;
 
 pub use jos_core::abi::map_flags;
 

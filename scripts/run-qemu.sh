@@ -30,9 +30,9 @@ trap cleanup EXIT
 # loads each with module2, and the kernel finds a module by the first word of
 # its args (the root task is the one named "root"). left unset for the main
 # kernel binary, it means: build user/ and boot the root task, with
-# JOS_ROOT_ARGS after its name: by default "shell" when a person is at the
-# terminal (cargo run), "hello" otherwise. set it empty to boot without
-# modules.
+# JOS_ROOT_ARGS after its name (by default "shell" when a person is at the
+# terminal, as with cargo run, and "hello" otherwise), plus the programs it
+# can start as processes. set it empty to boot without modules.
 MODULES="${JOS_MODULES-}"
 if [ -z "${JOS_MODULES+set}" ] && [ "$(basename "$KERNEL")" = jos ]; then
     # a separate target dir: the cargo that invoked this runner may still hold
@@ -40,13 +40,17 @@ if [ -z "${JOS_MODULES+set}" ] && [ "$(basename "$KERNEL")" = jos ]; then
     USER_TARGET="$(cd "$(dirname "$KERNEL")/../.." && pwd)/user"
     (cd "$REPO/user" && CARGO_TARGET_DIR="$USER_TARGET" cargo build -q)
     if [ -t 0 ]; then DEFAULT_ARGS=shell; else DEFAULT_ARGS=hello; fi
-    MODULES="$USER_TARGET/x86_64-unknown-none/debug/root root ${JOS_ROOT_ARGS:-$DEFAULT_ARGS}"
+    BIN="$USER_TARGET/x86_64-unknown-none/debug"
+    MODULES="$BIN/root root ${JOS_ROOT_ARGS:-$DEFAULT_ARGS};$BIN/hello hello"
 fi
 
 # a session at a terminal lasts as long as the person wants it to.
 if [ -t 0 ] && [ -z "${JOS_QEMU_TIMEOUT+set}" ]; then
     JOS_QEMU_TIMEOUT=0
 fi
+
+# the toolchain's llvm-strip, for the modules (see below).
+STRIP="$(rustc --print sysroot 2>/dev/null)/lib/rustlib/$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')/bin/llvm-strip"
 
 # assemble the grub iso tree: /boot/kernel.elf, the modules, /boot/grub/grub.cfg
 mkdir -p "$BUILD_DIR/boot/grub"
@@ -63,7 +67,14 @@ MODULE_FILES=()
         path="${entry%% *}"
         args="${entry#"$path"}"
         name="$(basename "$path")"
-        cp "$path" "$BUILD_DIR/boot/$name"
+        # without debug info, most of a debug build: the guest never reads it, the
+        # built file keeps it for the host, and the kernel copies modules for
+        # the root task, so a smaller one boots quicker.
+        if [ -x "$STRIP" ]; then
+            "$STRIP" --strip-debug -o "$BUILD_DIR/boot/$name" "$path"
+        else
+            cp "$path" "$BUILD_DIR/boot/$name"
+        fi
         MODULE_FILES+=("$path")
         echo "    module2 /boot/$name$args"
     done

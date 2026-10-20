@@ -86,7 +86,8 @@ speak IPC.
       thread with a deadline
 - [x] console input (IRQ4, `console_read`) and an interactive shell in the
       root task, scripted end to end by `jig expect`
-- [ ] process spawning from userspace
+- [x] process spawning from userspace: the root task starts boot modules as
+      isolated processes
 - [x] `jig`, the host-side harness: parallel QEMU boots read as KTAP, JUnit,
       reproduce commands, a machine matrix
 - [ ] differential testing against an executable spec

@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "hello"
+version = "0.1.0"
+dependencies = [
+ "libjos",
+]
+
+[[package]]
 name = "jos-core"
 version = "0.1.0"
 

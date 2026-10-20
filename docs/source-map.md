@@ -78,6 +78,8 @@ half, look at the other.
 | slots, retype and map helpers, threads | `user/libjos/src/mem.rs`, `user/libjos/src/thread.rs` |
 | console output, entry point, panic handler, KTAP | `user/libjos/src/console.rs`, `rt.rs`, `ktap.rs` |
 | the root task: checks, the isolating runner, the shell | `user/root/src/main.rs` |
+| starting a process: the spawner, the process runtime, a test program | `user/libjos/src/process.rs`, `rt.rs` (`process_entry!`), `user/hello/src/main.rs` |
+| boot modules for the root task to read | `kernel/src/rootserver.rs` (`map_modules`) |
 | target and build-std config | `user/.cargo/config.toml` |
 
 ## Verification and testing

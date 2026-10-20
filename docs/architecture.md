@@ -250,6 +250,7 @@ grub: multiboot2 kernel.elf, module2 root.elf "root <args>"
     carve from the largest: CNode, VSpace, TCB, IPC buffer, BootInfo,
                             stack, image frames, page tables
     load the ELF image (jos_core::elf), map W^X through mapping::map_*
+    copy the other boot modules into frames, read-only in its module window
     install the initial capabilities, fill BootInfo
     register the TCB, switch_to, iretq with every register from its context
 ```
@@ -263,12 +264,36 @@ IPC buffer and BootInfo frames, the console, the machine, and every untyped
 region) and a read-only `BootInfo` page describing them. Without a `root`
 module the kernel falls back to its in-kernel console.
 
+## Processes
+
+The root task is the only program the kernel loads. Every other one is started
+from userspace, the seL4 and Fuchsia model: the root task finds the program
+in its module window and calls `libjos::process::Process::spawn`, which plans
+the load with the same `jos_core::elf` planner the kernel uses and builds the
+process out of the root task's own untyped memory, through ordinary syscalls:
+a fresh VSpace (which shares only the kernel half and the identity entry), its
+page tables, frames for the image, a stack, and an IPC buffer, each filled
+through a scratch mapping in the spawner before it is mapped into the process
+with its final access; a CNode holding the three capabilities a process gets
+(`abi::process_slot`); and a TCB configured with both and started. The
+process finds its argument in an `abi::ProcessStart` record at its initial
+stack pointer, and its exit code and its faults both reach its parent as
+messages. The spawner keeps a capability to every object it made, so reaping
+the process revokes them all.
+
+A process's authority is exactly what it was handed: the root task's checks
+start `user/hello` and find it cannot read a page its parent mapped (the read
+faults, and the fault reaches the parent) and cannot halt the machine (the
+slot is empty in its CNode). Sharing the user half of the page tables between
+address spaces, or leaking the machine capability to the child, fails them.
+
 `user/libjos` is the runtime every userspace program links: the `syscall`
 stubs (declaring every register the kernel clobbers), one typed wrapper per
 call over `jos_core::abi`, console output through the Console capability, the
 entry point, and KTAP helpers. The root task's `hello` and `test` modes run
 first-light checks from ring 3 and halt the machine with the result through
-its Machine capability, which is what `scripts/check.sh boot` runs.
+its Machine capability, which is what `scripts/check.sh boot` runs; its
+`shell` mode is the interactive way in.
 
 ## Per-CPU State and Context Switch
 

@@ -29,6 +29,19 @@
 < all passed
 > bench 200
 < 200 call/reply round trips
+# processes: the boot modules, and hello started from the shell, exiting,
+# refused the machine, and faulting on an address it has nothing mapped at.
+> modules
+< hello (
+> run hello
+< hello from a process of its own
+< hello exited with 0
+> run hello 1
+< hello exited with 1
+> run hello 550561120256
+< hello faulted: PageFault
+> run nosuch
+< run: no such boot module
 > nosuchcommand
 < unknown command nosuchcommand; try help
 > halt 0

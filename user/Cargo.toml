@@ -4,7 +4,7 @@
 # it is a workspace of its own so host builds at the repo root never see it.
 [workspace]
 resolver = "2"
-members = ["libjos", "root"]
+members = ["hello", "libjos", "root"]
 
 [workspace.package]
 edition = "2024"

@@ -9,6 +9,7 @@ defined once for the kernel and for userspace.
 |---|---|
 | `user/libjos` | the runtime every program links |
 | `user/root` | the root task: the first program, loaded by the kernel |
+| `user/hello` | a small program the root task starts as a process, to check what a process can and cannot do |
 
 ## libjos
 
@@ -19,7 +20,8 @@ defined once for the kernel and for userspace.
 | `console` | `print!` / `println!` through a Console capability: the bytes go into the calling thread's IPC-buffer data area and only their length crosses the boundary; `read` (with a deadline) and `read_line`, which echoes as it edits with `jos_core::line::LineEditor` (backspace, Ctrl-U, Ctrl-C, escape sequences swallowed) |
 | `mem` | a slot allocator over the empty slots the kernel reported, retyping from the first untyped region with room, mapping that installs missing page tables, and `mint` that claims the slot the kernel chose |
 | `thread` | `Thread::spawn` / `spawn_with` (optionally with a fault handler): a TCB, stack, and IPC buffer retyped and mapped into a fresh thread block; the thread exits when its function returns, and `reap` revokes all of it |
-| `rt` | `root_entry!` (the naked `_start` and runtime setup), `halt`, and the panic handler (prints one KTAP diagnostic, then a spawned thread faults with `ud2` for its fault handler to hear of, and the root task's first thread halts the machine) |
+| `process` | `Process::spawn`: starts an ELF image as a process of its own (a fresh VSpace, CNode, and thread built from this program's untyped memory, the image loaded with `jos_core::elf`), and `reap` revokes it all |
+| `rt` | `root_entry!` and `process_entry!` (the naked `_start` and runtime setup; a process's `main` returns its exit code, sent to its parent), `halt`, and the panic handler (prints one KTAP diagnostic, then a spawned thread faults with `ud2` for its fault handler to hear of, and the root task's first thread halts the machine) |
 | `ktap` | the KTAP lines the host harness parses: header, `# run name`, `ok N name` / `not ok N name` |
 
 ## Thread blocks
@@ -55,15 +57,19 @@ state"). Its command line picks a mode:
   names;
 - `shell` reads commands from the console: `help`, `info`, `mem`, `list`,
   `test [filter]` (the checks, run as below), `bench [rounds]` (timed call and
-  reply round trips to an echo thread), `echo`, and `halt [code]`. `cargo run`
+  reply round trips to an echo thread), `modules`, `run name [arg]` (start a
+  boot module as a process and report how it ended), `echo`, and
+  `halt [code]`. `cargo run`
   at a terminal starts here, and `jig expect` scripts drive it in `check.sh
   shell`.
 
 The checks cover the boot information, IPC, badges, revocation, mapping and
 W^X, attenuated console and machine capabilities, threads and thread-id reuse,
 stale replies, both directions of the parked-thread handoff, endpoint order,
-fault delivery including userspace demand paging, timed receives, and revoking
-an endpoint with threads blocked on it.
+fault delivery including userspace demand paging, timed receives, revoking an
+endpoint with threads blocked on it, and processes (`user/hello` started from
+its boot module, exiting, isolated from its parent's memory, and holding only
+what it was given).
 
 ### How a check runs
 

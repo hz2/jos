@@ -1,7 +1,7 @@
 # Syscall Reference
 
 Every jos syscall, its arguments, what it returns, and how it fails. The
-authoritative source is the `Syscall` enum in `kernel/src/syscall.rs`; this page
+authoritative source is the `Syscall` enum in `kernel/src/syscall/mod.rs`; this page
 is the map. Capabilities are named by slot number in the calling thread's
 capability space, and every call checks the rights the capability carries.
 

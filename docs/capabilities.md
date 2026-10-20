@@ -212,7 +212,7 @@ ride along with a send or call; see `jos_core::ipc_buffer`), and
 created with `tcb_configure`, `tcb_set_ipc_buffer`, and `tcb_start`. A
 syscall returns its result in `rax` and a secondary result (the sender badge on
 a receive) in `rdx`; errors on calls that return data carry `IPC_ERR_FLAG` (bit
-63). The authoritative list is `Syscall` in `kernel/src/syscall.rs`.
+63). The authoritative list is `Syscall` in `kernel/src/syscall/mod.rs`.
 
 ## Divergences from seL4
 

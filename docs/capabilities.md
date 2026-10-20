@@ -199,6 +199,7 @@ syscalls, the next call sees an empty slot and returns an error rather than
 reaching a stale object. There is no cached `CapRef` in user space that could
 outlive the capability it names.
 
+The full reference, with arguments and error codes, is `syscalls.md`.
 The current syscalls are `add` and `exit` (test probes), `ipc_send` /
 `ipc_recv` and their blocking variants, `retype`, `invoke`, `mint`, and the
 `call` / `recv_reply` / `reply` trio for request-response IPC (plus

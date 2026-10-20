@@ -146,6 +146,7 @@ fails instead of hanging.
 | [`docs/roadmap.md`](docs/roadmap.md) | status by phase, milestones, adopted ideas, open decisions |
 | [`docs/verification.md`](docs/verification.md) | what is proved and what is next |
 | [`docs/capabilities.md`](docs/capabilities.md) | the capability core: rights, badges, revocation |
+| [`docs/syscalls.md`](docs/syscalls.md) | every syscall: arguments, results, rights, error codes, IPC buffer layout |
 | [`docs/dst.md`](docs/dst.md) | deterministic simulation testing and tracing |
 | [`docs/building-and-running.md`](docs/building-and-running.md) | toolchain, target, boot, the qemu runner |
 | [`docs/testing.md`](docs/testing.md) | test layers and which gate runs each |

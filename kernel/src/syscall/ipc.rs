@@ -20,6 +20,9 @@ fn ipc_errno(e: IpcError) -> u64 {
 /// generation-checked CapRef) is what makes a revoked capability fail here
 /// rather than the borrow being held across the block.
 pub(super) fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
+    if word & IPC_ERR_FLAG != 0 {
+        return IpcSyscallError::BadWord as u64;
+    }
     let Some(space) = current_cspace() else {
         return IpcSyscallError::BadCap as u64;
     };
@@ -185,6 +188,9 @@ fn save_blocking_context(wake_rax: u64) {
 /// present, park this thread in the BLOCKED_SENDS table and signal the syscall
 /// stub to yield via need_yield.
 pub(super) fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
+    if word & IPC_ERR_FLAG != 0 {
+        return IpcSyscallError::BadWord as u64;
+    }
     let Some(space) = current_cspace() else {
         return IpcSyscallError::BadCap as u64;
     };
@@ -759,6 +765,9 @@ fn park_current() {
 /// parks as a call-flagged sender for the next receive to find.
 pub(super) fn sys_call(cap_slot: u64, word: u64) -> u64 {
     let err = |e: IpcSyscallError| e as u64 | IPC_ERR_FLAG;
+    if word & IPC_ERR_FLAG != 0 {
+        return err(IpcSyscallError::BadWord);
+    }
     let (endpoint_addr, badge) = match resolve_endpoint_slot(cap_slot, Rights::WRITE) {
         Ok(found) => found,
         Err(e) => return err(e),
@@ -824,6 +833,9 @@ fn idle_reply(reply_slot: u64) -> Result<ObjectId, IpcSyscallError> {
 /// Implements [`Syscall::ReplyRecv`]: answers the bound caller, if any, then
 /// receives the next message through [`sys_recv_reply`].
 pub(super) fn sys_reply_recv(ep_slot: u64, reply_slot: u64, word: u64) -> SyscallRet {
+    if word & IPC_ERR_FLAG != 0 {
+        return SyscallRet::from(IpcSyscallError::BadWord as u64 | IPC_ERR_FLAG);
+    }
     let reply = match resolve_reply_slot(reply_slot) {
         Ok(obj) => obj,
         Err(e) => return SyscallRet::from(e as u64 | IPC_ERR_FLAG),
@@ -882,6 +894,9 @@ pub fn forget_ipc_buffer(frame: u64) {
 /// Implements [`Syscall::Reply`]: answers the caller bound to the reply object,
 /// exactly once.
 pub(super) fn sys_reply(reply_slot: u64, word: u64) -> u64 {
+    if word & IPC_ERR_FLAG != 0 {
+        return IpcSyscallError::BadWord as u64;
+    }
     let reply = match resolve_reply_slot(reply_slot) {
         Ok(obj) => obj,
         Err(e) => return e as u64,

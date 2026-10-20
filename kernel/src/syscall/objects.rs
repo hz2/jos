@@ -7,6 +7,9 @@ use super::*;
 /// optional badge. Returns the new slot index so userspace can hand it out.
 pub(super) fn sys_mint(src_slot: u64, rights: u64, badge: u64) -> u64 {
     let err = |e: MintSyscallError| e as u64 | IPC_ERR_FLAG;
+    if badge & IPC_ERR_FLAG != 0 {
+        return err(MintSyscallError::BadBadge);
+    }
     let Some(space) = current_cspace_mut() else {
         return err(MintSyscallError::BadCap);
     };
@@ -162,6 +165,7 @@ pub(super) fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
     };
     match cap.object.kind() {
         ObjectKind::Endpoint => match method {
+            ENDPOINT_SEND if arg0 & IPC_ERR_FLAG != 0 => err(InvokeError::BadWord),
             ENDPOINT_SEND => {
                 let message = Message::new(0, [arg0, 0, 0, 0]);
                 // a receiver parked in a blocking receive takes it directly.

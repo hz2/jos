@@ -109,7 +109,11 @@ needs `READ`, and revoking the last capability to a notification ends its
 waits with `BadCap`.
 
 Word 0 of a message must leave bit 63 clear: a receive returns it in `rax`,
-where that bit marks the result as an error code.
+where that bit marks the result as an error code. Every send refuses such a
+word (`ipc_send`, `ipc_send_blocking`, `call`, `reply`, `reply_recv`: `BadWord`;
+the endpoint `invoke` send: `InvokeError::BadWord`), and `mint` refuses such a
+badge (`BadBadge`), since a notification's badge comes back as `wait`'s
+result. The syscall fuzzer found the ambiguity.
 
 ### IPC buffer and capability transfer
 
@@ -247,6 +251,7 @@ served oldest first, each with what it asked for.
 | 32 | `TooLong` | a length exceeds the IPC buffer's data area |
 | 33 | `TimedOut` | a timed wait ran out of time before a message, input, or signal came |
 | 34 | `NotNotification` | the slot does not name a notification |
+| 35 | `BadWord` | word 0 of a message has bit 63 set, which its receiver would read as an error |
 
 ### Retype errors (`RetypeSyscallError`)
 
@@ -268,6 +273,7 @@ served oldest first, each with what it asked for.
 | 1 | `BadCap` | the source slot is out of range or empty |
 | 2 | `AlreadyBadged` | a badge was asked for on an already badged source |
 | 3 | `SpaceFull` | the caller's space has no free slot |
+| 4 | `BadBadge` | the badge has bit 63 set, which a notification's waiter would read as an error |
 
 ### Invoke errors (`InvokeError`, flagged)
 
@@ -277,6 +283,7 @@ served oldest first, each with what it asked for.
 | 2 | `Denied` | the capability lacks the right the method needs |
 | 3 | `BadMethod` | the method is not defined for this object kind |
 | 4 | `WouldBlock` | the endpoint is full (send) or empty (receive) |
+| 5 | `BadWord` | the word to send has bit 63 set |
 
 ## The root task's starting state
 

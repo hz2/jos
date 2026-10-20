@@ -332,11 +332,14 @@ pub enum IpcSyscallError {
     TimedOut = 33,
     /// The slot does not name a notification.
     NotNotification = 34,
+    /// Word 0 of a message has bit 63 set, which its receiver would read as
+    /// an error.
+    BadWord = 35,
 }
 
 impl IpcSyscallError {
     /// Every error, in code order; the codes are dense from 1.
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::BadCap,
         Self::Denied,
         Self::NotEndpoint,
@@ -371,6 +374,7 @@ impl IpcSyscallError {
         Self::TooLong,
         Self::TimedOut,
         Self::NotNotification,
+        Self::BadWord,
     ];
 
     /// Decodes an error code (without [`IPC_ERR_FLAG`]), or `None` if unknown.
@@ -434,11 +438,14 @@ pub enum MintSyscallError {
     AlreadyBadged = 2,
     /// The current `CSpace` has no free slot.
     SpaceFull = 3,
+    /// The badge has bit 63 set, which the waiter on a notification it
+    /// signals would read as an error.
+    BadBadge = 4,
 }
 
 impl MintSyscallError {
     /// Every error, in code order; the codes are dense from 1.
-    pub const ALL: [Self; 3] = [Self::BadCap, Self::AlreadyBadged, Self::SpaceFull];
+    pub const ALL: [Self; 4] = [Self::BadCap, Self::AlreadyBadged, Self::SpaceFull, Self::BadBadge];
 
     /// Decodes an error code (without [`IPC_ERR_FLAG`]), or `None` if unknown.
     #[must_use]
@@ -460,11 +467,14 @@ pub enum InvokeError {
     BadMethod = 3,
     /// A would-block condition (endpoint full on send / empty on recv).
     WouldBlock = 4,
+    /// The word to send has bit 63 set, which its receiver would read as an
+    /// error.
+    BadWord = 5,
 }
 
 impl InvokeError {
     /// Every error, in code order; the codes are dense from 1.
-    pub const ALL: [Self; 4] = [Self::BadCap, Self::Denied, Self::BadMethod, Self::WouldBlock];
+    pub const ALL: [Self; 5] = [Self::BadCap, Self::Denied, Self::BadMethod, Self::WouldBlock, Self::BadWord];
 
     /// Decodes an error code (without [`IPC_ERR_FLAG`]), or `None` if unknown.
     #[must_use]

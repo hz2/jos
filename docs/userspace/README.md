@@ -16,7 +16,7 @@ defined once for the kernel and for userspace.
 |---|---|
 | `syscall` | the raw `syscall` instruction, declaring every register the kernel clobbers (`rcx`, `r11`, and `rdi`, `rsi`, `r8` to `r10`, which it does not restore) |
 | `sys` | one typed function per syscall over `jos_core::abi`, returning that call's error enum; a code the ABI does not define panics, since it means the two sides disagree |
-| `console` | `print!` / `println!` through a Console capability: the bytes go into the calling thread's IPC-buffer data area and only their length crosses the boundary |
+| `console` | `print!` / `println!` through a Console capability: the bytes go into the calling thread's IPC-buffer data area and only their length crosses the boundary; `read` (with a deadline) and `read_line`, which echoes as it edits with `jos_core::line::LineEditor` (backspace, Ctrl-U, Ctrl-C, escape sequences swallowed) |
 | `mem` | a slot allocator over the empty slots the kernel reported, retyping from the first untyped region with room, mapping that installs missing page tables, and `mint` that claims the slot the kernel chose |
 | `thread` | `Thread::spawn` / `spawn_with` (optionally with a fault handler): a TCB, stack, and IPC buffer retyped and mapped into a fresh thread block; the thread exits when its function returns, and `reap` revokes all of it |
 | `rt` | `root_entry!` (the naked `_start` and runtime setup), `halt`, and the panic handler (prints one KTAP diagnostic, then a spawned thread faults with `ud2` for its fault handler to hear of, and the root task's first thread halts the machine) |
@@ -52,7 +52,12 @@ state"). Its command line picks a mode:
   in KTAP, and halt the machine with the result; `scripts/check.sh boot` and
   `matrix` run `test`, and `jig boot --args "test timed"` runs a subset;
 - `list` reports every check as a skipped KTAP test, so a harness can read the
-  names.
+  names;
+- `shell` reads commands from the console: `help`, `info`, `mem`, `list`,
+  `test [filter]` (the checks, run as below), `bench [rounds]` (timed call and
+  reply round trips to an echo thread), `echo`, and `halt [code]`. `cargo run`
+  at a terminal starts here, and `jig expect` scripts drive it in `check.sh
+  shell`.
 
 The checks cover the boot information, IPC, badges, revocation, mapping and
 W^X, attenuated console and machine capabilities, threads and thread-id reuse,

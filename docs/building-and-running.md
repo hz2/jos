@@ -89,14 +89,19 @@ built-in `-kernel` loader (which is multiboot1-only and rejects an elf64 image):
 
 ```bash
 cd kernel && cargo build   # build the kernel elf
-cd kernel && cargo run     # build the kernel and user/, boot into the root task
+cd kernel && cargo run     # build the kernel and user/, boot into the root task's shell
 JOS_ROOT_ARGS=test cargo run   # the same, with the root task in test mode
+JOS_ROOT_ARGS="test timed" cargo run   # only the checks whose name contains "timed"
 ```
 
 `cargo run` boots the kernel with the root task as a boot module: the runner
 builds `user/` first, then the kernel loads `root` and hands it the machine
 (see `architecture.md`, "The Root Task"). With no `root` module the kernel
 falls back to its in-kernel console.
+
+At a terminal the root task starts its shell (`help` lists the commands; type
+`halt` to stop, or Ctrl-A X to leave QEMU), and there is no timeout. With the
+console redirected, it runs its checks and halts instead.
 
 `cargo run` and `cargo test` go through the runner wired in
 `kernel/.cargo/config.toml`:
@@ -130,10 +135,10 @@ The runner takes a few more knobs from the environment:
 | `JOS_QEMU_MEM` | guest memory (default `128M`) |
 | `JOS_QEMU_SMP` | guest cpu count (default `1`) |
 | `JOS_QEMU_MACHINE` | machine type (default `q35`; `pc` also boots) |
-| `JOS_QEMU_TIMEOUT` | seconds before a wedged guest fails (default `120`; `0` for none) |
+| `JOS_QEMU_TIMEOUT` | seconds before a wedged guest fails (default `120`, or none at a terminal; `0` for none) |
 | `JOS_QEMU_RR` | `record` or `replay`: deterministic record/replay into `JOS_QEMU_RR_FILE` (TCG only) |
 | `JOS_MODULES` | boot modules, `;`-separated `path [args]`; grub loads each with `module2`, and the kernel finds one by the first word of its args. Unset for the main kernel binary, it means the root task; set it empty for none |
-| `JOS_ROOT_ARGS` | the root task's arguments when `JOS_MODULES` is unset (default `hello`) |
+| `JOS_ROOT_ARGS` | the root task's arguments when `JOS_MODULES` is unset (default `shell` at a terminal, `hello` otherwise; also `test [filter]`, `list`) |
 | `JOS_KEEP_ISO` | keep the per-run ISO tree and image instead of deleting them |
 
 Each run builds its ISO in a fresh directory next to the kernel, so runs never

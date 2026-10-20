@@ -9,7 +9,8 @@
 //! Its command line picks a mode. `hello` (the default) and `test [filter]`
 //! run the first-light checks below, or those whose name contains `filter`,
 //! which exercise the capability model end to end from ring 3, report them in
-//! KTAP, and halt the machine with the result; `list` names them.
+//! KTAP, and halt the machine with the result; `list` names them; `shell`
+//! reads commands from the console (type `help`).
 //!
 //! Each check runs in a fresh thread whose faults go to the runner, under a
 //! deadline: a check that faults, panics (a spawned thread's panic is a
@@ -23,11 +24,12 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use libjos::abi::{BootInfo, FaultKind, IpcSyscallError, layout, map_flags, root_slot};
 use libjos::jos_core::cap_rights::Rights;
+use libjos::jos_core::line::LineEditor;
 use libjos::jos_core::untyped::ObjectType;
 use libjos::mem::{self, Error};
 use libjos::sys::{self, Slot};
 use libjos::thread::Thread;
-use libjos::{ktap, println, rt};
+use libjos::{console, ktap, println, rt};
 
 libjos::root_entry!(main);
 
@@ -100,6 +102,7 @@ fn main(boot: &'static BootInfo) -> ! {
             let failed = run_checks(filter);
             rt::halt(u64::from(failed != 0))
         }
+        b"shell" => shell(boot),
         b"list" => {
             // as KTAP with every check skipped, so a harness reads the list too.
             ktap::header(CHECKS.len());
@@ -109,10 +112,101 @@ fn main(boot: &'static BootInfo) -> ! {
             rt::halt(0)
         }
         _ => {
-            println!("# root: unknown mode; expected hello, test [filter], or list");
+            println!("# root: unknown mode; expected hello, test [filter], list, or shell");
             rt::halt(2)
         }
     }
+}
+
+/// What `help` prints.
+const HELP: &str = "\
+commands:
+  help             this list
+  info             what the kernel handed the root task
+  mem              untyped memory and free capability slots
+  list             the first-light checks
+  test [filter]    run the checks, or those whose name contains filter
+  bench [rounds]   time call and reply round trips to another thread
+  echo text        print text
+  halt [code]      stop the machine; code 0 reports success";
+
+/// Reads commands from the console and runs them, until `halt`.
+fn shell(boot: &BootInfo) -> ! {
+    println!("jos shell; type help for the commands");
+    let mut editor: LineEditor<128> = LineEditor::new();
+    loop {
+        libjos::print!("jos> ");
+        match console::read_line(&mut editor) {
+            Ok(true) => run_command(boot, editor.line()),
+            Ok(false) => {}
+            Err(e) => {
+                println!("shell: the console refused a read: {:?}", e);
+                rt::halt(1)
+            }
+        }
+    }
+}
+
+/// Runs one shell command line.
+fn run_command(boot: &BootInfo, line: &str) {
+    let line = line.trim();
+    let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let rest = rest.trim();
+    match command {
+        "" => {}
+        "help" => println!("{}", HELP),
+        "info" => describe(boot),
+        "mem" => {
+            for u in boot.untyped() {
+                println!("untyped slot {}: {} KiB at {:#x}", u.slot, u.size / 1024, u.phys);
+            }
+            println!("{} capability slots free", mem::free_slots());
+        }
+        "list" => {
+            for (name, _) in CHECKS {
+                println!("  {}", name);
+            }
+        }
+        "test" => {
+            let failed = run_checks(rest.as_bytes());
+            println!("{}", if failed == 0 { "all passed" } else { "some failed" });
+        }
+        "bench" => {
+            let rounds = rest.parse().unwrap_or(10_000);
+            match bench_ipc(rounds) {
+                Ok(cycles) => println!("{} call/reply round trips, {} cycles each", rounds, cycles),
+                Err(why) => println!("bench: {}", why),
+            }
+        }
+        "echo" => println!("{}", rest),
+        "halt" => rt::halt(rest.parse().unwrap_or(0)),
+        _ => println!("unknown command {}; try help", command),
+    }
+}
+
+/// Answers every call on the endpoint in field 0 with the word it carried,
+/// through the reply object in field 1, until a receive fails.
+extern "C" fn echo_server(arg: u64) {
+    let (ep, reply) = (field(arg, 0), field(arg, 1));
+    let Ok((mut word, _)) = sys::recv_reply(ep, reply) else { return };
+    while let Ok((next, _)) = sys::reply_recv(ep, reply, word) {
+        word = next;
+    }
+}
+
+/// Times `rounds` call and reply round trips to a thread that echoes them,
+/// and returns the time stamp cycles each took.
+fn bench_ipc(rounds: u64) -> Result<u64, &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
+    let reply = object(ObjectType::Reply)?;
+    let server = Thread::spawn(echo_server, pack(ep, reply, 0), 1).map_err(|_| "spawn")?;
+    let start = rdtsc();
+    let echoed = (0..rounds).all(|round| sys::call(ep, round) == Ok(round));
+    let cycles = rdtsc().wrapping_sub(start);
+    server.reap();
+    release(&[ep, reply])?;
+    ensure(echoed, "a round trip came back wrong")?;
+    Ok(cycles / rounds.max(1))
 }
 
 /// Returns the boot information `main` stored.

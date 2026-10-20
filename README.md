@@ -134,13 +134,15 @@ for how the build and boot work.
 
 ```bash
 nix develop                    # enter the shell (also enables the git hooks)
-cd kernel && cargo run         # build and boot the kernel and root task under qemu
+cd kernel && cargo run         # build and boot the kernel and root task under qemu, into its shell
 scripts/check.sh               # list the gates
 scripts/check.sh fast          # style, clippy -D warnings, host tests
 scripts/check.sh qemu [test]   # boot every kernel test, or one by name
-scripts/check.sh boot           # the real kernel and root task, in test mode
+scripts/check.sh boot          # the real kernel and root task, in test mode, on 4 machines
+scripts/check.sh matrix        # the same across 36 machines
+scripts/check.sh shell         # the shell, driven by the jig expect scripts
 scripts/check.sh kani [name]   # bounded proofs, or one harness
-scripts/check.sh ci            # everything ci runs: fast + miri + kani + qemu
+scripts/check.sh ci            # everything ci runs: fast, miri, kani, qemu, matrix, shell
 ```
 
 The git hooks and CI call the same script: `pre-commit` runs the style check on

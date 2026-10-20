@@ -79,6 +79,12 @@ pub fn alloc_slot() -> Result<Slot, Error> {
     }
 }
 
+/// Returns how many slots are free.
+#[must_use]
+pub fn free_slots() -> u32 {
+    FREE_SLOTS.load(Ordering::Relaxed).count_ones()
+}
+
 /// Returns `slot`, now empty, to the allocator.
 pub fn free_slot(slot: Slot) {
     if slot < 64 {

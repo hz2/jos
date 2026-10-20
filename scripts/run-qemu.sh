@@ -30,15 +30,22 @@ trap cleanup EXIT
 # loads each with module2, and the kernel finds a module by the first word of
 # its args (the root task is the one named "root"). left unset for the main
 # kernel binary, it means: build user/ and boot the root task, with
-# JOS_ROOT_ARGS (default "hello") after its name. set it empty to boot
-# without modules.
+# JOS_ROOT_ARGS after its name: by default "shell" when a person is at the
+# terminal (cargo run), "hello" otherwise. set it empty to boot without
+# modules.
 MODULES="${JOS_MODULES-}"
 if [ -z "${JOS_MODULES+set}" ] && [ "$(basename "$KERNEL")" = jos ]; then
     # a separate target dir: the cargo that invoked this runner may still hold
     # the lock on its own.
     USER_TARGET="$(cd "$(dirname "$KERNEL")/../.." && pwd)/user"
     (cd "$REPO/user" && CARGO_TARGET_DIR="$USER_TARGET" cargo build -q)
-    MODULES="$USER_TARGET/x86_64-unknown-none/debug/root root ${JOS_ROOT_ARGS:-hello}"
+    if [ -t 0 ]; then DEFAULT_ARGS=shell; else DEFAULT_ARGS=hello; fi
+    MODULES="$USER_TARGET/x86_64-unknown-none/debug/root root ${JOS_ROOT_ARGS:-$DEFAULT_ARGS}"
+fi
+
+# a session at a terminal lasts as long as the person wants it to.
+if [ -t 0 ] && [ -z "${JOS_QEMU_TIMEOUT+set}" ]; then
+    JOS_QEMU_TIMEOUT=0
 fi
 
 # assemble the grub iso tree: /boot/kernel.elf, the modules, /boot/grub/grub.cfg

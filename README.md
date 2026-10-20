@@ -147,6 +147,7 @@ fails instead of hanging.
 | [`docs/verification.md`](docs/verification.md) | what is proved and what is next |
 | [`docs/capabilities.md`](docs/capabilities.md) | the capability core: rights, badges, revocation |
 | [`docs/syscalls.md`](docs/syscalls.md) | every syscall: arguments, results, rights, error codes, IPC buffer layout |
+| [`docs/source-map.md`](docs/source-map.md) | where each part lives: the jos-core model and kernel glue for every feature |
 | [`docs/dst.md`](docs/dst.md) | deterministic simulation testing and tracing |
 | [`docs/building-and-running.md`](docs/building-and-running.md) | toolchain, target, boot, the qemu runner |
 | [`docs/testing.md`](docs/testing.md) | test layers and which gate runs each |

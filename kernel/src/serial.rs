@@ -17,6 +17,18 @@ pub fn init_serial() {
     SERIAL1.lock().init();
 }
 
+/// Writes raw bytes to COM1: console output that arrives as bytes from
+/// userspace rather than as formatted kernel text.
+pub fn write_bytes(bytes: &[u8]) {
+    // same lock discipline as _print: no interrupt may land while it is held.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut port = SERIAL1.lock();
+        for &byte in bytes {
+            port.send(byte);
+        }
+    });
+}
+
 #[doc(hidden)]
 pub fn _print(args: ::core::fmt::Arguments) {
     use core::fmt::Write;

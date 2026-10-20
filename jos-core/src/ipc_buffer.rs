@@ -26,11 +26,21 @@
 //! | `0x30` | `caps_received`: 1 if a capability arrived, else 0 | kernel |
 //!
 //! The plus-one encoding makes a zeroed buffer send and accept nothing.
+//!
+//! The second half of the frame, from [`DATA_OFFSET`] to its end, is a data
+//! area for calls that pass bytes rather than words (console output, for
+//! one): the caller writes the bytes there and names only their length.
 
 use crate::endpoint::Message;
 
 /// Number of message words a buffer holds, equal to a [`Message`]'s words.
 pub const MSG_WORDS: usize = 4;
+
+/// Byte offset of the data area in the buffer frame.
+pub const DATA_OFFSET: usize = 0x800;
+
+/// Size in bytes of the data area, which runs to the end of the frame.
+pub const DATA_LEN: usize = 0x800;
 
 /// One thread's IPC buffer, at the start of its frame.
 #[repr(C)]
@@ -47,6 +57,14 @@ pub struct IpcBuffer {
     /// Set on every delivery: 1 if a capability arrived in `recv_slot`, else 0.
     pub caps_received: u64,
 }
+
+// userspace writes these fields by hand, so their offsets are part of the abi,
+// and the struct must end before the data area.
+const _: () = assert!(core::mem::offset_of!(IpcBuffer, send_cap) == 0x20);
+const _: () = assert!(core::mem::offset_of!(IpcBuffer, recv_slot) == 0x28);
+const _: () = assert!(core::mem::offset_of!(IpcBuffer, caps_received) == 0x30);
+const _: () = assert!(core::mem::size_of::<IpcBuffer>() <= DATA_OFFSET);
+const _: () = assert!(DATA_OFFSET + DATA_LEN == 4096);
 
 impl IpcBuffer {
     /// Returns the slot whose capability the next send carries, if any.

@@ -55,6 +55,7 @@
 //! | `objects` | retype, mint, cnode copy, revoke, invoke |
 //! | `vm` | map page tables and frames, unmap |
 //! | `thread` | configure, set the buffer of, and start a TCB |
+//! | `platform` | write to the console, halt the machine |
 
 use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{Efer, EferFlags, GsBase, KernelGsBase, LStar, SFMask, Star};
@@ -77,6 +78,7 @@ use jos_core::ipc_buffer::{self, IpcBuffer};
 
 mod ipc;
 mod objects;
+mod platform;
 mod thread;
 mod vm;
 
@@ -275,6 +277,10 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::CNodeCopy) => objects::sys_cnode_copy(arg0, arg1, arg2).into(),
         // revoke(slot = arg0) -> count removed.
         Some(Syscall::Revoke) => objects::sys_revoke(arg0).into(),
+        // console_write(console_slot = arg0, len = arg1) -> 0 | errno.
+        Some(Syscall::ConsoleWrite) => platform::sys_console_write(arg0, arg1).into(),
+        // machine_halt(machine_slot = arg0, code = arg1); returns only if refused.
+        Some(Syscall::MachineHalt) => platform::sys_machine_halt(arg0, arg1).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it

@@ -194,6 +194,12 @@ pub enum ObjectKind {
     Frame,
     /// The root of an address space (a top-level page table).
     VSpace,
+    /// The kernel console. Not carved from untyped: there is one, and only the
+    /// root task is handed a capability to it at boot.
+    Console,
+    /// The machine itself: halting it, and later its diagnostics. One instance,
+    /// handed only to the root task.
+    Machine,
 }
 
 /// An opaque, `Copy` handle to a kernel object placed in untyped memory.
@@ -365,6 +371,42 @@ impl ObjectId {
         // pointer to a live UntypedRegion; the caller guarantees the kind is
         // Untyped, the region is live, and there is no aliasing reference.
         unsafe { &mut *ptr }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Platform objects
+// --------------------------------------------------------------------------
+
+/// A singleton kernel object that is not carved from untyped memory: the
+/// console or the machine. Capabilities name its address; it holds no state
+/// yet.
+pub struct PlatformObject {
+    /// Keeps the object non-zero-sized, so each instance has its own address.
+    _byte: u8,
+}
+
+/// The one console object.
+static CONSOLE: PlatformObject = PlatformObject { _byte: 0 };
+
+/// The one machine object.
+static MACHINE: PlatformObject = PlatformObject { _byte: 0 };
+
+/// Returns the handle that console capabilities carry.
+#[must_use]
+pub fn console_object() -> ObjectId {
+    ObjectId {
+        addr: core::ptr::addr_of!(CONSOLE).expose_provenance(),
+        kind: ObjectKind::Console,
+    }
+}
+
+/// Returns the handle that machine capabilities carry.
+#[must_use]
+pub fn machine_object() -> ObjectId {
+    ObjectId {
+        addr: core::ptr::addr_of!(MACHINE).expose_provenance(),
+        kind: ObjectKind::Machine,
     }
 }
 
@@ -985,6 +1027,24 @@ impl UntypedRegion {
     #[must_use]
     pub fn used(&self) -> usize {
         self.watermark
+    }
+
+    /// Returns the address of the region's first byte.
+    #[must_use]
+    pub fn base(&self) -> usize {
+        self.bytes.as_ptr().addr()
+    }
+
+    /// Returns the size of the region in bytes.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Returns the number of bytes not yet carved.
+    #[must_use]
+    pub fn free(&self) -> usize {
+        self.bytes.len() - self.watermark
     }
 
     /// Returns an [`ObjectId`] (kind [`ObjectKind::Untyped`]) naming this

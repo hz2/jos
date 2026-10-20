@@ -146,11 +146,23 @@ pub enum Syscall {
     /// a revoked object are woken with an error, and revoked frames and page
     /// tables are unmapped.
     Revoke = 21,
+    /// `console_write(console_slot, len) -> 0 | errno`. Writes the first `len`
+    /// bytes of the caller's IPC-buffer data area (see
+    /// [`crate::ipc_buffer::DATA_OFFSET`]) to the kernel console. Needs `WRITE`
+    /// on a Console capability; the kernel reads the bytes through its own
+    /// mapping of the buffer frame, never through a user pointer.
+    ConsoleWrite = 22,
+    /// `machine_halt(machine_slot, code)`: stops the machine. Code 0 reports
+    /// success to a test harness and anything else failure (under qemu, the
+    /// isa-debug-exit device turns it into the emulator's exit status). Needs
+    /// `WRITE` on the Machine capability; does not return unless the
+    /// capability is refused.
+    MachineHalt = 23,
 }
 
 impl Syscall {
     /// Every syscall, in number order; the numbers are dense from 0.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 24] = [
         Self::Add,
         Self::Exit,
         Self::IpcSend,
@@ -173,6 +185,8 @@ impl Syscall {
         Self::TcbStart,
         Self::CNodeCopy,
         Self::Revoke,
+        Self::ConsoleWrite,
+        Self::MachineHalt,
     ];
 
     /// Maps a raw syscall number to its enum form, or `None` if it is unknown.
@@ -257,11 +271,19 @@ pub enum IpcSyscallError {
     /// A capability was sent from a space that is not registered, so its copy
     /// could not stay linked to it for revocation.
     NotRegistered = 28,
+    /// The slot does not name the console.
+    NotConsole = 29,
+    /// The slot does not name the machine.
+    NotMachine = 30,
+    /// The call passes data through the IPC buffer and the caller has none.
+    NoIpcBuffer = 31,
+    /// A length exceeds the IPC buffer's data area.
+    TooLong = 32,
 }
 
 impl IpcSyscallError {
     /// Every error, in code order; the codes are dense from 1.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 32] = [
         Self::BadCap,
         Self::Denied,
         Self::NotEndpoint,
@@ -290,6 +312,10 @@ impl IpcSyscallError {
         Self::SlotOccupied,
         Self::SlotOutOfRange,
         Self::NotRegistered,
+        Self::NotConsole,
+        Self::NotMachine,
+        Self::NoIpcBuffer,
+        Self::TooLong,
     ];
 
     /// Decodes an error code (without [`IPC_ERR_FLAG`]), or `None` if unknown.
@@ -477,6 +503,201 @@ pub mod map_flags {
     pub const EXECUTE: u64 = 1 << 1;
 }
 
+/// Where the kernel puts the root task, and where userspace may map anything.
+///
+/// Entry 0 of every top-level table is the kernel's identity map and entries
+/// 256 and up are the kernel half, so user addresses live in entries 1 to 255.
+/// The root task's stack, IPC buffer, and [`BootInfo`] share one 2 MiB window
+/// at the top of its first GiB, so a single page table maps all three.
+pub mod layout {
+    /// Lowest user virtual address.
+    pub const USER_START: u64 = 0x0000_0080_0000_0000;
+    /// One past the highest user virtual address.
+    pub const USER_END: u64 = 0x0000_8000_0000_0000;
+    /// Where the root task's image is loaded: the base its static-PIE
+    /// relocations are applied against.
+    pub const ROOT_IMAGE_BASE: u64 = USER_START + 0x40_0000;
+    /// One past the highest address the root image may occupy.
+    pub const ROOT_IMAGE_LIMIT: u64 = ROOT_WINDOW;
+    /// The 2 MiB window holding the root task's stack, IPC buffer, and boot
+    /// information. Its first page stays unmapped, a guard under the stack.
+    pub const ROOT_WINDOW: u64 = USER_START + 0x3FE0_0000;
+    /// Pages in the root task's stack.
+    pub const ROOT_STACK_PAGES: u64 = 16;
+    /// Lowest address of the root task's stack.
+    pub const ROOT_STACK_BOTTOM: u64 = ROOT_WINDOW + 0x1000;
+    /// Top of the root task's stack, where its stack pointer starts.
+    pub const ROOT_STACK_TOP: u64 = ROOT_STACK_BOTTOM + ROOT_STACK_PAGES * 0x1000;
+    /// The root task's IPC buffer, one unmapped page above the stack.
+    pub const ROOT_IPC_BUFFER: u64 = ROOT_STACK_TOP + 0x1000;
+    /// The root task's read-only [`BootInfo`](super::BootInfo) page.
+    pub const ROOT_BOOT_INFO: u64 = ROOT_IPC_BUFFER + 0x1000;
+
+    // everything in the window fits in it, and the image ends where it begins.
+    const _: () = assert!(ROOT_BOOT_INFO + 0x1000 <= ROOT_WINDOW + 0x20_0000);
+    const _: () = assert!(ROOT_WINDOW.is_multiple_of(0x20_0000));
+    const _: () = assert!(ROOT_IMAGE_BASE < ROOT_IMAGE_LIMIT);
+}
+
+/// The capability slots the kernel fills in the root task's `CNode`. Slot 0 is
+/// left empty, so a zero slot number never names anything by accident.
+pub mod root_slot {
+    /// The root task's own thread.
+    pub const TCB: u64 = 1;
+    /// The root task's `CNode` (its own capability space).
+    pub const CNODE: u64 = 2;
+    /// The root task's address space.
+    pub const VSPACE: u64 = 3;
+    /// The frame holding the root task's IPC buffer.
+    pub const IPC_BUFFER: u64 = 4;
+    /// The frame holding the [`BootInfo`](super::BootInfo) page.
+    pub const BOOT_INFO: u64 = 5;
+    /// The console.
+    pub const CONSOLE: u64 = 6;
+    /// The machine.
+    pub const MACHINE: u64 = 7;
+    /// The first untyped region; the rest follow in order.
+    pub const FIRST_UNTYPED: u64 = 8;
+}
+
+/// `b"jos boot"` read as a little-endian word: the first field of [`BootInfo`].
+pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"jos boot");
+
+/// The [`BootInfo`] layout version; any incompatible change bumps it.
+pub const BOOT_INFO_VERSION: u64 = 1;
+
+/// How many untyped regions [`BootInfo`] can describe.
+pub const MAX_BOOT_UNTYPED: usize = 16;
+
+/// How many boot modules [`BootInfo`] can describe.
+pub const MAX_BOOT_MODULES: usize = 8;
+
+/// Bytes of a module command line kept in [`BootInfo`].
+pub const MODULE_CMDLINE_LEN: usize = 64;
+
+/// Bytes of the root task's own command line kept in [`BootInfo`].
+pub const BOOT_CMDLINE_LEN: usize = 256;
+
+/// A half-open range of capability slots.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlotRange {
+    /// The first slot in the range.
+    pub start: u64,
+    /// One past the last slot in the range.
+    pub end: u64,
+}
+
+/// One untyped region the root task holds a capability to.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UntypedDesc {
+    /// The slot of its capability.
+    pub slot: u64,
+    /// Physical address of its first byte.
+    pub phys: u64,
+    /// Its size in bytes.
+    pub size: u64,
+    /// Bytes already carved from it by the kernel (for the root task's own
+    /// objects), so `size - used` is what is left.
+    pub used: u64,
+}
+
+/// One boot module, as the boot loader placed it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModuleDesc {
+    /// Physical address of its first byte.
+    pub phys: u64,
+    /// Its size in bytes.
+    pub size: u64,
+    /// Its command line (name first), NUL padded and possibly cut short.
+    pub cmdline: [u8; MODULE_CMDLINE_LEN],
+}
+
+/// What the kernel tells the root task at boot.
+///
+/// It sits in a read-only page at [`layout::ROOT_BOOT_INFO`], whose address
+/// the root task also receives in `rdi`. Every capability it mentions is in
+/// the root task's `CNode` at a [`root_slot`] or in a range listed here.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct BootInfo {
+    /// [`BOOT_INFO_MAGIC`].
+    pub magic: u64,
+    /// [`BOOT_INFO_VERSION`].
+    pub version: u64,
+    /// Virtual address of the root task's IPC buffer.
+    pub ipc_buffer: u64,
+    /// Lowest address of the root task's stack; a guard page lies below it.
+    pub stack_bottom: u64,
+    /// Top of the root task's stack.
+    pub stack_top: u64,
+    /// Lowest virtual address of the loaded image.
+    pub image_start: u64,
+    /// One past the highest virtual address of the loaded image.
+    pub image_end: u64,
+    /// Number of slots in the root task's `CNode`.
+    pub cnode_slots: u64,
+    /// The empty slots of the root task's `CNode`.
+    pub empty: SlotRange,
+    /// Bytes of usable RAM the kernel left out because it lies above the
+    /// identity map.
+    pub memory_ignored: u64,
+    /// How many entries of `untyped` are valid.
+    pub untyped_count: u64,
+    /// The untyped regions, in slot order from [`root_slot::FIRST_UNTYPED`].
+    pub untyped: [UntypedDesc; MAX_BOOT_UNTYPED],
+    /// How many entries of `modules` are valid.
+    pub module_count: u64,
+    /// Every boot module, the root image included.
+    pub modules: [ModuleDesc; MAX_BOOT_MODULES],
+    /// The root task's command line: the words after its module name, NUL
+    /// padded.
+    pub cmdline: [u8; BOOT_CMDLINE_LEN],
+}
+
+// the page holds it whole, and the start of the layout is fixed.
+const _: () = assert!(core::mem::size_of::<BootInfo>() <= 4096);
+const _: () = assert!(core::mem::offset_of!(BootInfo, magic) == 0);
+const _: () = assert!(core::mem::offset_of!(BootInfo, version) == 8);
+
+impl BootInfo {
+    /// The valid untyped descriptors.
+    #[must_use]
+    pub fn untyped(&self) -> &[UntypedDesc] {
+        let count = usize::try_from(self.untyped_count).unwrap_or(0).min(MAX_BOOT_UNTYPED);
+        &self.untyped[..count]
+    }
+
+    /// The valid module descriptors.
+    #[must_use]
+    pub fn modules(&self) -> &[ModuleDesc] {
+        let count = usize::try_from(self.module_count).unwrap_or(0).min(MAX_BOOT_MODULES);
+        &self.modules[..count]
+    }
+
+    /// The root task's command line, without the NUL padding.
+    #[must_use]
+    pub fn cmdline(&self) -> &[u8] {
+        until_nul(&self.cmdline)
+    }
+}
+
+impl ModuleDesc {
+    /// The module's command line, without the NUL padding.
+    #[must_use]
+    pub fn cmdline(&self) -> &[u8] {
+        until_nul(&self.cmdline)
+    }
+}
+
+/// Returns `bytes` up to (not including) the first NUL, or all of it.
+fn until_nul(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
 /// Packs the third argument of [`Syscall::CNodeCopy`]: the destination slot in
 /// bits 0 to 15 and the rights mask in bits 16 to 23.
 #[must_use]
@@ -498,10 +719,40 @@ pub fn unpack_cnode_copy(packed: u64) -> Option<(u16, u8)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        InvokeError, IpcSyscallError, MintSyscallError, RetypeSyscallError, Syscall,
-        decode_object_type, encode_object_type, pack_cnode_copy, unpack_cnode_copy,
+        BOOT_CMDLINE_LEN, BOOT_INFO_MAGIC, BOOT_INFO_VERSION, BootInfo, InvokeError,
+        IpcSyscallError, MAX_BOOT_MODULES, MAX_BOOT_UNTYPED, MODULE_CMDLINE_LEN, MintSyscallError,
+        ModuleDesc, RetypeSyscallError, SlotRange, Syscall, UntypedDesc, decode_object_type,
+        encode_object_type, pack_cnode_copy, unpack_cnode_copy,
     };
     use crate::untyped::ObjectType;
+
+    #[test]
+    fn boot_info_views_clamp_counts_and_trim_padding() {
+        let mut info = BootInfo {
+            magic: BOOT_INFO_MAGIC,
+            version: BOOT_INFO_VERSION,
+            ipc_buffer: 0,
+            stack_bottom: 0,
+            stack_top: 0,
+            image_start: 0,
+            image_end: 0,
+            cnode_slots: 64,
+            empty: SlotRange::default(),
+            memory_ignored: 0,
+            untyped_count: 99,
+            untyped: [UntypedDesc::default(); MAX_BOOT_UNTYPED],
+            module_count: 1,
+            modules: [ModuleDesc { phys: 0, size: 0, cmdline: [0; MODULE_CMDLINE_LEN] }; MAX_BOOT_MODULES],
+            cmdline: [0; BOOT_CMDLINE_LEN],
+        };
+        // a corrupt count never reads past the array.
+        assert_eq!(info.untyped().len(), MAX_BOOT_UNTYPED);
+        assert_eq!(info.modules().len(), 1);
+        info.cmdline[..9].copy_from_slice(b"test ipc\0");
+        assert_eq!(info.cmdline(), b"test ipc");
+        info.modules[0].cmdline = [b'x'; MODULE_CMDLINE_LEN];
+        assert_eq!(info.modules[0].cmdline().len(), MODULE_CMDLINE_LEN);
+    }
 
     #[test]
     fn syscall_numbers_are_dense_and_round_trip() {
@@ -533,7 +784,7 @@ mod tests {
         }
         // zero is success, never an error, and codes past the end decode to nothing.
         assert_eq!(IpcSyscallError::from_code(0), None);
-        assert_eq!(IpcSyscallError::from_code(29), None);
+        assert_eq!(IpcSyscallError::from_code(33), None);
         assert_eq!(RetypeSyscallError::from_code(9), None);
         assert_eq!(MintSyscallError::from_code(4), None);
         assert_eq!(InvokeError::from_code(5), None);

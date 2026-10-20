@@ -12,7 +12,7 @@
 #   qemu [test]     boot kernel tests under qemu (all, or one by name)
 #   qemu-kvm [test] the same under kvm instead of tcg, skipped without /dev/kvm
 #   fast            style + clippy + test (pre-commit)
-#   ci              fast + miri + kani + qemu + qemu-kvm (pre-push, ci)
+#   ci              fast + miri + kani + qemu + qemu-kvm (pre-push to main, ci)
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

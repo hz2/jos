@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# slow gate before code leaves the machine: `scripts/check.sh ci` (style,
-# clippy, host tests, miri, kani, every qemu test under tcg and kvm), the same
-# gates ci runs.
+# the slow gate guards main: a push that updates main runs `scripts/check.sh
+# ci` (style, clippy, host tests, miri, kani, every qemu test under tcg and
+# kvm), the same gates ci runs. pushes of other branches save work in progress
+# off the machine and run the fast gate (style, clippy, host tests), so saving
+# progress never waits on the full run.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-scripts/check.sh ci
+
+gate=fast
+# git feeds one line per ref: <local ref> <local sha> <remote ref> <remote sha>.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    if [ "$remote_ref" = refs/heads/main ]; then
+        gate=ci
+    fi
+done
+scripts/check.sh "$gate"

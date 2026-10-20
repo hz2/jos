@@ -134,7 +134,7 @@ scripts/check.sh ci            # everything ci runs: fast + miri + kani + qemu
 
 The git hooks and CI call the same script: `pre-commit` runs the style check on
 staged files plus clippy and the host tests, `commit-msg` enforces Conventional
-Commits, and `pre-push` runs `scripts/check.sh ci`. QEMU runs with `-cpu max` (so SMEP/SMAP are live in
+Commits, and `pre-push` runs `scripts/check.sh ci` for a push to main (other branches get the fast gate). QEMU runs with `-cpu max` (so SMEP/SMAP are live in
 every test) and a 120-second timeout (`JOS_QEMU_TIMEOUT`), so a wedged guest
 fails instead of hanging.
 

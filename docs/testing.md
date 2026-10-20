@@ -6,11 +6,11 @@
 |-------|-------|----------|------|
 | unit | `jos-core/src/*` `#[cfg(test)]` | `check.sh test` | pre-commit, CI |
 | deterministic simulation | `jos-core/tests/dst_*.rs` | `check.sh test` | pre-commit, CI |
-| undefined behavior | jos-core | `check.sh miri` | pre-push, CI |
-| bounded proofs | `#[cfg(kani)] mod kani_proofs` | `check.sh kani` | pre-push, CI |
+| undefined behavior | jos-core | `check.sh miri` | pre-push to main, CI |
+| bounded proofs | `#[cfg(kani)] mod kani_proofs` | `check.sh kani` | pre-push to main, CI |
 | functional proofs | `jos-core/src/proof.rs` | `check.sh verus` | manual |
-| boot / integration | `kernel/tests/*.rs`, one QEMU image each | `check.sh qemu` | pre-push, CI |
-| boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push, CI (skipped without `/dev/kvm`) |
+| boot / integration | `kernel/tests/*.rs`, one QEMU image each | `check.sh qemu` | pre-push to main, CI |
+| boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push to main, CI (skipped without `/dev/kvm`) |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure

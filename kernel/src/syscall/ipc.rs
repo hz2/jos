@@ -63,16 +63,26 @@ pub(super) fn sys_ipc_recv(cap_slot: u64) -> SyscallRet {
     let Some(cap_ref) = space.ref_at(slot) else {
         return bad_cap;
     };
-    // a sender parked in a blocking send is waiting for exactly this receive.
+    match cap_recv_badged(space, cap_ref) {
+        Ok((message, badge)) => return SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge.0 },
+        Err(IpcError::EndpointEmpty) => {}
+        Err(e) => return (ipc_errno(e) | IPC_ERR_FLAG).into(),
+    }
+    // the slot is empty: a sender parked in a blocking send goes next.
     if let Ok((endpoint_addr, _)) = resolve_endpoint_slot(cap_slot, Rights::READ)
         && let Some((message, badge)) = take_from_parked_sender(endpoint_addr, None)
     {
         return SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge };
     }
-    match cap_recv_badged(space, cap_ref) {
-        Ok((message, badge)) => SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge.0 },
-        Err(e) => (ipc_errno(e) | IPC_ERR_FLAG).into(),
-    }
+    (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG).into()
+}
+
+/// Takes the message deposited in the slot of the endpoint at `cap_slot`, if
+/// the capability allows the receive and there is one.
+fn take_deposited(cap_slot: u64) -> Option<(Message, u64)> {
+    let space = current_cspace()?;
+    let cap_ref = usize::try_from(cap_slot).ok().and_then(|slot| space.ref_at(slot))?;
+    cap_recv_badged(space, cap_ref).ok().map(|(message, badge)| (message, badge.0))
 }
 
 // --- blocking IPC -----------------------------------------------------------
@@ -95,6 +105,8 @@ struct BlockedSend {
     badge: u64,
     /// The sender is in a `Call` and waits for an answer through a reply object.
     call: bool,
+    /// When it parked ([`PARK_SEQ`]), so parked senders are taken oldest first.
+    seq: u64,
 }
 
 /// A parked thread waiting to receive on a specific endpoint.
@@ -106,6 +118,18 @@ struct BlockedRecv {
     thread_id: usize,
     /// For `RecvReply`: the reply object a `Call` binds to its caller.
     reply: Option<ObjectId>,
+    /// When it parked ([`PARK_SEQ`]), so parked receivers are served oldest
+    /// first.
+    seq: u64,
+}
+
+/// Counts parks, so the blocking tables (whose entries are reused in any
+/// order) can still hand out the oldest waiter first.
+static PARK_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Returns the next park sequence number.
+fn next_seq() -> u64 {
+    PARK_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
 static BLOCKED_SENDS: Mutex<[Option<BlockedSend>; MAX_THREADS]> =
@@ -182,12 +206,15 @@ pub(super) fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
         Err(e) => return e as u64,
     };
 
-    // no receiver parked and no room to deposit: park; otherwise the
-    // non-blocking path (which hands a parked receiver the message first) is
-    // the whole send.
-    let nb = sys_ipc_send(cap_slot, word);
-    if nb != IpcSyscallError::WouldBlock as u64 {
-        return nb;
+    // a parked receiver takes the message directly; otherwise it goes into the
+    // endpoint's slot if that is free, and only a full slot makes us wait.
+    if hand_to_parked_receiver(endpoint_addr, &message, badge) {
+        return 0;
+    }
+    match cap_send(space, cap_ref, message) {
+        Ok(()) => return 0,
+        Err(IpcError::EndpointBusy) => {}
+        Err(e) => return ipc_errno(e),
     }
 
     // still would-block: park ourselves.
@@ -204,6 +231,7 @@ pub(super) fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
                 message,
                 badge,
                 call: false,
+                seq: next_seq(),
             });
         } else {
             return IpcSyscallError::WouldBlock as u64; // table full
@@ -238,16 +266,14 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
         Err(e) => return err(e),
     };
 
-    // a sender already parked on the endpoint rendezvouses now.
-    if let Some((message, badge)) = take_from_parked_sender(endpoint_addr, reply) {
+    // a message deposited in the slot is the oldest one: a sender parks only
+    // once the slot is full. only plain sends deposit; a Call always parks.
+    if let Some((message, badge)) = take_deposited(cap_slot) {
         return SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge };
     }
-
-    // no sender waiting: try cap_recv in case a message was already deposited.
-    // only plain sends deposit; a Call always waits in BLOCKED_SENDS.
-    let nb = sys_ipc_recv(cap_slot);
-    if nb.rax != (IpcSyscallError::WouldBlock as u64 | IPC_ERR_FLAG) {
-        return nb;
+    // then the oldest sender parked on the endpoint rendezvouses now.
+    if let Some((message, badge)) = take_from_parked_sender(endpoint_addr, reply) {
+        return SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge };
     }
 
     // park ourselves.
@@ -260,7 +286,7 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
         let Some(entry) = recvs.iter_mut().find(|e| e.is_none()) else {
             return err(IpcSyscallError::WouldBlock);
         };
-        *entry = Some(BlockedRecv { endpoint_addr, thread_id: cur, reply });
+        *entry = Some(BlockedRecv { endpoint_addr, thread_id: cur, reply, seq: next_seq() });
     }
     // the sender overwrites rax/rdx with the word and badge before readying us.
     park_current();
@@ -273,9 +299,11 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
 pub(super) fn hand_to_parked_receiver(endpoint_addr: u64, message: &Message, badge: u64) -> bool {
     let waiting = {
         let mut recvs = BLOCKED_RECVS.lock();
+        // the oldest receiver parked on the endpoint is served first.
         recvs
             .iter_mut()
-            .find(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
+            .filter(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
+            .min_by_key(|e| e.map_or(u64::MAX, |r| r.seq))
             .and_then(Option::take)
     };
     let Some(recv) = waiting else {
@@ -293,9 +321,11 @@ pub(super) fn hand_to_parked_receiver(endpoint_addr: u64, message: &Message, bad
 pub(super) fn take_from_parked_sender(endpoint_addr: u64, reply: Option<ObjectId>) -> Option<(Message, u64)> {
     let send = {
         let mut sends = BLOCKED_SENDS.lock();
+        // the oldest sender parked on the endpoint goes first.
         sends
             .iter_mut()
-            .find(|e| e.is_some_and(|s| s.endpoint_addr == endpoint_addr))
+            .filter(|e| e.is_some_and(|s| s.endpoint_addr == endpoint_addr))
+            .min_by_key(|e| e.map_or(u64::MAX, |s| s.seq))
             .and_then(Option::take)
     }?;
     if send.call {
@@ -556,7 +586,7 @@ pub(super) fn sys_call(cap_slot: u64, word: u64) -> u64 {
         let Some(entry) = sends.iter_mut().find(|e| e.is_none()) else {
             return err(IpcSyscallError::WouldBlock);
         };
-        *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, message, badge, call: true });
+        *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, message, badge, call: true, seq: next_seq() });
     }
     park_current();
     0 // ignored

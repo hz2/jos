@@ -175,18 +175,15 @@ pub(super) fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
                     Err(e) => invoke_errno(e),
                 }
             }
-            ENDPOINT_RECV => {
-                // a sender parked in a blocking send is taken first.
-                if cap.rights.contains(Rights::READ)
-                    && let Some((message, _)) = ipc::take_from_parked_sender(cap.object.phys_addr(), None)
-                {
-                    return message.words[0];
-                }
-                match cap_recv(space, cap_ref) {
-                    Ok(message) => message.words[0],
-                    Err(e) => invoke_errno(e),
-                }
-            }
+            ENDPOINT_RECV => match cap_recv(space, cap_ref) {
+                Ok(message) => message.words[0],
+                // the slot is empty: a sender parked in a blocking send goes next.
+                Err(IpcError::EndpointEmpty) => match ipc::take_from_parked_sender(cap.object.phys_addr(), None) {
+                    Some((message, _)) => message.words[0],
+                    None => invoke_errno(IpcError::EndpointEmpty),
+                },
+                Err(e) => invoke_errno(e),
+            },
             _ => err(InvokeError::BadMethod),
         },
         // no methods defined for the other object kinds yet.

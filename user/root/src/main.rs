@@ -257,13 +257,33 @@ extern "C" fn receive_and_report(arg: u64) {
     let _ = sys::send_blocking(report, word);
 }
 
-/// Reports [`READY`] on field 1, sends 55 on field 0 (blocking), and reports
-/// [`DONE`] on field 1.
+/// Fills the endpoint in field 0 with 1 (a non-blocking send, which leaves it
+/// in the endpoint's slot), reports [`READY`] on field 1, sends 55 on field 0
+/// (blocking, so it parks behind the full slot), and reports [`DONE`].
 extern "C" fn send_and_report(arg: u64) {
     let (outbox, report) = (field(arg, 0), field(arg, 1));
+    let _ = sys::send(outbox, 1);
     let _ = sys::send_blocking(report, READY);
     let _ = sys::send_blocking(outbox, 55);
     let _ = sys::send_blocking(report, DONE);
+}
+
+/// Reads the time stamp counter.
+fn rdtsc() -> u64 {
+    let (lo, hi): (u32, u32);
+    // SAFETY: rdtsc only reads the counter into eax and edx; ring 3 may use it
+    // because the kernel leaves CR4.TSD clear.
+    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)) };
+    u64::from(hi) << 32 | u64::from(lo)
+}
+
+/// Spins for 2^29 time stamp cycles, a sixth of a second or more, so a timer
+/// tick (every 55 ms) lands and any thread that is ready gets to run.
+fn spin_past_a_tick() {
+    let start = rdtsc();
+    while rdtsc().wrapping_sub(start) < 1 << 29 {
+        core::hint::spin_loop();
+    }
 }
 
 /// A thread started from ring 3 runs in the root's spaces and reports back.
@@ -310,9 +330,11 @@ fn stale_reply_reaches_no_new_thread(_: &BootInfo) -> Result<(), &'static str> {
     caller.reap();
     let waiter = Thread::spawn(receive_and_report, pack(inbox, report, 0), 1).map_err(|_| "spawn waiter")?;
     let ready = sys::recv_blocking(report);
-    // the waiter is parked in its receive now; the stale answer must not wake it.
+    // the waiter is parked in its receive now; the stale answer must not wake
+    // it, which it would get to show while this thread spins.
     let _ = sys::reply(reply, 99);
-    let sent = sys::send(inbox, 42);
+    spin_past_a_tick();
+    let sent = sys::send_blocking(inbox, 42);
     let got = sys::recv_blocking(report);
     waiter.reap();
     release(&[call_ep, reply, inbox, report])?;
@@ -340,18 +362,23 @@ fn nonblocking_send_reaches_a_parked_receiver(_: &BootInfo) -> Result<(), &'stat
     ensure(got == Ok((77, 0)), "the parked receiver did not get the message")
 }
 
-/// A non-blocking receive takes the message of a sender parked in a blocking
-/// send, and completes that send.
+/// A non-blocking receive takes the message in the endpoint's slot first (it
+/// is the older one), then the message of a sender parked behind the full
+/// slot, and that completes the parked send.
 fn nonblocking_recv_takes_a_parked_sender(_: &BootInfo) -> Result<(), &'static str> {
     let outbox = object(ObjectType::Endpoint)?;
     let report = object(ObjectType::Endpoint)?;
     let sender = Thread::spawn(send_and_report, pack(outbox, report, 0), 1).map_err(|_| "spawn")?;
     let ready = sys::recv_blocking(report);
-    let taken = sys::recv(outbox);
-    let done = if taken.is_ok() { sys::recv_blocking(report) } else { Ok((0, 0)) };
+    // let the sender reach its blocking send and park behind the full slot.
+    spin_past_a_tick();
+    let first = sys::recv(outbox);
+    let second = sys::recv(outbox);
+    let done = if second.is_ok() { sys::recv_blocking(report) } else { Ok((0, 0)) };
     sender.reap();
     release(&[outbox, report])?;
     ensure(ready == Ok((READY, 0)), "the sender did not start")?;
-    ensure(taken == Ok((55, 0)), "the parked sender's message was not taken")?;
+    ensure(first == Ok((1, 0)), "the deposited message did not come first")?;
+    ensure(second == Ok((55, 0)), "the parked sender's message was not taken")?;
     ensure(done == Ok((DONE, 0)), "the parked sender's send did not complete")
 }

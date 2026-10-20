@@ -38,7 +38,9 @@ confirm the proof fails, revert.
 | SCHED-1 | round robin serves all N threads in N steps (starvation-freedom); removing a thread takes out exactly that one and keeps the others in order, and the queue invariant holds across enqueue, dequeue, and remove | Kani | `sched_policy.rs`, `run_queue.rs` |
 | INV-1 | the ring buffer and run queue declare their representation invariants (`kani::Invariant`), and every push, pop, enqueue, dequeue, and remove keeps them from any valid state, not only from states a few operations past empty | Kani | `ring_buffer.rs`, `run_queue.rs` |
 | PTE-SPLIT | splitting a 2 MiB page into 512 4 KiB entries preserves every translation in it and its present, writable, user, and no-execute bits (what makes a guard page safe to carve out of the identity map) | Kani | `pte.rs` |
-| BOOT-1 | the multiboot2 parser never leaves the info structure: on every 64-byte input, each tag the walk yields is the 8-aligned tag the format places where the previous one ended, decoded from its own header, and lies inside the first `total_size` bytes; the walk stops only at an end tag, a tag smaller than its header, or a tag running past `total_size`, yields fewer than `total_size / 8` tags, and stays stopped; memory map entries (every 72-byte input) and module addresses and command lines (every 48-byte input) are exactly the bytes the format places inside their own tag | Kani | `multiboot2.rs` |
+| BOOT-1 | the multiboot2 parser never leaves the info structure: on every 64-byte input, each tag the walk yields is the 8-aligned tag the format places where the previous one ended, decoded from its own header, and lies inside the first `total_size` bytes; the walk stops only at an end tag, a tag smaller than its header, or a tag running past `total_size`, yields fewer than `total_size / 8` tags, and stays stopped; memory map entries (every 56-byte payload) and module addresses and command lines (every 24-byte payload) are exactly the bytes the format places inside their own tag | Kani | `multiboot2.rs` |
+| BOOT-2 | the usable memory list holds exactly the free pages (inside an available range, below the identity-map limit, touching no reserved range) as sorted, page-aligned, maximal runs; with too little room it still holds only free pages, sorted with gaps, and reports the bytes it dropped (one available and one reserved range below 4 GiB, any limit) | Kani | `boot_regions.rs` |
+| ELF-1 | the ELF loader's parser never panics or reads outside the image (every 120-byte image with its program header table where linkers put it; every dynamic section inside 64 bytes, for any two segments and any base); every relocation it accepts writes eight bytes inside a writable segment, at the base plus `r_offset`, and stores the base plus `r_addend`; it refuses exactly the images with a writable and executable segment (any flags) and exactly the segments that share a page (any addresses and sizes) | Kani | `elf.rs` |
 | IPC-1 | deadlock-freedom under receive-with-timeout | DST | `jos-core/tests/dst_recv_timeout.rs` |
 | ARITH-1 | Verus build plumbing works without breaking test, Miri, or Kani | Verus | `proof.rs` |
 
@@ -75,8 +77,6 @@ panics on kernel-produced bytes. Kani.
 
 ## Backlog
 
-- **ELF-1**: the ELF64 header parser never reads out of bounds on any input
-  (Kani plus a fuzz target). Lands with the loader.
 - **BLOCK-1**: a pure model of the blocking-IPC direct-handoff tables so the
   syscall path gets the same coverage as the async path.
 - **LOCK-1**: the lock-order graph (WITNESS-style checker) rejects every cycle.

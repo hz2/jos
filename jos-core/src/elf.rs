@@ -29,10 +29,11 @@
 //! - every relocation writes eight bytes inside one writable segment, and the
 //!   value it writes is the load base plus the entry's addend.
 //!
-//! `plan_invariants_hold` checks all of this again without the parser's code.
-//! The Kani harnesses at the bottom of this file prove that it holds for every
-//! plan accepted from small symbolic images, and the host tests check it on
-//! seeded mutations of valid ones.
+//! `plan_invariants_hold` checks all of this again without the parser's code,
+//! and the host tests run it on seeded mutations of valid images. The Kani
+//! harnesses at the bottom of this file prove, for small symbolic inputs, that
+//! parsing never panics or reads outside the image, and the relocation, W^X,
+//! and overlap guarantees above.
 //!
 //! # Loading a plan
 //!
@@ -687,7 +688,7 @@ fn decode_relocation(
 ///
 /// The one thing taken on trust is which RELA table the dynamic section
 /// names; its entries are still checked one by one.
-#[cfg(any(test, kani))]
+#[cfg(test)]
 fn plan_invariants_hold(plan: &LoadPlan, image: &[u8], window: (u64, u64)) -> bool {
     let field = |at: u64, size: usize| le_field(image, at, size);
     let segments = plan.segments();
@@ -764,7 +765,7 @@ fn plan_invariants_hold(plan: &LoadPlan, image: &[u8], window: (u64, u64)) -> bo
 }
 
 /// Decodes the little-endian field of `size` bytes at byte `at` of `image`.
-#[cfg(any(test, kani))]
+#[cfg(test)]
 fn le_field(image: &[u8], at: u64, size: usize) -> Option<u64> {
     let start = usize::try_from(at).ok()?;
     let mut word = [0; 8];
@@ -775,7 +776,7 @@ fn le_field(image: &[u8], at: u64, size: usize) -> Option<u64> {
 /// The relocation half of [`plan_invariants_hold`]: each RELATIVE entry is
 /// yielded in order, writing base plus addend into a writable segment; NONE
 /// entries are skipped and no other type is allowed.
-#[cfg(any(test, kani))]
+#[cfg(test)]
 fn relocations_hold(plan: &LoadPlan, image: &[u8]) -> bool {
     let segments = plan.segments();
     let mut yielded = plan.relocations(image);
@@ -1401,9 +1402,8 @@ mod tests {
 #[cfg(kani)]
 mod kani_proofs {
     use super::{
-        DT_NULL, DT_RELA, DT_RELAENT, DT_RELASZ, ET_DYN, ElfError, LoadPlan, LoadSegment,
-        PAGE_SIZE, PF_R, PF_W, PF_X, PT_DYNAMIC, PT_LOAD, ProgramHeader, SegmentFlags,
-        plan_invariants_hold, write_header,
+        ET_DYN, ElfError, LoadPlan, LoadSegment, MAX_LOAD_SEGMENTS, NO_SEGMENT, PAGE_SIZE, PF_R,
+        PF_W, PF_X, PT_LOAD, ProgramHeader, SegmentFlags, decode_relocation, in_file, write_header,
     };
 
     /// The window the harnesses load into: the lower half, less page zero.
@@ -1426,67 +1426,99 @@ mod kani_proofs {
     }
 
     /// Parsing any 120 bytes, room for a file header and one program header,
-    /// at any page-aligned base never panics, and every plan it accepts holds.
+    /// at any page-aligned base never panics and never reads outside the
+    /// image (ELF-1). What an accepted plan promises is proved by the
+    /// harnesses below and checked on whole mutated images by the host test;
+    /// re-checking it here over a fully symbolic image took cbmc past 8 GB.
+    ///
+    /// One program header cannot be both a `PT_LOAD` and the `PT_DYNAMIC`
+    /// that leads to the relocation walk, so that walk is unreachable here and
+    /// a small unwind bound suffices: cbmc still checks that no loop needed
+    /// more. `relocation_tables_never_panic` covers the walk.
     #[kani::proof]
-    #[kani::unwind(9)] // a dynamic section in 120 bytes has at most 7 entries, plus one
-    fn parse_never_panics_and_accepted_plans_hold() {
-        let image: [u8; 120] = kani::any();
+    #[kani::unwind(2)] // at most one program header and one segment, plus one
+    fn parse_never_panics() {
+        let mut image: [u8; 120] = kani::any();
+        // the program header table right after the file header, where every
+        // linker puts it: with a symbolic table offset every header read was a
+        // symbolic index, which took cbmc past 8 GB. every other byte is free.
+        image[32..40].copy_from_slice(&64_u64.to_le_bytes());
         let base = any_base();
-        if let Ok(plan) = LoadPlan::parse(&image, base, WINDOW) {
-            assert!(plan_invariants_hold(&plan, &image, WINDOW));
-            kani::cover!(true, "an arbitrary image is accepted");
-        }
+        let accepted = LoadPlan::parse(&image, base, WINDOW).is_ok();
+        kani::cover!(accepted, "an arbitrary image is accepted");
     }
 
-    /// For any two RELA entries in an otherwise valid image, at any
-    /// page-aligned base, every relocation of an accepted plan writes eight
-    /// bytes inside a writable segment and stores the base plus its addend,
-    /// and a relocation outside every writable segment is refused.
+    /// Returns a segment with arbitrary fields that has what parsing checks
+    /// of every segment it accepts: its end does not overflow, and its file
+    /// bytes lie inside `image`.
+    fn any_segment(image: &[u8]) -> LoadSegment {
+        let segment = LoadSegment {
+            vaddr: kani::any(),
+            mem_size: kani::any(),
+            file_offset: kani::any(),
+            file_size: kani::any(),
+            flags: SegmentFlags { read: kani::any(), write: kani::any(), execute: kani::any() },
+        };
+        kani::assume(segment.vaddr.checked_add(segment.mem_size).is_some());
+        kani::assume(segment.file_size <= segment.mem_size && in_file(segment.file_offset, segment.file_size, image));
+        segment
+    }
+
+    /// Walking any dynamic section of any 64 bytes, for a plan with any two
+    /// segments and any base, never panics and never reads outside the image
+    /// (ELF-1). With `parse_never_panics`, which reaches every other part of
+    /// parsing, this covers the whole parser.
     #[kani::proof]
-    #[kani::unwind(5)] // four dynamic entries written, two RELA entries, three headers, plus one
+    #[kani::unwind(6)] // four 16-byte dynamic entries, a fifth that fails to read, plus one
+    fn relocation_tables_never_panic() {
+        let image: [u8; 64] = kani::any();
+        // parsing walks a dynamic section only once its bytes are in the file.
+        let (offset, size) = (kani::any(), kani::any());
+        kani::assume(in_file(offset, size, &image));
+        let mut plan = LoadPlan {
+            entry: 0,
+            base: any_base(),
+            segments: [NO_SEGMENT; MAX_LOAD_SEGMENTS],
+            segment_count: 2,
+            rela_offset: 0,
+            rela_entries: 0,
+            relocation_count: 0,
+        };
+        plan.segments[0] = any_segment(&image);
+        plan.segments[1] = any_segment(&image);
+        let accepted = plan.read_relocations(&image, offset, size).is_ok();
+        kani::cover!(accepted && plan.relocation_count == 1, "a relocation is found and accepted");
+    }
+
+    /// For any RELA entry, any base, and any two segments, a relocation that
+    /// is accepted writes eight bytes inside a writable segment, at the base
+    /// plus `r_offset`, and stores the base plus `r_addend` (ELF-1).
+    ///
+    /// Parsing refuses an image unless every entry is accepted here, and
+    /// [`LoadPlan::relocations`] yields only what this accepts, so the
+    /// property holds for every relocation of every plan. Proving it through
+    /// `parse` on a whole image, even with only the table symbolic, took cbmc
+    /// past 8 GB.
+    #[kani::proof]
+    #[kani::unwind(3)] // two segments, plus one
     fn relocations_land_in_writable_segments() {
-        let mut image = [0; 0x180];
-        write_header(&mut image, ET_DYN, 0x10, 3);
-        // code over the headers, then data whose file bytes are the dynamic
-        // section (at 0x1100) and the table (at 0x1150).
-        let code = ProgramHeader {
-            kind: PT_LOAD,
-            flags: PF_R | PF_X,
-            offset: 0,
-            vaddr: 0,
-            file_size: 0xe8,
-            mem_size: 0xe8,
-            align: PAGE_SIZE,
-        };
-        let data = ProgramHeader {
-            kind: PT_LOAD,
-            flags: PF_R | PF_W,
-            offset: 0x100,
-            vaddr: 0x1100,
-            file_size: 0x80,
-            mem_size: 0x1000,
-            align: PAGE_SIZE,
-        };
-        let dynamic = ProgramHeader { kind: PT_DYNAMIC, file_size: 0x50, mem_size: 0x50, align: 8, ..data };
-        code.write(&mut image, 64);
-        data.write(&mut image, 120);
-        dynamic.write(&mut image, 176);
-        for (i, (tag, value)) in [(DT_RELA, 0x1150_u64), (DT_RELASZ, 48), (DT_RELAENT, 24), (DT_NULL, 0)].iter().enumerate() {
-            let at = 0x100 + i * 16;
-            image[at..at + 8].copy_from_slice(&tag.to_le_bytes());
-            image[at + 8..at + 16].copy_from_slice(&value.to_le_bytes());
+        let entry: [u8; 24] = kani::any();
+        let base: u64 = kani::any();
+        let segments = [any_segment(&entry), any_segment(&entry)];
+        let decoded = decode_relocation(&entry, 0, base, &segments);
+        kani::cover!(matches!(decoded, Ok(Some(_))), "a relocation is accepted");
+        if let Ok(Some(r)) = decoded {
+            let field = |at: usize| u64::from_le_bytes([
+                entry[at], entry[at + 1], entry[at + 2], entry[at + 3],
+                entry[at + 4], entry[at + 5], entry[at + 6], entry[at + 7],
+            ]);
+            assert!(Some(r.target) == base.checked_add(field(0)));
+            assert!(Some(r.value) == base.checked_add_signed(field(16).cast_signed()));
+            let holds = |s: &LoadSegment| {
+                s.flags.write && s.vaddr <= r.target && r.target.checked_add(8).is_some_and(|end| end <= s.vaddr + s.mem_size)
+            };
+            assert!(segments.iter().any(holds));
         }
-        let table: [u8; 48] = kani::any();
-        image[0x150..0x180].copy_from_slice(&table);
-        let base = any_base();
-        let Ok(plan) = LoadPlan::parse(&image, base, WINDOW) else {
-            return;
-        };
-        for r in plan.relocations(&image) {
-            let holds = |s: &LoadSegment| s.flags.write && s.vaddr <= r.target && r.target + 8 <= s.vaddr + s.mem_size;
-            assert!(plan.segments().iter().any(holds));
-        }
-        kani::cover!(plan.relocation_count() == 2, "both RELA entries are applied");
     }
 
     /// For any flags on two otherwise valid segments, parsing refuses exactly

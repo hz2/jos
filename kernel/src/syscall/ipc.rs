@@ -473,19 +473,82 @@ fn deliver_to(message: &Message, tcb: *mut Tcb) -> u64 {
 }
 
 /// Resumes a blocked thread with a delivered message: its buffer gets the
-/// words, its saved `rax` word 0, and its saved `rdx` the given value.
+/// words, its saved `rax` word 0, and its saved `rdx` the given value. A
+/// thread parked by a fault is answered differently: it resumes at the
+/// faulting instruction with every register as it was.
 fn resume_with(thread_id: usize, message: &Message, rdx: u64) {
     // SAFETY: thread_id came from register_thread, and THREAD_TABLE entries live
     // for the kernel lifetime; deliver_to handles a null entry.
     let tcb = unsafe { crate::sched::thread_table_entry(thread_id) };
+    // SAFETY: a non-null entry is a live TCB; single-CPU with interrupts off.
+    if !tcb.is_null() && unsafe { (*tcb).state } == TcbState::Faulted {
+        // SAFETY: as above.
+        unsafe { (*tcb).state = TcbState::Running };
+        crate::sched::mark_ready(thread_id);
+        return;
+    }
     let word0 = deliver_to(message, tcb);
     resume(thread_id, word0, rdx);
 }
 
 /// Fails a thread blocked in [`Syscall::Call`] that can never be answered (its
 /// reply object was revoked), resuming it with [`IpcSyscallError::NoReply`].
+/// A thread parked by a fault has no call to fail: it is stopped instead.
 pub fn abort_call(thread_id: usize) {
+    // SAFETY: thread_id came from register_thread; a null entry is skipped.
+    let tcb = unsafe { crate::sched::thread_table_entry(thread_id) };
+    // SAFETY: a non-null entry is a live TCB; single-CPU with interrupts off.
+    if !tcb.is_null() && unsafe { (*tcb).state } == TcbState::Faulted {
+        retire_threads(|t| core::ptr::eq(t, tcb));
+        return;
+    }
     resume(thread_id, IpcSyscallError::NoReply as u64 | IPC_ERR_FLAG, 0);
+}
+
+/// Returns the endpoint a thread's faults go to, and the badge of the
+/// capability naming it: the capability in its fault slot, looked up in its
+/// own capability space now, so a revoked capability names nothing. It must
+/// be an endpoint capability with `WRITE`.
+pub fn fault_endpoint(tcb: &Tcb) -> Option<(u64, u64)> {
+    let slot = usize::try_from(tcb.fault_slot.checked_sub(1)?).ok()?;
+    if tcb.cspace_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: a thread's capability space lives as long as the thread, and
+    // nothing else touches it while interrupts are off.
+    let space = unsafe { &*tcb.cspace_ptr };
+    let cap = space.lookup(space.ref_at(slot)?)?;
+    (cap.object.kind() == ObjectKind::Endpoint && cap.rights.contains(Rights::WRITE))
+        .then(|| (cap.object.phys_addr(), cap.badge.0))
+}
+
+/// Delivers a fault as a call from thread `thread_id` on the endpoint at
+/// `endpoint_addr`: handed to a receiver parked with a reply object, or
+/// parked until one arrives. Returns `false` if nothing could ever answer it
+/// (the parked receiver has no reply object), so the caller stops the thread.
+pub fn deliver_fault(thread_id: usize, endpoint_addr: u64, badge: u64, message: &Message) -> bool {
+    let waiting = {
+        let mut recvs = BLOCKED_RECVS.lock();
+        recvs
+            .iter_mut()
+            .filter(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
+            .min_by_key(|e| e.map_or(u64::MAX, |r| r.seq))
+            .and_then(Option::take)
+    };
+    if let Some(recv) = waiting {
+        let bound = recv
+            .reply
+            .and_then(cap::reply_object)
+            .is_some_and(|r| r.inner.lock().bind(crate::sched::token(thread_id)).is_ok());
+        resume_with(recv.thread_id, message, badge);
+        return bound;
+    }
+    let mut sends = BLOCKED_SENDS.lock();
+    let Some(entry) = sends.iter_mut().find(|e| e.is_none()) else {
+        return false;
+    };
+    *entry = Some(BlockedSend { endpoint_addr, thread_id, message: *message, badge, call: true, seq: next_seq() });
+    true
 }
 
 /// Stops every thread `doomed` picks, for good: it leaves the scheduler and any

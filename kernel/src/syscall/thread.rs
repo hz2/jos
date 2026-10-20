@@ -97,3 +97,22 @@ pub(super) fn sys_thread_exit() -> u64 {
     retire_threads(|t| core::ptr::eq(t, tcb));
     0 // ignored: the stub yields instead of sysretq'ing
 }
+
+/// Implements [`Syscall::TcbSetFaultHandler`]: names the endpoint, by its slot
+/// in the thread's own capability space, that the thread's faults are
+/// delivered to. The slot is looked up only when a fault happens, so the
+/// handler can be set before the capability is there, and revoking it takes
+/// the handler away.
+pub(super) fn sys_tcb_set_fault_handler(tcb_slot: u64, fault_slot: u64) -> u64 {
+    let tcb = match resolve_object(tcb_slot, ObjectKind::Tcb, Rights::WRITE, IpcSyscallError::NotTcb) {
+        Ok(tcb) => tcb,
+        Err(e) => return e as u64,
+    };
+    if fault_slot >= crate::cap::CSPACE_SLOTS as u64 {
+        return IpcSyscallError::SlotOutOfRange as u64;
+    }
+    // SAFETY: the capability names a live TCB (kind checked above) in a static
+    // untyped region; single-CPU syscall path, and no reference to it is live.
+    unsafe { tcb.as_tcb_mut() }.fault_slot = fault_slot + 1;
+    0
+}

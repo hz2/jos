@@ -803,6 +803,9 @@ pub enum TcbState {
     Inactive,
     /// Runnable / running.
     Running,
+    /// Parked after a fault until its fault handler answers; an answer
+    /// resumes it at the faulting instruction with its registers untouched.
+    Faulted,
     /// Stopped for good: its TCB, `CNode`, or `VSpace` lost its last capability.
     Retired,
 }
@@ -843,6 +846,10 @@ pub struct Tcb {
     /// or zero for none. The kernel reaches the buffer through its own identity
     /// mapping of this frame, never through a user virtual address.
     pub ipc_buffer: u64,
+    /// The slot, in the thread's own capability space, of the endpoint its
+    /// faults are delivered to, plus one; zero for none. Resolved when a fault
+    /// happens, so revoking that capability takes the handler away.
+    pub fault_slot: u64,
     /// The thread's run state. Last of the real fields (a small type), before
     /// the padding, so it introduces no interior alignment gap.
     pub state: TcbState,
@@ -861,6 +868,7 @@ impl Tcb {
     // sum drifts, PAD is wrong and that assertion fails the build loudly. Keep
     // new fields 8-aligned (or update this sum) so the no-padding premise holds.
     const USED: usize = core::mem::size_of::<SavedContext>()
+        + core::mem::size_of::<u64>()
         + core::mem::size_of::<u64>()
         + core::mem::size_of::<Option<ObjectId>>()
         + core::mem::size_of::<u64>()
@@ -881,6 +889,7 @@ impl Tcb {
             vspace_root: 0,
             cspace_root: None,
             ipc_buffer: 0,
+            fault_slot: 0,
             state: TcbState::Inactive,
             kernel_stack_top: 0,
             cspace_ptr: core::ptr::null_mut(),

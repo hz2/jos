@@ -51,12 +51,22 @@ impl Thread {
     /// Why a slot, an object, a mapping, or the start was refused; whatever
     /// was built by then is revoked again.
     pub fn spawn(entry: Entry, arg: u64, stack_pages: u64) -> Result<Self, Error> {
+        Self::spawn_with(entry, arg, stack_pages, None)
+    }
+
+    /// Like [`spawn`](Self::spawn), and sends the thread's faults to the
+    /// endpoint in slot `fault_handler` (see [`sys::tcb_set_fault_handler`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn`](Self::spawn).
+    pub fn spawn_with(entry: Entry, arg: u64, stack_pages: u64, fault_handler: Option<Slot>) -> Result<Self, Error> {
         let block = NEXT_BLOCK.fetch_add(THREAD_BLOCK, Ordering::Relaxed);
         if block >= THREAD_BLOCKS_END {
             return Err(Error::NoMemory);
         }
         let mut thread = Self { tcb: None, frames: [0; MAX_FRAMES], frame_count: 0 };
-        match thread.build(block, entry, arg, stack_pages.clamp(1, THREAD_STACK_PAGES)) {
+        match thread.build(block, entry, arg, stack_pages.clamp(1, THREAD_STACK_PAGES), fault_handler) {
             Ok(()) => Ok(thread),
             Err(e) => {
                 thread.release();
@@ -77,7 +87,7 @@ impl Thread {
     }
 
     /// Maps the stack and IPC buffer, then configures and starts the TCB.
-    fn build(&mut self, block: u64, entry: Entry, arg: u64, pages: u64) -> Result<(), Error> {
+    fn build(&mut self, block: u64, entry: Entry, arg: u64, pages: u64, fault_handler: Option<Slot>) -> Result<(), Error> {
         let stack_top = block + THREAD_STACK + THREAD_STACK_PAGES * 0x1000;
         for page in 1..=pages {
             self.frames[self.frame_count] = mem::map_new_page(stack_top - page * 0x1000)?;
@@ -89,6 +99,9 @@ impl Thread {
         let tcb = mem::retype(ObjectType::Tcb)?;
         self.tcb = Some(tcb);
         sys::tcb_configure(tcb, root_slot::CNODE, root_slot::VSPACE)?;
+        if let Some(handler) = fault_handler {
+            sys::tcb_set_fault_handler(tcb, handler)?;
+        }
         sys::tcb_set_ipc_buffer(tcb, ipc_buffer)?;
         // the trampoline pops the entry and its argument off the new stack.
         let words = (stack_top - 16) as *mut u64;

@@ -519,7 +519,8 @@ fn read_header(image: &[u8], base: u64) -> Result<FileHeader, ElfError> {
     }
     let header = FileHeader::read(image).ok_or(ElfError::TooShort)?;
     let [m0, m1, m2, m3, class, data, version] = header.ident;
-    if [m0, m1, m2, m3] != ELF_MAGIC {
+    // compared as one word: a byte-slice compare is a loop the proofs must unwind.
+    if u32::from_le_bytes([m0, m1, m2, m3]) != u32::from_le_bytes(ELF_MAGIC) {
         return Err(ElfError::BadMagic);
     }
     if class != ELFCLASS64 {
@@ -575,7 +576,7 @@ fn load_segment(
     }
     // the alignment is zero or a power of two, so masking takes the remainder.
     let mask = ph.align.saturating_sub(1);
-    if ph.vaddr % PAGE_SIZE != ph.offset % PAGE_SIZE || ph.vaddr & mask != ph.offset & mask {
+    if (ph.vaddr ^ ph.offset) & (PAGE_SIZE - 1) != 0 || (ph.vaddr ^ ph.offset) & mask != 0 {
         return Err(ElfError::Misaligned);
     }
     // a segment keeps its alignment only if the base has it too.
@@ -700,12 +701,12 @@ fn plan_invariants_hold(plan: &LoadPlan, image: &[u8], window: (u64, u64)) -> bo
         let Some(page_end) = end.checked_next_multiple_of(PAGE_SIZE) else {
             return false;
         };
-        let page_start = s.vaddr - s.vaddr % PAGE_SIZE;
+        let page_start = s.vaddr & !(PAGE_SIZE - 1);
         let file_end = s.file_offset.checked_add(s.file_size);
         if s.mem_size == 0
             || s.file_size > s.mem_size
             || file_end.is_none_or(|end| end > image.len() as u64)
-            || s.vaddr % PAGE_SIZE != s.file_offset % PAGE_SIZE
+            || (s.vaddr ^ s.file_offset) & (PAGE_SIZE - 1) != 0
             || (s.flags.write && s.flags.execute)
             || s.page_start() != page_start
             || s.page_end() != page_end
@@ -1391,11 +1392,18 @@ mod tests {
 /// Images are fixed-size byte arrays, so every loop is bounded by how many
 /// headers, dynamic entries, or RELA entries fit in one; each harness derives
 /// its unwind bound from that.
+///
+/// Each harness keeps its symbolic input to what its property is about, so
+/// cbmc stays within a few GB: fully symbolic images larger than a header and
+/// one program header, or symbolic dynamic sections walked alongside the
+/// invariant checker, took it past 8 GB. The seeded mutation test above covers
+/// arbitrary whole images on the host.
 #[cfg(kani)]
 mod kani_proofs {
     use super::{
-        ET_DYN, ElfError, LoadPlan, LoadSegment, PAGE_SIZE, PF_R, PF_W, PF_X, PT_DYNAMIC, PT_LOAD,
-        ProgramHeader, SegmentFlags, plan_invariants_hold, write_header,
+        DT_NULL, DT_RELA, DT_RELAENT, DT_RELASZ, ET_DYN, ElfError, LoadPlan, LoadSegment,
+        PAGE_SIZE, PF_R, PF_W, PF_X, PT_DYNAMIC, PT_LOAD, ProgramHeader, SegmentFlags,
+        plan_invariants_hold, write_header,
     };
 
     /// The window the harnesses load into: the lower half, less page zero.
@@ -1404,7 +1412,7 @@ mod kani_proofs {
     /// Returns an arbitrary page-aligned load base.
     fn any_base() -> u64 {
         let base: u64 = kani::any();
-        kani::assume(base % PAGE_SIZE == 0);
+        kani::assume(base & (PAGE_SIZE - 1) == 0);
         base
     }
 
@@ -1417,12 +1425,12 @@ mod kani_proofs {
         image
     }
 
-    /// Parsing any 176 bytes, room for a file header and two program headers,
+    /// Parsing any 120 bytes, room for a file header and one program header,
     /// at any page-aligned base never panics, and every plan it accepts holds.
     #[kani::proof]
-    #[kani::unwind(12)] // a dynamic section in 176 bytes has at most 11 entries, plus one
+    #[kani::unwind(9)] // a dynamic section in 120 bytes has at most 7 entries, plus one
     fn parse_never_panics_and_accepted_plans_hold() {
-        let image: [u8; 176] = kani::any();
+        let image: [u8; 120] = kani::any();
         let base = any_base();
         if let Ok(plan) = LoadPlan::parse(&image, base, WINDOW) {
             assert!(plan_invariants_hold(&plan, &image, WINDOW));
@@ -1430,17 +1438,17 @@ mod kani_proofs {
         }
     }
 
-    /// For any dynamic section and any two RELA entries in an otherwise valid
-    /// image, at any page-aligned base, every relocation of an accepted plan
-    /// writes eight bytes inside a writable segment and stores the base plus
-    /// its addend.
+    /// For any two RELA entries in an otherwise valid image, at any
+    /// page-aligned base, every relocation of an accepted plan writes eight
+    /// bytes inside a writable segment and stores the base plus its addend,
+    /// and a relocation outside every writable segment is refused.
     #[kani::proof]
-    #[kani::unwind(6)] // five dynamic entries fit in 0x50 bytes, five RELA entries in 0x80, plus one
+    #[kani::unwind(5)] // four dynamic entries written, two RELA entries, three headers, plus one
     fn relocations_land_in_writable_segments() {
         let mut image = [0; 0x180];
         write_header(&mut image, ET_DYN, 0x10, 3);
         // code over the headers, then data whose file bytes are the dynamic
-        // section and the table.
+        // section (at 0x1100) and the table (at 0x1150).
         let code = ProgramHeader {
             kind: PT_LOAD,
             flags: PF_R | PF_X,
@@ -1463,8 +1471,13 @@ mod kani_proofs {
         code.write(&mut image, 64);
         data.write(&mut image, 120);
         dynamic.write(&mut image, 176);
-        let tail: [u8; 0x80] = kani::any();
-        image[0x100..].copy_from_slice(&tail);
+        for (i, (tag, value)) in [(DT_RELA, 0x1150_u64), (DT_RELASZ, 48), (DT_RELAENT, 24), (DT_NULL, 0)].iter().enumerate() {
+            let at = 0x100 + i * 16;
+            image[at..at + 8].copy_from_slice(&tag.to_le_bytes());
+            image[at + 8..at + 16].copy_from_slice(&value.to_le_bytes());
+        }
+        let table: [u8; 48] = kani::any();
+        image[0x150..0x180].copy_from_slice(&table);
         let base = any_base();
         let Ok(plan) = LoadPlan::parse(&image, base, WINDOW) else {
             return;
@@ -1473,7 +1486,6 @@ mod kani_proofs {
             let holds = |s: &LoadSegment| s.flags.write && s.vaddr <= r.target && r.target + 8 <= s.vaddr + s.mem_size;
             assert!(plan.segments().iter().any(holds));
         }
-        assert!(plan_invariants_hold(&plan, &image, WINDOW));
         kani::cover!(plan.relocation_count() == 2, "both RELA entries are applied");
     }
 
@@ -1522,15 +1534,16 @@ mod kani_proofs {
         let code_size: u64 = kani::any();
         let data_vaddr: u64 = kani::any();
         let data_size: u64 = kani::any();
-        // keep both inside the window, so nothing but an overlap can refuse them.
-        kani::assume(code_vaddr >= PAGE_SIZE && code_vaddr < 1 << 40);
-        kani::assume(data_vaddr >= PAGE_SIZE && data_vaddr < 1 << 40);
+        // keep both inside the window, so nothing but an overlap can refuse
+        // them, and their offsets within a page small, so the image stays small.
+        kani::assume(code_vaddr >= PAGE_SIZE && code_vaddr < 1 << 40 && code_vaddr & 0xfff < 0x40);
+        kani::assume(data_vaddr >= PAGE_SIZE && data_vaddr < 1 << 40 && data_vaddr & 0xfff < 0x40);
         kani::assume(code_size > 0 && code_size < 1 << 40 && data_size > 0 && data_size < 1 << 40);
         // no file bytes, at a file offset that agrees with the address within a page.
         let code = ProgramHeader {
             kind: PT_LOAD,
             flags: PF_R | PF_X,
-            offset: code_vaddr % PAGE_SIZE,
+            offset: code_vaddr & 0xfff,
             vaddr: code_vaddr,
             file_size: 0,
             mem_size: code_size,
@@ -1538,16 +1551,16 @@ mod kani_proofs {
         };
         let data = ProgramHeader {
             flags: PF_R | PF_W,
-            offset: data_vaddr % PAGE_SIZE,
+            offset: data_vaddr & 0xfff,
             vaddr: data_vaddr,
             mem_size: data_size,
             ..code
         };
-        let image: [u8; 0x1000] = two_segments(code, data, code_vaddr);
+        let image: [u8; 0xb0] = two_segments(code, data, code_vaddr);
         let result = LoadPlan::parse(&image, 0, WINDOW);
         // the pages holding each segment's first and last bytes.
-        let code_pages = (code_vaddr / PAGE_SIZE, (code_vaddr + code_size - 1) / PAGE_SIZE);
-        let data_pages = (data_vaddr / PAGE_SIZE, (data_vaddr + data_size - 1) / PAGE_SIZE);
+        let code_pages = (code_vaddr >> 12, (code_vaddr + code_size - 1) >> 12);
+        let data_pages = (data_vaddr >> 12, (data_vaddr + data_size - 1) >> 12);
         let overlap = code_pages.0 <= data_pages.1 && data_pages.0 <= code_pages.1;
         assert!(matches!(result, Err(ElfError::Overlap)) == overlap);
         assert!(result.is_ok() == !overlap);

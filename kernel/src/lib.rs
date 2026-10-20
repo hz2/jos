@@ -27,6 +27,8 @@ pub mod clock;
 #[cfg(target_arch = "x86_64")]
 pub mod cpu_local;
 #[cfg(target_arch = "x86_64")]
+pub mod exceptions;
+#[cfg(target_arch = "x86_64")]
 pub mod executor;
 #[cfg(target_arch = "x86_64")]
 pub mod gdt;

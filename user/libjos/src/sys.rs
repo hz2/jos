@@ -319,3 +319,26 @@ pub fn thread_exit() -> ! {
         core::hint::spin_loop();
     }
 }
+
+/// `tcb_set_fault_handler(tcb, fault_slot)`: sends the thread's faults, as
+/// calls, to the endpoint in slot `fault_slot` of the thread's own
+/// capability space.
+///
+/// # Errors
+///
+/// Why the TCB capability was refused, or
+/// [`IpcSyscallError::SlotOutOfRange`].
+pub fn tcb_set_fault_handler(tcb: Slot, fault_slot: Slot) -> Result<(), IpcSyscallError> {
+    status_call(Syscall::TcbSetFaultHandler, tcb, fault_slot, 0)
+}
+
+/// Returns the four words of the message this thread received last, from
+/// its IPC buffer: word 0 also came back in `rax`, words 1 to 3 only arrive
+/// here.
+#[must_use]
+pub fn received_words() -> [u64; 4] {
+    let buffer = crate::console::ipc_buffer() as *const jos_core::ipc_buffer::IpcBuffer;
+    // SAFETY: the thread block convention maps this thread's IPC buffer at that
+    // address, and the kernel writes it only during this thread's own syscalls.
+    unsafe { (*buffer).mrs }
+}

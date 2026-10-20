@@ -11,9 +11,11 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::abi::{
-    BootInfo, IpcSyscallError, MAX_BOOT_UNTYPED, RetypeSyscallError, map_flags, root_slot,
+    BootInfo, IpcSyscallError, MAX_BOOT_UNTYPED, MintSyscallError, RetypeSyscallError, map_flags,
+    root_slot,
 };
 use crate::sys::{self, Slot};
+use jos_core::cap_rights::Rights;
 use jos_core::untyped::ObjectType;
 
 /// Why a helper could not do what it was asked.
@@ -27,6 +29,8 @@ pub enum Error {
     Retype(RetypeSyscallError),
     /// A syscall refused.
     Ipc(IpcSyscallError),
+    /// A mint refused.
+    Mint(MintSyscallError),
 }
 
 impl From<IpcSyscallError> for Error {
@@ -154,4 +158,19 @@ pub fn map_new_page(vaddr: u64) -> Result<Slot, Error> {
         return Err(e);
     }
     Ok(frame)
+}
+
+/// Mints a copy of `src` (see [`sys::mint`]) and claims the slot the kernel
+/// chose for it, so the allocator never hands that slot out. Release the copy
+/// with [`release`] before the capability it came from.
+///
+/// # Errors
+///
+/// Why the mint was refused.
+pub fn mint(src: Slot, rights: Rights, badge: u64) -> Result<Slot, Error> {
+    let slot = sys::mint(src, rights, badge).map_err(Error::Mint)?;
+    if slot < 64 {
+        FREE_SLOTS.fetch_and(!(1 << slot), Ordering::Relaxed);
+    }
+    Ok(slot)
 }

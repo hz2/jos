@@ -163,11 +163,17 @@ pub enum Syscall {
     /// takes nothing from anyone else. Whoever holds its capabilities still
     /// revokes them to reclaim the slots. Does not return.
     ThreadExit = 24,
+    /// `tcb_set_fault_handler(tcb_slot, fault_slot) -> 0 | errno`. Sends the
+    /// thread's faults to the endpoint in slot `fault_slot` of the thread's own
+    /// capability space, as calls carrying a [`fault_message`]: the slot is
+    /// looked up when a fault happens, and the capability there must name an
+    /// endpoint and carry `WRITE`. Needs `WRITE` on the TCB capability.
+    TcbSetFaultHandler = 25,
 }
 
 impl Syscall {
     /// Every syscall, in number order; the numbers are dense from 0.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Add,
         Self::Exit,
         Self::IpcSend,
@@ -193,6 +199,7 @@ impl Syscall {
         Self::ConsoleWrite,
         Self::MachineHalt,
         Self::ThreadExit,
+        Self::TcbSetFaultHandler,
     ];
 
     /// Maps a raw syscall number to its enum form, or `None` if it is unknown.
@@ -726,6 +733,88 @@ impl ModuleDesc {
 fn until_nul(bytes: &[u8]) -> &[u8] {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     &bytes[..end]
+}
+
+/// The exceptions a thread can raise, by vector: what the first word of a
+/// [`fault_message`] says happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum FaultKind {
+    /// `#DE`: division by zero, or a quotient too large.
+    DivideError = 0,
+    /// `#DB`: a debug trap.
+    Debug = 1,
+    /// `#BP`: an `int3`.
+    Breakpoint = 3,
+    /// `#OF`: an `into` with the overflow flag set.
+    Overflow = 4,
+    /// `#BR`: a `bound` check failed.
+    BoundRange = 5,
+    /// `#UD`: an instruction the CPU does not accept.
+    InvalidOpcode = 6,
+    /// `#NM`: the FPU used while unavailable.
+    DeviceNotAvailable = 7,
+    /// `#TS`: a bad TSS.
+    InvalidTss = 10,
+    /// `#NP`: a segment that is not present.
+    SegmentNotPresent = 11,
+    /// `#SS`: a stack segment fault.
+    StackSegment = 12,
+    /// `#GP`: a general protection fault.
+    GeneralProtection = 13,
+    /// `#PF`: a page fault; the message carries the address.
+    PageFault = 14,
+    /// `#MF`: an x87 floating point error.
+    X87 = 16,
+    /// `#AC`: an unaligned access with alignment checking on.
+    AlignmentCheck = 17,
+    /// `#XM`: a SIMD floating point error.
+    Simd = 19,
+    /// `#VE`: a virtualization exception.
+    Virtualization = 20,
+    /// `#CP`: a control protection fault.
+    ControlProtection = 21,
+}
+
+impl FaultKind {
+    /// Every kind, in vector order.
+    pub const ALL: [Self; 17] = [
+        Self::DivideError,
+        Self::Debug,
+        Self::Breakpoint,
+        Self::Overflow,
+        Self::BoundRange,
+        Self::InvalidOpcode,
+        Self::DeviceNotAvailable,
+        Self::InvalidTss,
+        Self::SegmentNotPresent,
+        Self::StackSegment,
+        Self::GeneralProtection,
+        Self::PageFault,
+        Self::X87,
+        Self::AlignmentCheck,
+        Self::Simd,
+        Self::Virtualization,
+        Self::ControlProtection,
+    ];
+
+    /// Returns the kind of exception `vector` is, or `None` for a vector a
+    /// thread cannot raise.
+    #[must_use]
+    pub fn from_vector(vector: u64) -> Option<Self> {
+        Self::ALL.iter().copied().find(|kind| *kind as u64 == vector)
+    }
+}
+
+/// Builds the message a fault is delivered as: word 0 the vector (a
+/// [`FaultKind`]), word 1 the address a page fault was about (zero for other
+/// faults), word 2 the faulting instruction, word 3 the error code the CPU
+/// pushed (zero for vectors without one). The handler receives it like a
+/// call, with the badge of the fault endpoint capability, and answers through
+/// its reply object to resume the thread at that instruction.
+#[must_use]
+pub fn fault_message(vector: u64, address: u64, rip: u64, error_code: u64) -> crate::endpoint::Message {
+    crate::endpoint::Message::new(0, [vector, address, rip, error_code])
 }
 
 /// Packs the third argument of [`Syscall::CNodeCopy`]: the destination slot in

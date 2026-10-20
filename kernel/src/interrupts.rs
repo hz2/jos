@@ -37,7 +37,6 @@ use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
-use crate::serial_println;
 
 /// First vector the primary PIC is remapped to. Vectors 0x00..0x20 are CPU
 /// exceptions, so the 16 PIC IRQs are mapped to 0x20..0x30.
@@ -98,14 +97,15 @@ pub fn init_idt() {
     // SAFETY: single-threaded boot context; nothing else references IDT yet.
     unsafe {
         let idt = &mut *core::ptr::addr_of_mut!(IDT);
-        idt.breakpoint.set_handler_fn(breakpoint_handler);
+        // every exception a thread can raise goes to the exceptions module,
+        // which tells a kernel bug from a thread's fault.
+        crate::exceptions::install(idt);
         // route the double-fault handler onto its own IST stack so a kernel
         // stack overflow is handled instead of triple-faulting. the gdt module
         // must have installed the TSS (init_gdt) before this runs.
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
-        idt.page_fault.set_handler_fn(page_fault_handler);
         // hardware interrupt handlers (post 07).
         // timer uses the naked preemption stub (sched module) so it can save
         // all GPRs and context-switch between ring-3 threads.
@@ -148,21 +148,6 @@ unsafe fn conditional_swapgs(cs: u64) {
     }
 }
 
-/// Breakpoint (#BP) is a trap: the cpu resumes at the instruction after int3
-/// once the handler returns, so we just log and continue. The x86-interrupt abi
-/// makes the compiler emit the correct prologue/epilogue (it preserves all
-/// registers and uses iretq), so the handler is an ordinary safe fn.
-extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    let cs = stack_frame.code_segment;
-    // SAFETY: entry swap; no GS access before this point.
-    unsafe { conditional_swapgs(cs); }
-    // pass stack_frame as an explicit arg: serial_println! expands through
-    // concat!, which blocks inline {var} capture in the format string.
-    serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
-    // SAFETY: exit swap; restores user GS before the implicit iretq.
-    unsafe { conditional_swapgs(cs); }
-}
-
 /// Double fault (#DF) fires when handling one exception triggers another (the
 /// classic case: a stack overflow whose page fault then faults again). It is not
 /// recoverable, so the handler is diverging; the x86_64 crate types the error
@@ -173,29 +158,6 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{stack_frame:#?}");
-}
-
-/// Page fault (#PF). cr2 holds the faulting address and the error code says why
-/// (present/write/user bits). We report and halt rather than recover; this is a
-/// diagnostic so paging bugs show the faulting address instead of escalating to
-/// an opaque double fault.
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: x86_64::structures::idt::PageFaultErrorCode,
-) {
-    let cs = stack_frame.code_segment;
-    // SAFETY: entry swap; no GS access before this point.
-    unsafe { conditional_swapgs(cs); }
-    let addr = x86_64::registers::control::Cr2::read();
-    serial_println!("EXCEPTION: PAGE FAULT");
-    serial_println!("  accessed address: {:?}", addr);
-    serial_println!("  error code: {:?}", error_code);
-    serial_println!("{:#?}", stack_frame);
-    // a page fault is fatal and jos only runs under qemu: fail the run rather
-    // than hang it. hlt_loop is the fallback if the exit device is absent.
-    // no exit swap needed (GS state is irrelevant once the kernel stops).
-    crate::exit_qemu(crate::QemuExitCode::Failed);
-    crate::hlt_loop();
 }
 
 /// Keyboard (IRQ1, vector 33). The handler does the minimum bounded work:

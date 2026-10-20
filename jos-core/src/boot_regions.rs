@@ -379,23 +379,32 @@ mod tests {
 
 /// Bounded proofs of the free-memory arithmetic (BOOT-2).
 ///
-/// Every input is a fully symbolic `u64`, `u64::MAX` included, so the solver
-/// covers every order, overlap, and rounding case of two available and two
-/// reserved ranges. A page is checked through an arbitrary page address `p`,
+/// Every input is a symbolic address below 4 GiB, so the solver covers every
+/// order, overlap, and rounding case of one available and one reserved range
+/// there; the randomized oracle test covers more ranges and the full address
+/// space. A page is checked through an arbitrary page address `p`,
 /// which stands for every page at once. The harnesses state "free" from the
 /// raw inputs, not through the rounding helpers under test.
 #[cfg(kani)]
 mod kani_proofs {
     use super::{PAGE_SIZE, PhysRange, usable_regions};
 
-    /// Returns an arbitrary range, empty and inverted ones included.
+    /// Addresses the harnesses consider: below 4 GiB, which keeps cbmc within
+    /// a few GB (unbounded ranges took it past 8 GB). The randomized oracle
+    /// test above covers more ranges over a whole address space.
+    const BOUND: u64 = 1 << 32;
+
+    /// Returns an arbitrary range below [`BOUND`], empty and inverted ones
+    /// included.
     fn any_range() -> PhysRange {
-        PhysRange { start: kani::any(), end: kani::any() }
+        let r = PhysRange { start: kani::any(), end: kani::any() };
+        kani::assume(r.start < BOUND && r.end < BOUND);
+        r
     }
 
     /// Returns `true` if the page at `p` lies wholly inside `r`.
     fn page_inside(p: u64, r: PhysRange) -> bool {
-        r.start <= p && p.checked_add(PAGE_SIZE).is_some_and(|end| end <= r.end)
+        r.start <= p && p + PAGE_SIZE <= r.end
     }
 
     /// Returns `true` if the page at `p` shares a byte with `r`.
@@ -403,44 +412,42 @@ mod kani_proofs {
         r.start < r.end && r.start <= p + (PAGE_SIZE - 1) && p < r.end
     }
 
-    /// Checks every BOOT-2 property of `usable_regions::<N>` on arbitrary
-    /// inputs and returns the dropped byte count.
+    /// Checks every BOOT-2 property of `usable_regions::<N>` for one available
+    /// and one reserved range, and returns the dropped byte count.
     fn check<const N: usize>() -> u64 {
-        let available = [any_range(), any_range()];
-        let reserved = [any_range(), any_range()];
+        let available = [any_range()];
+        let reserved = [any_range()];
         let limit: u64 = kani::any();
+        kani::assume(limit < BOUND);
         let list = usable_regions::<N>(available, &reserved, limit);
         let out = list.as_slice();
         for (i, r) in out.iter().enumerate() {
             assert!(r.start < r.end && r.end <= limit);
-            assert!(r.start % PAGE_SIZE == 0 && r.end % PAGE_SIZE == 0);
+            assert!(r.start & (PAGE_SIZE - 1) == 0 && r.end & (PAGE_SIZE - 1) == 0);
             assert!(i == 0 || out[i - 1].end < r.start);
         }
         let p: u64 = kani::any();
-        kani::assume(p % PAGE_SIZE == 0);
+        kani::assume(p < BOUND && p & (PAGE_SIZE - 1) == 0);
         let covered = out.iter().any(|r| r.start <= p && p < r.end);
-        let free = (page_inside(p, available[0]) || page_inside(p, available[1]))
-            && p.checked_add(PAGE_SIZE).is_some_and(|end| end <= limit)
-            && !page_meets(p, reserved[0])
-            && !page_meets(p, reserved[1]);
+        let free = page_inside(p, available[0]) && p + PAGE_SIZE <= limit && !page_meets(p, reserved[0]);
         assert!(!covered || free);
         assert!(list.dropped_bytes() != 0 || !free || covered);
         list.dropped_bytes()
     }
 
     /// The result holds exactly the free pages, as sorted maximal runs, and
-    /// four ranges always suffice for two available and two reserved ones.
+    /// two ranges always suffice for one available and one reserved one.
     #[kani::proof]
-    #[kani::unwind(6)] // the cursor walk of one available range takes at most 2 * 2 + 1 = 5 steps
+    #[kani::unwind(5)] // the cursor walk of one available range takes at most 3 steps, plus one
     fn usable_regions_are_exactly_the_free_pages() {
-        assert!(check::<4>() == 0);
+        assert!(check::<2>() == 0);
     }
 
     /// With too little room the list still holds only free pages, sorted with
     /// gaps, and still holds every free page when it reports nothing dropped.
     #[kani::proof]
-    #[kani::unwind(6)] // as above
+    #[kani::unwind(5)] // as above
     fn a_full_list_stays_sound() {
-        check::<2>();
+        check::<1>();
     }
 }

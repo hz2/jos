@@ -13,6 +13,7 @@
 //! userspace asks for.
 
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use jos_core::abi::{
     BOOT_INFO_MAGIC, BOOT_INFO_VERSION, BootInfo, MAX_BOOT_MODULES, MAX_BOOT_UNTYPED,
@@ -24,7 +25,7 @@ use jos_core::elf::{ElfError, LoadPlan, PAGE_SIZE};
 use jos_core::multiboot2::BootInformation;
 
 use crate::arch::x86_64::multiboot2;
-use crate::cap::{self, CSPACE_SLOTS, ObjectId, SavedContext, TcbState, UntypedRegion};
+use crate::cap::{self, CSPACE_SLOTS, ObjectId, SavedContext, Tcb, TcbState, UntypedRegion};
 use crate::mapping::{self, MapError};
 
 /// Why the root task could not be built.
@@ -82,6 +83,16 @@ fn split_name(cmdline: &[u8]) -> (&[u8], &[u8]) {
         }
         return (word, after.trim_ascii());
     }
+}
+
+/// The root task's TCB once it runs; null before, and in kernel tests, which
+/// start no root task.
+static ROOT_TCB: AtomicPtr<Tcb> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Returns the root task's TCB, or null if no root task runs.
+#[must_use]
+pub fn root_tcb() -> *mut Tcb {
+    ROOT_TCB.load(Ordering::Relaxed)
 }
 
 /// The untyped regions handed to the root task. Each capability names the
@@ -355,6 +366,7 @@ unsafe fn enter(tcb: ObjectId) -> ! {
     // SAFETY: per the contract tcb is live and configured.
     let thread = unsafe { tcb.as_tcb_mut() };
     let ptr = core::ptr::from_mut(thread);
+    ROOT_TCB.store(ptr, Ordering::Relaxed);
     // SAFETY: the TCB lives in untyped memory for the kernel's lifetime, and
     // interrupts are off, as registration and switching require.
     unsafe {

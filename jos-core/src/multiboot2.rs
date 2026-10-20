@@ -159,13 +159,7 @@ impl<'a> BootInformation<'a> {
     /// Returns every boot module, in order. A module tag too short to hold both
     /// addresses is malformed and skipped.
     pub fn modules(self) -> impl Iterator<Item = Module<'a>> {
-        self.tags().filter(|tag| tag.tag_type == TAG_MODULE).filter_map(|tag| {
-            Some(Module {
-                start: read_u32(tag.payload, 0)?,
-                end: read_u32(tag.payload, 4)?,
-                cmdline: until_nul(tag.payload.get(8..)?),
-            })
-        })
+        self.tags().filter(|tag| tag.tag_type == TAG_MODULE).filter_map(|tag| module_from(tag.payload))
     }
 
     /// Returns the payload of the first tag of type `tag_type`.
@@ -240,6 +234,16 @@ pub enum Rsdp<'a> {
     V1(&'a [u8]),
     /// The ACPI 2.0 or later pointer from tag 15, which also locates the XSDT.
     V2(&'a [u8]),
+}
+
+/// Decodes a module tag's payload: the two addresses, then the command line
+/// up to its NUL. A payload too short for both addresses is malformed.
+fn module_from(payload: &[u8]) -> Option<Module<'_>> {
+    Some(Module {
+        start: read_u32(payload, 0)?,
+        end: read_u32(payload, 4)?,
+        cmdline: until_nul(payload.get(8..)?),
+    })
 }
 
 /// Splits a memory map tag's payload into its entries, which follow the 8 bytes
@@ -585,7 +589,7 @@ mod tests {
 /// relative to the array.
 #[cfg(kani)]
 mod kani_proofs {
-    use super::{BootInformation, TAG_END, TAG_MODULE, memory_map_entries};
+    use super::{BootInformation, TAG_END, memory_map_entries, module_from};
 
     /// Decodes the little-endian `u32` at byte `at` of `buf`.
     fn le32(buf: &[u8], at: usize) -> u32 {
@@ -659,33 +663,31 @@ mod kani_proofs {
         assert!(entries.next().is_none());
     }
 
-    /// Every module is decoded from its own tag: the addresses from the first
-    /// 8 payload bytes, and the command line from the bytes after them, up to
-    /// the first NUL or the end of the tag. A tag too short for both addresses
-    /// yields nothing.
+    /// One module tag decodes exactly as the format says: the addresses from
+    /// its first 8 payload bytes, and the command line from the bytes after
+    /// them, up to the first NUL or the end of the payload; a payload too short
+    /// for both addresses yields nothing. With the tag walk proved to stay
+    /// inside the structure, every module's command line lies inside its tag.
+    /// (Walking a whole symbolic structure here took cbmc past 8 GB.)
     #[kani::proof]
-    #[kani::unwind(25)] // a 48-byte structure leaves at most 24 command line bytes to scan
+    #[kani::unwind(18)] // a 24-byte payload leaves at most 16 command line bytes to scan, plus one
     fn module_cmdlines_lie_inside_their_tag() {
-        let buf: [u8; 48] = kani::any();
-        let Ok(info) = BootInformation::parse(&buf) else { return };
-        let mut modules = info.modules();
-        for tag in info.tags() {
-            if tag.tag_type != TAG_MODULE || tag.payload.len() < 8 {
-                continue;
-            }
-            let start = offset_in(&buf, tag.payload);
-            let end = start + tag.payload.len();
-            let Some(module) = modules.next() else { panic!("a module tag was skipped") };
-            assert!(module.start == le32(&buf, start) && module.end == le32(&buf, start + 4));
-            let cmd_at = offset_in(&buf, module.cmdline);
-            let cmd_end = cmd_at + module.cmdline.len();
-            assert!(cmd_at == start + 8 && cmd_end <= end);
-            assert!(cmd_end == end || buf[cmd_end] == 0);
-            let i: usize = kani::any();
-            if i < module.cmdline.len() {
-                assert!(module.cmdline[i] != 0);
-            }
+        let bytes: [u8; 24] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= bytes.len());
+        let payload = &bytes[..len];
+        let Some(module) = module_from(payload) else {
+            assert!(len < 8);
+            return;
+        };
+        assert!(module.start == le32(payload, 0) && module.end == le32(payload, 4));
+        let cmd_at = offset_in(payload, module.cmdline);
+        let cmd_end = cmd_at + module.cmdline.len();
+        assert!(cmd_at == 8 && cmd_end <= len);
+        assert!(cmd_end == len || payload[cmd_end] == 0);
+        let i: usize = kani::any();
+        if i < module.cmdline.len() {
+            assert!(module.cmdline[i] != 0);
         }
-        assert!(modules.next().is_none());
     }
 }

@@ -27,7 +27,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 14] = [
+const CHECKS: [(&str, Check); 18] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -42,6 +42,10 @@ const CHECKS: [(&str, Check); 14] = [
     ("stale_reply_reaches_no_new_thread", stale_reply_reaches_no_new_thread),
     ("nonblocking_send_reaches_a_parked_receiver", nonblocking_send_reaches_a_parked_receiver),
     ("nonblocking_recv_takes_a_parked_sender", nonblocking_recv_takes_a_parked_sender),
+    ("page_fault_reaches_its_handler", page_fault_reaches_its_handler),
+    ("invalid_opcode_reaches_its_handler", invalid_opcode_reaches_its_handler),
+    ("fault_without_a_handler_stops_only_that_thread", fault_without_a_handler_stops_only_that_thread),
+    ("handled_page_fault_resumes_the_thread", handled_page_fault_resumes_the_thread),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -118,7 +122,7 @@ fn object(ty: ObjectType) -> Result<Slot, &'static str> {
     mem::retype(ty).map_err(|e| match e {
         Error::NoSlot => "out of slots",
         Error::NoMemory => "out of untyped memory",
-        Error::Retype(_) | Error::Ipc(_) => "retype refused",
+        Error::Retype(_) | Error::Ipc(_) | Error::Mint(_) => "retype refused",
     })
 }
 
@@ -381,4 +385,147 @@ fn nonblocking_recv_takes_a_parked_sender(_: &BootInfo) -> Result<(), &'static s
     ensure(first == Ok((1, 0)), "the deposited message did not come first")?;
     ensure(second == Ok((55, 0)), "the parked sender's message was not taken")?;
     ensure(done == Ok((DONE, 0)), "the parked sender's send did not complete")
+}
+
+/// A page nothing maps, unless a fault handler maps it: 512 MiB into the
+/// first GiB of user space, clear of the image and the window.
+const FAULT_PAGE: u64 = layout::USER_START + 0x2000_0000;
+
+/// The vector of a page fault, the first word of its fault message.
+const PAGE_FAULT: u64 = 14;
+
+/// The vector of an invalid opcode.
+const INVALID_OPCODE: u64 = 6;
+
+/// Reads the first word of [`FAULT_PAGE`] and reports it on field 0.
+extern "C" fn read_fault_page(arg: u64) {
+    // SAFETY: the read is meant to fault (or, once a handler mapped the page,
+    // to read what it put there); volatile, so it is not optimized away.
+    let word = unsafe { core::ptr::read_volatile(FAULT_PAGE as *const u64) };
+    let _ = sys::send_blocking(field(arg, 0), word);
+}
+
+/// Loads the first word of [`FAULT_PAGE`] with live values in `rax` and
+/// `rdx` across the load, and reports the word on field 0 only if both
+/// survived (a resumed fault must not touch them); otherwise `0xBAD`.
+extern "C" fn load_with_live_registers(arg: u64) {
+    let (rax, rdx, word): (u64, u64, u64);
+    // SAFETY: the load is meant to fault until a handler maps the page; the
+    // block only sets and reads registers and reads that page.
+    unsafe {
+        core::arch::asm!(
+            "mov rax, 0x1111",
+            "mov rdx, 0x2222",
+            "mov rcx, [{page}]",
+            page = in(reg) FAULT_PAGE,
+            out("rax") rax,
+            out("rdx") rdx,
+            out("rcx") word,
+            options(nostack, readonly),
+        );
+    }
+    let report = if rax == 0x1111 && rdx == 0x2222 { word } else { 0xBAD };
+    let _ = sys::send_blocking(field(arg, 0), report);
+}
+
+/// Executes `ud2`, then reports on field 0 (which it should never reach).
+extern "C" fn execute_ud2(arg: u64) {
+    // SAFETY: ud2 raises an invalid-opcode fault and touches nothing else.
+    unsafe { core::arch::asm!("ud2") };
+    let _ = sys::send_blocking(field(arg, 0), 1);
+}
+
+/// A fault a check caught, and what to clean up once it is done.
+struct Caught {
+    /// The fault message's words: vector, address, instruction, error code.
+    words: [u64; 4],
+    /// The badge the fault arrived with.
+    badge: u64,
+    /// The fault endpoint.
+    faults: Slot,
+    /// The badged copy of it the thread's faults went to.
+    badged: Slot,
+    /// The reply object bound to the faulting thread.
+    reply: Slot,
+    /// The thread that faulted.
+    thread: Thread,
+}
+
+impl Caught {
+    /// Starts `entry` with its faults sent to a badged copy of a fresh
+    /// endpoint, and receives the fault with a reply object.
+    fn fault_of(entry: libjos::thread::Entry, report: Slot) -> Result<Self, &'static str> {
+        let faults = object(ObjectType::Endpoint)?;
+        let reply = object(ObjectType::Reply)?;
+        let badged = mem::mint(faults, Rights::ALL, 0xF00).map_err(|_| "mint")?;
+        let thread = Thread::spawn_with(entry, pack(report, 0, 0), 1, Some(badged)).map_err(|_| "spawn")?;
+        let (word, badge) = sys::recv_reply(faults, reply).map_err(|_| "no fault arrived")?;
+        let mut words = sys::received_words();
+        words[0] = word;
+        Ok(Self { words, badge, faults, badged, reply, thread })
+    }
+
+    /// Stops the thread and frees the fault endpoint, its copy, the reply
+    /// object, and `more`.
+    fn clean_up(self, more: &[Slot]) -> Result<(), &'static str> {
+        self.thread.reap();
+        release(&[self.badged, self.faults, self.reply])?;
+        release(more)
+    }
+}
+
+/// A page fault in a thread arrives at its fault endpoint as a call, with the
+/// fault's vector, address, instruction, and error code.
+fn page_fault_reaches_its_handler(_: &BootInfo) -> Result<(), &'static str> {
+    let report = object(ObjectType::Endpoint)?;
+    let caught = Caught::fault_of(read_fault_page, report)?;
+    let (words, badge) = (caught.words, caught.badge);
+    caught.clean_up(&[report])?;
+    ensure(badge == 0xF00, "the fault did not carry the handler's badge")?;
+    ensure(words[0] == PAGE_FAULT, "not a page fault")?;
+    ensure(words[1] == FAULT_PAGE, "wrong fault address")?;
+    ensure(words[2] >= layout::ROOT_IMAGE_BASE && words[2] < layout::ROOT_IMAGE_LIMIT, "the faulting instruction is not in the image")?;
+    // a user-mode read of a page that is not present.
+    ensure(words[3] & 0b111 == 0b100, "wrong error code")
+}
+
+/// An invalid opcode arrives the same way, with no address.
+fn invalid_opcode_reaches_its_handler(_: &BootInfo) -> Result<(), &'static str> {
+    let report = object(ObjectType::Endpoint)?;
+    let caught = Caught::fault_of(execute_ud2, report)?;
+    let words = caught.words;
+    caught.clean_up(&[report])?;
+    ensure(words[0] == INVALID_OPCODE && words[1] == 0, "not an invalid opcode")
+}
+
+/// A thread with no fault handler is stopped by its fault, and nothing else
+/// is: this check keeps running, and the thread never reports.
+fn fault_without_a_handler_stops_only_that_thread(_: &BootInfo) -> Result<(), &'static str> {
+    let report = object(ObjectType::Endpoint)?;
+    let thread = Thread::spawn(read_fault_page, pack(report, 0, 0), 1).map_err(|_| "spawn")?;
+    spin_past_a_tick();
+    let reported = sys::recv(report);
+    thread.reap();
+    release(&[report])?;
+    ensure(reported == Err(IpcSyscallError::WouldBlock), "the faulting thread went on")
+}
+
+/// A handler that maps the missing page and answers resumes the thread at the
+/// faulting instruction, with its registers as they were, and the load now
+/// reads what the handler put there: demand paging from userspace.
+fn handled_page_fault_resumes_the_thread(_: &BootInfo) -> Result<(), &'static str> {
+    let report = object(ObjectType::Endpoint)?;
+    let caught = Caught::fault_of(load_with_live_registers, report)?;
+    let page = mem::map_new_page(FAULT_PAGE).map_err(|_| "map the page")?;
+    // SAFETY: the page was just mapped writable here, and the thread that will
+    // read it is parked until the reply below.
+    unsafe { core::ptr::write_volatile(FAULT_PAGE as *mut u64, 0x77) };
+    let answered = sys::reply(caught.reply, 0);
+    let got = sys::recv_blocking(report);
+    let words = caught.words;
+    sys::unmap(page).map_err(|_| "unmap")?;
+    caught.clean_up(&[page, report])?;
+    ensure(words[0] == PAGE_FAULT, "not a page fault")?;
+    ensure(answered.is_ok(), "the reply was refused")?;
+    ensure(got == Ok((0x77, 0)), "the resumed thread did not read the mapped page")
 }

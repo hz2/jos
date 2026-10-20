@@ -32,6 +32,7 @@
 #[cfg(verus_keep_ghost)]
 pub mod proof;
 
+pub mod abi;
 pub mod bitmap;
 pub mod cap_rights;
 pub mod cap_space;

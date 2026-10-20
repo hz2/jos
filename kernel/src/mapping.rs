@@ -21,13 +21,7 @@ use crate::cap::{ObjectId, ObjectKind, PageTable};
 /// How many mappings the kernel records at once.
 pub const MAX_MAPPINGS: usize = 128;
 
-/// Mapping flags a caller passes in the low bits of a page-aligned address.
-pub mod map_flags {
-    /// Map the frame writable (the capability must carry `WRITE`).
-    pub const WRITE: u64 = 1 << 0;
-    /// Map the frame executable (never together with [`WRITE`]).
-    pub const EXECUTE: u64 = 1 << 1;
-}
+pub use jos_core::abi::map_flags;
 
 /// Every mapping userspace has made, at most one per object.
 static MAPPINGS: Mutex<MappingTable<MAX_MAPPINGS>> = Mutex::new(MappingTable::new());

@@ -104,9 +104,9 @@ pub(super) fn sys_revoke(slot: u64) -> u64 {
 /// Implements [`Syscall::CNodeCopy`].
 pub(super) fn sys_cnode_copy(dest_cnode_slot: u64, src_slot: u64, packed: u64) -> u64 {
     use jos_core::cap_space::CopyError;
-    if packed >> 24 != 0 {
+    let Some((dest_slot, rights)) = jos_core::abi::unpack_cnode_copy(packed) else {
         return IpcSyscallError::BadAddress as u64;
-    }
+    };
     let dest = match resolve_object(
         dest_cnode_slot,
         ObjectKind::CNode,
@@ -122,9 +122,8 @@ pub(super) fn sys_cnode_copy(dest_cnode_slot: u64, src_slot: u64, packed: u64) -
     let Some(src) = usize::try_from(src_slot).ok().and_then(|s| space.ref_at(s)) else {
         return IpcSyscallError::BadCap as u64;
     };
-    // the low 16 bits are the destination slot, the next 8 the rights mask.
-    let dest_slot = (packed & 0xFFFF) as usize;
-    let mask = Rights::from_bits_truncate(packed.to_le_bytes()[2]);
+    let dest_slot = usize::from(dest_slot);
+    let mask = Rights::from_bits_truncate(rights);
     // SAFETY: dest names a live CNode (kind checked above) in a static untyped
     // region; single-CPU syscall path.
     let dest_space = unsafe { dest.as_cnode_mut() };
@@ -146,9 +145,7 @@ pub(super) fn sys_cnode_copy(dest_cnode_slot: u64, src_slot: u64, packed: u64) -
 /// primitives, so SYS_INVOKE(Endpoint, Send/Recv) is equivalent to the dedicated
 /// IPC syscalls, proving the generic dispatch path.
 pub(super) fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
-    // endpoint method labels.
-    const ENDPOINT_SEND: u64 = 0;
-    const ENDPOINT_RECV: u64 = 1;
+    use jos_core::abi::invoke_method::{ENDPOINT_RECV, ENDPOINT_SEND};
     let err = |e: InvokeError| e as u64 | IPC_ERR_FLAG;
 
     let Some(space) = current_cspace() else {

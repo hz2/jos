@@ -40,6 +40,8 @@ pub mod keyboard;
 pub mod mapping;
 #[cfg(target_arch = "x86_64")]
 pub mod memory;
+#[cfg(target_arch = "x86_64")]
+pub mod rootserver;
 pub mod serial;
 #[cfg(target_arch = "x86_64")]
 pub mod sched;

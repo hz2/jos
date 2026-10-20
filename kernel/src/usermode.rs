@@ -245,3 +245,80 @@ pub unsafe fn enter_user_mode_with_arg(entry: VirtAddr, stack_top: VirtAddr, arg
         );
     }
 }
+
+/// Enters ring 3 with every register taken from `context`: the general
+/// registers, and the `rip`, `rsp`, `rflags`, `cs`, and `ss` an `iretq`
+/// restores. Unlike [`enter_user_mode_with_arg`], nothing the kernel had in a
+/// register leaks into user mode.
+///
+/// # Safety
+///
+/// `context` must hold ring-3 selectors from the loaded GDT, a user-accessible
+/// `rip` and `rsp` in the active address space, and `rflags` with only the
+/// bits user code may set. Interrupts must be disabled, and the per-CPU block
+/// and TSS `rsp0` must name this thread's kernel stack (`switch_to`), so the
+/// first syscall or interrupt lands there.
+pub unsafe fn enter_context(context: &crate::cap::SavedContext) -> ! {
+    use crate::cap::SavedContext;
+    use core::mem::offset_of;
+    use x86_64::instructions::segmentation::{DS, ES, Segment};
+
+    let sel = gdt::selectors();
+    // SAFETY: as in enter_user_mode_with_arg: a valid user data selector from
+    // the loaded gdt, and segment bases are 0 in long mode.
+    unsafe {
+        DS::set_reg(sel.user_data);
+        ES::set_reg(sel.user_data);
+    }
+    // SAFETY: the pushes build a well-formed iretq frame from the context, then
+    // every general register is loaded from it, rdi (the pointer) last; per the
+    // contract the frame names ring-3 code and stack, so iretq drops to ring 3
+    // and never returns.
+    unsafe {
+        core::arch::asm!(
+            "push qword ptr [rdi + {ss}]",
+            "push qword ptr [rdi + {rsp}]",
+            "push qword ptr [rdi + {rflags}]",
+            "push qword ptr [rdi + {cs}]",
+            "push qword ptr [rdi + {rip}]",
+            "mov rax, [rdi + {rax}]",
+            "mov rbx, [rdi + {rbx}]",
+            "mov rcx, [rdi + {rcx}]",
+            "mov rdx, [rdi + {rdx}]",
+            "mov rsi, [rdi + {rsi}]",
+            "mov rbp, [rdi + {rbp}]",
+            "mov r8, [rdi + {r8}]",
+            "mov r9, [rdi + {r9}]",
+            "mov r10, [rdi + {r10}]",
+            "mov r11, [rdi + {r11}]",
+            "mov r12, [rdi + {r12}]",
+            "mov r13, [rdi + {r13}]",
+            "mov r14, [rdi + {r14}]",
+            "mov r15, [rdi + {r15}]",
+            "mov rdi, [rdi + {rdi}]",
+            "iretq",
+            in("rdi") core::ptr::from_ref(context),
+            ss = const offset_of!(SavedContext, ss),
+            rsp = const offset_of!(SavedContext, rsp),
+            rflags = const offset_of!(SavedContext, rflags),
+            cs = const offset_of!(SavedContext, cs),
+            rip = const offset_of!(SavedContext, rip),
+            rax = const offset_of!(SavedContext, rax),
+            rbx = const offset_of!(SavedContext, rbx),
+            rcx = const offset_of!(SavedContext, rcx),
+            rdx = const offset_of!(SavedContext, rdx),
+            rsi = const offset_of!(SavedContext, rsi),
+            rbp = const offset_of!(SavedContext, rbp),
+            r8 = const offset_of!(SavedContext, r8),
+            r9 = const offset_of!(SavedContext, r9),
+            r10 = const offset_of!(SavedContext, r10),
+            r11 = const offset_of!(SavedContext, r11),
+            r12 = const offset_of!(SavedContext, r12),
+            r13 = const offset_of!(SavedContext, r13),
+            r14 = const offset_of!(SavedContext, r14),
+            r15 = const offset_of!(SavedContext, r15),
+            rdi = const offset_of!(SavedContext, rdi),
+            options(noreturn),
+        );
+    }
+}

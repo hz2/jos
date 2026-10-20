@@ -1,0 +1,16 @@
+# userspace builds for the bare-metal x86_64-unknown-none target: soft-float
+# and static PIE, so the kernel (or a userspace loader) applies the image's
+# relocations when it loads it. there is no prebuilt standard library for the
+# target in the pinned toolchain, so core and alloc are built from source, as
+# for the kernel.
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+# the target defaults to the kernel code model, which assumes the image sits
+# in the top 2 GiB; user images live in the lower half.
+rustflags = ["-C", "code-model=small"]

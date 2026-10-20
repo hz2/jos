@@ -1,16 +1,19 @@
 //! Physical memory management: page-table access and frame allocation.
 //!
-//! This is blog_os posts 08-09, adapted to jos's setup. The big divergence:
-//! blog_os gets a complete physical-memory map at a `physical_memory_offset`
-//! from the bootloader crate. Our trampoline instead identity-maps the first
-//! 1 GiB (phys == virt there), so we use an `OffsetPageTable` with offset 0,
-//! which is exactly an identity-mapped page-table walker.
+//! The trampoline identity-maps the first 1 GiB (phys == virt there), so an
+//! `OffsetPageTable` with offset 0 is exactly an identity-mapped page-table
+//! walker.
 //!
-//! Frame allocation is bootstrapped by `BootstrapFrameAllocator`, a stateless
-//! iterator over the multiboot2 usable regions (no backing storage needed,
-//! which solves the chicken-and-egg with the heap). Once the heap is live the
-//! verified `jos_core` bitmap allocator can take over.
+//! Which physical memory is free is decided once, by [`plan_memory`]: the
+//! available areas of the multiboot2 memory map minus the low megabyte, the
+//! kernel image, the info structure, and every boot module, clipped to the
+//! identity map. That arithmetic is `jos_core::boot_regions`, Kani-proved. The
+//! [`BootstrapFrameAllocator`] hands out frames from the plan for paging and
+//! the heap; whatever it has not handed out becomes the root task's untyped
+//! memory.
 
+use jos_core::boot_regions::{PhysRange, RegionList, usable_regions};
+use jos_core::multiboot2::{BootInformation, MEMORY_AVAILABLE};
 use x86_64::structures::paging::{
     FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB,
 };
@@ -18,6 +21,7 @@ use x86_64::registers::control::Cr3;
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::arch::x86_64::multiboot2;
+use crate::cap::IDENTITY_MAPPED_LIMIT;
 
 /// Returns a mutable reference to the active level-4 page table.
 ///
@@ -54,10 +58,9 @@ pub unsafe fn init_mapper() -> OffsetPageTable<'static> {
     unsafe { OffsetPageTable::new(l4, VirtAddr::new(0)) }
 }
 
-/// First physical address the frame allocator may hand out. Everything below
-/// is reserved: the trampoline page tables (at 0x1000), real-mode/BIOS data,
-/// and the kernel image (loaded at 1 MiB). We round the kernel end up to a
-/// frame boundary.
+/// The end of the kernel image, rounded up to a frame. Everything below it is
+/// in use: real-mode and BIOS data, the trampoline's page tables at 0x1000,
+/// and the kernel itself, loaded at 1 MiB.
 fn reserved_end() -> u64 {
     unsafe extern "C" {
         /// Defined by link.ld at the end of the kernel image.
@@ -68,101 +71,119 @@ fn reserved_end() -> u64 {
     (kernel_end + 0xFFF) & !0xFFF
 }
 
-/// A frame allocator that hands out 4 KiB frames from the multiboot2 usable
-/// regions, in order, never reusing one. Used to bootstrap paging and the heap
-/// before the verified bitmap allocator (which needs heap storage) is online.
+/// How many free ranges a [`MemoryPlan`] tracks.
+pub const MAX_REGIONS: usize = 32;
+
+/// The physical memory that is free at boot.
+pub struct MemoryPlan {
+    /// The free ranges, page aligned and inside the identity map.
+    pub free: RegionList<MAX_REGIONS>,
+    /// Bytes of available memory above the identity map, which the kernel
+    /// cannot reach yet and so leaves out.
+    pub ignored: u64,
+}
+
+/// Works out which physical memory is free: every available area of the
+/// memory map, minus everything below the end of the kernel image, the info
+/// structure itself (at `info_range`), and the span holding the boot modules,
+/// below the identity-map limit.
+#[must_use]
+pub fn plan_memory(info: BootInformation<'_>, info_range: PhysRange) -> MemoryPlan {
+    // the modules usually sit back to back after the kernel; reserving the span
+    // that holds them all covers any number of them.
+    let mut modules = PhysRange { start: u64::MAX, end: 0 };
+    for module in info.modules() {
+        modules.start = modules.start.min(u64::from(module.start));
+        modules.end = modules.end.max(u64::from(module.end));
+    }
+    let reserved = [PhysRange { start: 0, end: reserved_end() }, info_range, modules];
+    let available = || {
+        info.memory_map()
+            .filter(|area| area.area_type == MEMORY_AVAILABLE)
+            .map(|area| PhysRange { start: area.base, end: area.base.saturating_add(area.length) })
+    };
+    let free = usable_regions(available(), &reserved, IDENTITY_MAPPED_LIMIT);
+    let ignored = available()
+        .map(|area| area.end.saturating_sub(area.start.max(IDENTITY_MAPPED_LIMIT)))
+        .fold(0_u64, u64::saturating_add);
+    if free.dropped_bytes() != 0 {
+        crate::serial_println!(
+            "WARNING: the memory map needs more than {} free ranges; {} bytes left out",
+            MAX_REGIONS,
+            free.dropped_bytes()
+        );
+    }
+    MemoryPlan { free, ignored }
+}
+
+/// A frame allocator that hands out 4 KiB frames from the free ranges of a
+/// [`MemoryPlan`], in order, never reusing one. It bootstraps paging and the
+/// heap; what it has not handed out ([`remaining`](Self::remaining)) becomes
+/// untyped memory.
 pub struct BootstrapFrameAllocator {
-    /// Usable regions, clipped to frame boundaries, as (start, end) pairs.
-    regions: [(u64, u64); MAX_REGIONS],
+    /// The free ranges, page aligned.
+    regions: [PhysRange; MAX_REGIONS],
+    /// How many of `regions` are in use.
     region_count: usize,
-    /// Index of the region we are currently handing frames out of.
+    /// Index of the region frames are being handed out of.
     current: usize,
-    /// Next frame address to return within the current region.
+    /// Next frame address to hand out within the current region.
     next: u64,
 }
 
-const MAX_REGIONS: usize = 32;
-
 impl BootstrapFrameAllocator {
-    /// Builds the allocator from the multiboot2 memory map, skipping all frames
-    /// below the kernel image (so it never collides with the kernel, the boot
-    /// page tables, or the multiboot2 info structure).
+    /// Builds the allocator from the multiboot2 info structure at `info_ptr`,
+    /// with the reservations [`plan_memory`] makes.
+    ///
+    /// # Panics
+    ///
+    /// If the info structure is malformed: without a memory map there is no
+    /// memory to hand out.
     ///
     /// # Safety
     ///
     /// `info_ptr` must be the multiboot2 info pointer grub passed to
-    /// `kernel_main`. The frames this allocator returns must be genuinely
-    /// unused, which holds because everything loaded so far sits below the
-    /// reserved boundary.
+    /// `kernel_main`.
     pub unsafe fn new(info_ptr: u32) -> Self {
-        let mut allocator = Self {
-            regions: [(0, 0); MAX_REGIONS],
-            region_count: 0,
-            current: 0,
-            next: 0,
-        };
-
-        // SAFETY: forwarded to the caller's contract on info_ptr.
-        unsafe {
-            multiboot2::for_each_usable_region(info_ptr, |base, len| {
-                if allocator.region_count >= MAX_REGIONS {
-                    // out of region slots: this drops usable RAM. warn rather
-                    // than drop silently, so an over-fragmented memory map is
-                    // visible on the serial log instead of mysteriously short on
-                    // memory. the cue to bump MAX_REGIONS. (QEMU/grub hand us a
-                    // handful of regions, so this is not expected to fire.)
-                    crate::serial_println!(
-                        "WARNING: multiboot2 memory map has more than {} usable regions; \
-                         dropping region at {:#x} (+{:#x}). bump MAX_REGIONS.",
-                        MAX_REGIONS, base, len
-                    );
-                    return;
-                }
-                // clip to frame boundaries: round the start up, the end down.
-                let start = (base + 0xFFF) & !0xFFF;
-                let end = (base + len) & !0xFFF;
-                if end > start {
-                    allocator.regions[allocator.region_count] = (start, end);
-                    allocator.region_count += 1;
-                }
-            });
-        }
-
-        allocator.skip_reserved(reserved_end());
-        allocator
+        // SAFETY: forwarded to this function's contract.
+        let (info, range) = unsafe { multiboot2::boot_information(info_ptr) }
+            .expect("malformed multiboot2 info structure");
+        Self::from_regions(plan_memory(info, range).free.as_slice())
     }
 
-    /// Positions `current`/`next` past the reserved boundary so the first frame
-    /// handed out is the first free frame at or above `boundary`.
-    fn skip_reserved(&mut self, boundary: u64) {
-        while self.current < self.region_count {
-            let (start, end) = self.regions[self.current];
-            if end <= boundary {
-                self.current += 1;
-                continue;
-            }
-            self.next = start.max(boundary);
-            self.next = (self.next + 0xFFF) & !0xFFF;
-            return;
-        }
+    /// Builds the allocator over `free`, page-aligned ranges no one else uses.
+    #[must_use]
+    pub fn from_regions(free: &[PhysRange]) -> Self {
+        let mut regions = [PhysRange::default(); MAX_REGIONS];
+        let count = free.len().min(MAX_REGIONS);
+        regions[..count].copy_from_slice(&free[..count]);
+        Self { regions, region_count: count, current: 0, next: regions[0].start }
+    }
+
+    /// Returns the memory not handed out yet: the rest of the current region
+    /// and every region after it.
+    pub fn remaining(&self) -> impl Iterator<Item = PhysRange> + '_ {
+        let rest = (self.current < self.region_count)
+            .then(|| PhysRange { start: self.next, end: self.regions[self.current].end });
+        let later = self.regions[..self.region_count].iter().skip(self.current + 1).copied();
+        rest.into_iter().chain(later).filter(|r| !r.is_empty())
     }
 }
 
-// SAFETY: every frame returned comes from a multiboot2 AVAILABLE region above
-// the reserved boundary (kernel + boot page tables + info struct), and `next`
-// only ever advances, so no frame is returned twice.
+// SAFETY: every frame returned comes from a free range of the memory plan,
+// which excludes the kernel, the boot page tables, the info structure, and the
+// boot modules, and `next` only ever advances, so no frame is returned twice.
 unsafe impl FrameAllocator<Size4KiB> for BootstrapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         loop {
             if self.current >= self.region_count {
                 return None;
             }
-            let (_, end) = self.regions[self.current];
-            if self.next + 0x1000 > end {
+            if self.next + 0x1000 > self.regions[self.current].end {
                 // exhausted this region; move to the next.
                 self.current += 1;
                 if self.current < self.region_count {
-                    self.next = self.regions[self.current].0;
+                    self.next = self.regions[self.current].start;
                 }
                 continue;
             }

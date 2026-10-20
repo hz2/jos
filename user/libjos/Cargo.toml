@@ -1,0 +1,10 @@
+[package]
+name = "libjos"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+# the runtime every jos program links: syscall stubs, typed wrappers over the
+# shared abi in jos-core, console output, and the entry point.
+[dependencies]
+jos-core = { path = "../../jos-core" }

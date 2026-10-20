@@ -1,0 +1,22 @@
+# the jos userspace workspace: libjos (the runtime and syscall library) and
+# the programs built on it. it builds for x86_64-unknown-none through
+# user/.cargo/config.toml, the way kernel/ carries its own target config, and
+# it is a workspace of its own so host builds at the repo root never see it.
+[workspace]
+resolver = "2"
+members = ["libjos", "root"]
+
+[workspace.package]
+edition = "2024"
+authors = ["Jason Devers <dev.json@gmail.com>"]
+
+# opt-level 1 keeps debug images small and quick under tcg; overflow checks
+# stay on everywhere, as in the kernel.
+[profile.dev]
+panic = "abort"
+opt-level = 1
+overflow-checks = true
+
+[profile.release]
+panic = "abort"
+overflow-checks = true

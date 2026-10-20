@@ -1,0 +1,15 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+# the root task: the first userspace program, loaded by the kernel from the
+# `root` boot module and handed every initial capability.
+[dependencies]
+libjos = { path = "../libjos" }
+
+[[bin]]
+name = "root"
+test = false
+bench = false

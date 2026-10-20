@@ -59,7 +59,8 @@ half, look at the other.
 | the root task: building and starting it | `kernel/src/rootserver.rs`, called from `kernel/src/main.rs` |
 | SMEP, SMAP, NX | `kernel/src/arch/x86_64/mod.rs` |
 | GDT, TSS, IST stacks | `kernel/src/gdt.rs` |
-| IDT, exceptions, PIC | `kernel/src/interrupts.rs` |
+| IDT, PIC, timer and keyboard IRQs | `kernel/src/interrupts.rs` |
+| exception stubs, fault delivery | `kernel/src/exceptions.rs`, `kernel/src/syscall/ipc.rs` (`deliver_fault`) |
 | syscall numbers, error codes, boot information, user layout (the ABI) | `jos-core/src/abi.rs` |
 | `syscall` entry stub, dispatcher | `kernel/src/syscall/mod.rs` |
 | console and machine syscalls | `kernel/src/syscall/platform.rs` |
@@ -71,6 +72,7 @@ half, look at the other.
 | piece | where |
 |---|---|
 | syscall stubs and typed wrappers | `user/libjos/src/syscall.rs`, `user/libjos/src/sys.rs` |
+| slots, retype and map helpers, threads | `user/libjos/src/mem.rs`, `user/libjos/src/thread.rs` |
 | console output, entry point, panic handler, KTAP | `user/libjos/src/console.rs`, `rt.rs`, `ktap.rs` |
 | the root task | `user/root/src/main.rs` |
 | target and build-std config | `user/.cargo/config.toml` |

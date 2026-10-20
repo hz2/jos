@@ -148,6 +148,18 @@ it. The take-or-park step happens under one lock, so wakeups are never lost.
   Revoking the capability wakes it, it finds the ref stale, and it fails with
   `InvalidCap` rather than hanging.
 
+## Faults
+
+A fault in ring 3 never stops the kernel. Every vector a thread can raise
+enters one stub path; the faulting thread is parked as if it had made a `call`
+on its fault endpoint (named by slot in its own capability space with
+`tcb_set_fault_handler`, looked up at fault time) with the vector, address,
+instruction, and error code as the message, and an answer through the reply
+object resumes it at the faulting instruction with its registers untouched,
+which is all a userspace pager needs. A thread nothing can answer is stopped
+alone. Details: [`kernel/faults.md`](kernel/faults.md). How the blocking and
+non-blocking IPC paths keep one order: [`kernel/ipc.md`](kernel/ipc.md).
+
 ## Address Spaces and Paging
 
 ```

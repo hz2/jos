@@ -26,12 +26,24 @@ Check items off in the same commit that finishes them.
       under TCG and KVM, in `ci`; `cargo run` boots into the root task
 - [ ] mark ELF-1 and BOOT-2 proved in `docs/verification.md` once their Kani
       harnesses have run under the memory cap
-- [ ] survivable user faults: exception entry for every vector, seL4-style
-      fault endpoints (`tcb_set_fault_handler`), a faulting thread with no
-      handler is retired instead of the kernel dying
-- [ ] capacity and reuse: generation-checked thread ids, `MAX_THREADS` 64,
-      CSpace registry slots freed with their CNode, a bigger mapping registry
-      without its stack scratch array
+- [x] survivable user faults: one entry stub path for every vector, seL4-style
+      fault endpoints (`tcb_set_fault_handler`, 25) resolved at fault time, a
+      reply resumes the faulting instruction with registers intact (userspace
+      demand paging works), and a thread with no handler is stopped alone
+- [x] thread ids reused behind a generation (a stale reply reaches nothing),
+      `MAX_THREADS` 64, `thread_exit` (24), and a blocked thread switches
+      straight to the next ready one instead of waiting for a tick
+- [x] IPC: non-blocking send and receive hand off to threads parked by the
+      blocking calls, receives take the slot before parked senders, and
+      parked threads are served oldest first (`docs/kernel/ipc.md`)
+- [x] libjos: slot allocation, retype and map helpers, thread spawning with
+      thread blocks (each thread finds its IPC buffer from its stack pointer)
+- [ ] capacity: CSpace registry slots freed with their CNode, a bigger mapping
+      registry without its stack scratch array
+- [ ] a receive with a timeout, so a ring-3 check that waits on a message that
+      never comes fails fast instead of hanging the run
+- [ ] `mint` into a slot the caller names (today the kernel picks the lowest
+      free one, which libjos has to claim after the fact)
 - [ ] a ring-3 test suite in the root task: one fresh thread per test with the
       runner as its fault handler, nested KTAP, `root test [filter]`
 - [ ] userspace process spawning: boot modules mapped read-only into the root
@@ -75,8 +87,7 @@ Check items off in the same commit that finishes them.
 - [x] revoking a started thread, or the CNode or VSpace it runs in, stops it for
       good once that object has no capability left (revoking a copy does not):
       it leaves the run queue and any IPC wait, and a late answer finds nothing
-- [ ] reuse retired thread ids; today they are never reused, since a reply
-      object may still name one
+- [x] reuse retired thread ids: reply bindings hold a generation-checked token
 - [x] the root task is registered with the scheduler like any thread, so the
       timer switches to the threads it starts
 - [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized

@@ -153,6 +153,7 @@ fails instead of hanging.
 
 | doc | covers |
 |-----|--------|
+| [`docs/README.md`](docs/README.md) | the index, including the deep dives in `docs/kernel/` and `docs/userspace/` |
 | [`docs/architecture.md`](docs/architecture.md) | the principle, design, memory, IPC, paging, kernel entry paths |
 | [`docs/roadmap.md`](docs/roadmap.md) | status by phase, milestones, adopted ideas, open decisions |
 | [`docs/verification.md`](docs/verification.md) | what is proved and what is next |

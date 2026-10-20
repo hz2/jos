@@ -10,10 +10,12 @@ proof targets that travel with each milestone.
 
 jos boots on x86_64 under QEMU into a Rust root task loaded from an ELF boot
 module, which runs in ring 3 with every initial capability and checks the
-capability model end to end (`scripts/check.sh boot`). What is missing for a
-userspace that can host servers and tests is survivable faults, reusable
-thread ids, process spawning from userspace, and a test harness that runs in
-ring 3; that is the gap this roadmap closes next.
+capability model end to end (`scripts/check.sh boot`), threads and faults
+included: a faulting thread is stopped alone or answered by a userspace
+handler, which can page memory in on demand. What is missing for a userspace
+that hosts servers and tests is process spawning from userspace, a ring-3 test
+runner with per-test isolation, and the host-side harness; that is the gap
+this roadmap closes next.
 
 | Phase | Scope | State |
 |-------|-------|-------|
@@ -76,7 +78,8 @@ speak IPC.
       capabilities (the seL4 root-server model)
 - [x] load the root image from a multiboot2 module; the memory plan keeps the
       modules and the info structure out of the free memory
-- [ ] survivable user faults (fault endpoints) and reusable thread ids
+- [x] survivable user faults (fault endpoints, demand paging from userspace)
+      and reusable thread ids
 - [ ] a ring-3 test suite in the root task, and process spawning from userspace
 - [ ] `jig`, the host-side harness, and differential testing against an
       executable spec

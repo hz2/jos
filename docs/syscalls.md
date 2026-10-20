@@ -130,10 +130,32 @@ beneath it.
 | 17 | `tcb_configure` | TCB slot, CNode slot, VSpace slot | `0` or an error |
 | 18 | `tcb_set_ipc_buffer` | TCB slot, frame slot | `0` or an error |
 | 19 | `tcb_start` | TCB slot, entry, stack top | `0` or an error |
+| 24 | `thread_exit` | none | does not return |
+| 25 | `tcb_set_fault_handler` | TCB slot, fault endpoint slot | `0` or an error |
 
 A thread is configured, given a buffer, and started once; it then runs in ring
 3 under the scheduler. Configuring or starting it again fails with
-`AlreadyStarted`.
+`AlreadyStarted`. `thread_exit` stops the calling thread for good; it needs no
+capability, since stopping yourself takes nothing from anyone else, and
+whoever holds the thread's capabilities still revokes them to free the slots.
+Thread ids are reused once a thread retires, behind a generation: a reply
+object still bound to the old thread reaches nothing.
+
+`tcb_set_fault_handler` (needs `WRITE` on the TCB) names, by slot in the
+thread's **own** capability space, the endpoint its faults go to; the slot is
+looked up when a fault happens. A fault arrives there as a call with the
+fault endpoint capability's badge and these words, and a reply resumes the
+thread at the faulting instruction with its registers untouched
+(`docs/kernel/faults.md`):
+
+| word | meaning |
+|---|---|
+| 0 | the vector (`abi::FaultKind`: 14 page fault, 6 invalid opcode, 13 general protection, ...) |
+| 1 | the address of a page fault (`CR2`), otherwise 0 |
+| 2 | the faulting instruction |
+| 3 | the CPU's error code, otherwise 0 (for a page fault, bit 0 present, bit 1 write, bit 2 user) |
+
+A thread with no usable fault endpoint is stopped by its fault, and only it.
 
 ### Console and machine
 

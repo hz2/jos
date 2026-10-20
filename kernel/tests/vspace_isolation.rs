@@ -10,7 +10,6 @@
 
 use core::panic::PanicInfo;
 
-use jos::serial_print;
 use jos_core::cap_rights::Rights;
 
 #[path = "common/threads.rs"]
@@ -75,7 +74,7 @@ const _: () = assert!(threads::PRIVATE_ADDR == 0x2000_0000_8000);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("vspace_isolation::same_address_different_frames...\t");
+    jos::ktap::single("vspace_isolation::same_address_different_frames");
 
     let programs = [
         Program {

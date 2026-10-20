@@ -22,7 +22,7 @@ use core::panic::PanicInfo;
 use jos::cap::{KernelCapSpace, UntypedRegion};
 use jos::memory::BootstrapFrameAllocator;
 use jos::vspace::VSpace;
-use jos::{serial_print, syscall, usermode};
+use jos::{syscall, usermode};
 use jos_core::cap_rights::Rights;
 use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
@@ -115,7 +115,7 @@ static mut SYSCALL_STACK: KernelStack = KernelStack([0; KSTACK_SIZE]);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("badged_ipc::server_sees_client_badge...\t");
+    jos::ktap::single("badged_ipc::server_sees_client_badge");
 
     jos::init();
 

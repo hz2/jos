@@ -42,7 +42,7 @@ fn timer_ticks_advance() {
     let target = 3;
     for _ in 0..10_000 {
         if jos::interrupts::TICK_COUNT.load(Ordering::Relaxed) >= target {
-            return; // success: the test runner reports [ok] and exits Success.
+            return; // success: the test runner reports ok and exits Success.
         }
         x86_64::instructions::hlt();
     }

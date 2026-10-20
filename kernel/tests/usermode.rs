@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use jos::interrupts::{InterruptIndex, PICS};
 use jos::memory::BootstrapFrameAllocator;
-use jos::{QemuExitCode, exit_qemu, gdt, interrupts, serial_print, serial_println};
+use jos::{QemuExitCode, exit_qemu, gdt, interrupts};
 use x86_64::PrivilegeLevel;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
@@ -38,7 +38,7 @@ static INFO_PTR: AtomicU32 = AtomicU32::new(0);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("usermode::enter_ring3...\t");
+    jos::ktap::single("usermode::enter_ring3");
     INFO_PTR.store(info_ptr, Ordering::SeqCst);
 
     // gdt/tss (user segments + rsp0) and our test idt (breakpoint gate reachable
@@ -116,10 +116,10 @@ extern "x86-interrupt" fn test_breakpoint_handler(stack_frame: InterruptStackFra
     let saved_cs = stack_frame.code_segment;
     let rpl = saved_cs & 0b11;
     if rpl == 3 {
-        serial_println!("[ok] (trapped from CPL {})", rpl);
+        jos::ktap::diag(format_args!("trapped from CPL {rpl}"));
         exit_qemu(QemuExitCode::Success);
     } else {
-        serial_println!("[failed] breakpoint came from CPL {}, expected 3", rpl);
+        jos::ktap::diag(format_args!("breakpoint came from CPL {rpl}, expected 3"));
         exit_qemu(QemuExitCode::Failed);
     }
     jos::hlt_loop()
@@ -129,7 +129,7 @@ extern "x86-interrupt" fn test_double_fault_handler(
     _stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    serial_println!("[failed] unexpected double fault");
+    jos::ktap::diag(format_args!("unexpected double fault"));
     exit_qemu(QemuExitCode::Failed);
     jos::hlt_loop()
 }

@@ -22,7 +22,6 @@
 
 use core::panic::PanicInfo;
 
-use jos::serial_print;
 use jos_core::cap_rights::Rights;
 use jos_core::notification::Badge;
 
@@ -148,7 +147,7 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("{}...\t", TEST_NAME);
+    jos::ktap::single(TEST_NAME);
 
     let server = Program {
         start: core::ptr::addr_of!(call_reply_server_start),

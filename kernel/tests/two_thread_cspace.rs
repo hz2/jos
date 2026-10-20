@@ -27,7 +27,7 @@ use jos::cap::{cap_send, KernelCapSpace, Message, Tcb, UntypedRegion};
 use jos::cpu_local;
 use jos::memory::BootstrapFrameAllocator;
 use jos::vspace::VSpace;
-use jos::{serial_print, syscall, usermode};
+use jos::{syscall, usermode};
 use jos_core::cap_rights::Rights;
 use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
@@ -68,7 +68,7 @@ const RUN_TCB_IS_B: bool = true;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("two_thread_cspace::switch_selects_per_thread_cspace...\t");
+    jos::ktap::single("two_thread_cspace::switch_selects_per_thread_cspace");
     INFO_PTR.store(info_ptr, Ordering::SeqCst);
     jos::init();
 

@@ -12,7 +12,6 @@
 
 use core::panic::PanicInfo;
 
-use jos::serial_print;
 use jos_core::cap_rights::Rights;
 use jos_core::notification::Badge;
 
@@ -104,7 +103,7 @@ const _: () = assert!(threads::SHARED_ADDR == 0x2000_0000_4000);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("reply_recv_server::answers_two_clients_by_badge...\t");
+    jos::ktap::single("reply_recv_server::answers_two_clients_by_badge");
 
     let programs = [
         Program {

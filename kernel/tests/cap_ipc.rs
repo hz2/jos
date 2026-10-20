@@ -29,7 +29,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use jos::cap::{KernelCapSpace, UntypedRegion};
 use jos::memory::BootstrapFrameAllocator;
 use jos::vspace::VSpace;
-use jos::{serial_print, syscall, usermode};
+use jos::{syscall, usermode};
 use jos_core::cap_rights::Rights;
 use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
@@ -85,7 +85,7 @@ static mut SYSCALL_STACK: KernelStack = KernelStack([0; KSTACK_SIZE]);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("cap_ipc::user_ipc_through_capabilities...\t");
+    jos::ktap::single("cap_ipc::user_ipc_through_capabilities");
     INFO_PTR.store(info_ptr, Ordering::SeqCst);
 
     jos::init();

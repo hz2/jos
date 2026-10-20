@@ -38,6 +38,7 @@ pub mod guard_page;
 pub mod interrupts;
 #[cfg(target_arch = "x86_64")]
 pub mod keyboard;
+pub mod ktap;
 #[cfg(target_arch = "x86_64")]
 pub mod mapping;
 #[cfg(target_arch = "x86_64")]
@@ -90,18 +91,21 @@ pub fn init() {
 #[global_allocator]
 static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
 
+/// A framework test (`#[test_case]`): run by [`test_runner`], which reports it
+/// in KTAP.
 pub trait Testable {
-    fn run(&self) -> ();
+    /// Runs the test as test number `index` (counting from 1).
+    fn run(&self, index: usize);
 }
 
 impl<T> Testable for T
 where
     T: Fn(),
 {
-    fn run(&self) {
-        serial_print!("{}...\t", core::any::type_name::<T>());
+    fn run(&self, index: usize) {
+        ktap::begin(index, core::any::type_name::<T>());
         self();
-        serial_println!("[ok]");
+        ktap::pass();
     }
 }
 
@@ -113,6 +117,8 @@ pub enum QemuExitCode {
 }
 
 pub fn exit_qemu(exit_code: QemuExitCode) {
+    // a binary that checks one thing reports it however the run ends.
+    ktap::finish_single(exit_code == QemuExitCode::Success);
     #[cfg(target_arch = "x86_64")]
     {
         use x86_64::instructions::port::Port;
@@ -143,16 +149,16 @@ pub fn hlt_loop() -> ! {
 }
 
 pub fn test_runner(tests: &[&dyn Testable]) {
-    serial_println!("Running {} tests", tests.len());
-    for test in tests {
-        test.run();
+    ktap::plan(tests.len());
+    for (i, test) in tests.iter().enumerate() {
+        test.run(i + 1);
     }
     exit_qemu(QemuExitCode::Success);
 }
 
 pub fn test_panic_handler(info: &PanicInfo) -> ! {
-    serial_println!("[failed]\n");
-    serial_println!("Error: {}\n", info);
+    ktap::diag(format_args!("panicked: {info}"));
+    ktap::fail();
     exit_qemu(QemuExitCode::Failed);
     hlt_loop()
 }

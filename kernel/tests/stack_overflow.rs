@@ -15,13 +15,13 @@
 #![feature(abi_x86_interrupt)]
 
 use core::panic::PanicInfo;
-use jos::{QemuExitCode, exit_qemu, gdt, serial_print, serial_println};
+use jos::{QemuExitCode, exit_qemu, gdt, serial_println};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 /// The trampoline (in the jos library) calls kernel_main in long mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
-    serial_print!("stack_overflow::stack_overflow...\t");
+    jos::ktap::single("stack_overflow::stack_overflow");
 
     // install the gdt/tss (gives us the IST stack) and our test idt.
     gdt::init_gdt();
@@ -66,7 +66,6 @@ extern "x86-interrupt" fn test_double_fault_handler(
     _error_code: u64,
 ) -> ! {
     // the handler ran on its IST stack, so the overflow was caught: success.
-    serial_println!("[ok]");
     exit_qemu(QemuExitCode::Success);
     jos::hlt_loop()
 }

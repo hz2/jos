@@ -16,7 +16,7 @@ use core::panic::PanicInfo;
 use jos::cap::{KernelCapSpace, Tcb, UntypedRegion};
 use jos::memory::BootstrapFrameAllocator;
 use jos::vspace::VSpace;
-use jos::{cpu_local, serial_print, syscall, usermode};
+use jos::{cpu_local, syscall, usermode};
 use jos_core::cap_rights::Rights;
 use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
@@ -144,7 +144,7 @@ static mut CSPACE: Option<KernelCapSpace> = None;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("ipc_buffer_registration::frame_cap_becomes_buffer...\t");
+    jos::ktap::single("ipc_buffer_registration::frame_cap_becomes_buffer");
 
     jos::init();
     syscall::init_syscall();

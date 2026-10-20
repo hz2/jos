@@ -16,7 +16,6 @@
 
 use core::panic::PanicInfo;
 
-use jos::serial_print;
 use jos_core::cap_rights::Rights;
 
 #[path = "common/threads.rs"]
@@ -104,7 +103,7 @@ const _: () = assert!(threads::SHARED_ADDR == 0x2000_0000_4000);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("cap_transfer::capability_moves_with_message...\t");
+    jos::ktap::single("cap_transfer::capability_moves_with_message");
 
     let programs = [
         Program {

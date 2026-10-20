@@ -2,7 +2,7 @@
 #![no_std]
 #![no_main]
 
-use jos::{QemuExitCode, exit_qemu, serial_print, serial_println};
+use jos::{QemuExitCode, exit_qemu, serial_println};
 use core::panic::PanicInfo;
 
 /// The trampoline in the jos library calls kernel_main; this test expects the
@@ -16,13 +16,12 @@ pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
 }
 
 fn should_fail() {
-    serial_print!("should_panic::should_fail...\t");
+    jos::ktap::single("should_panic::should_fail");
     assert_eq!(0, 1);
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    serial_println!("[ok]");
     exit_qemu(QemuExitCode::Success);
     jos::hlt_loop()
 }

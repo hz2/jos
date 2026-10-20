@@ -14,7 +14,7 @@
 use core::panic::PanicInfo;
 
 use jos::cap::{TcbState, UntypedRegion};
-use jos::{QemuExitCode, exit_qemu, gdt, serial_print, serial_println};
+use jos::{QemuExitCode, exit_qemu, gdt, serial_println};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 /// Page-aligned backing for one TCB object (and spare room).
@@ -32,7 +32,7 @@ static mut TEST_IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, _info_ptr: u32) -> ! {
-    serial_print!("tcb_guard::overflow_hits_the_guard...\t");
+    jos::ktap::single("tcb_guard::overflow_hits_the_guard");
     gdt::init_gdt();
     // SAFETY: single-threaded boot; nothing else touches TEST_IDT, and the IST
     // stack the double-fault entry names was installed by init_gdt above.
@@ -85,7 +85,6 @@ extern "x86-interrupt" fn double_fault(_frame: InterruptStackFrame, _code: u64) 
         tcb.state == TcbState::Inactive && tcb.kernel_stack_top == STACK_TOP
     };
     if intact {
-        serial_println!("[ok]");
         exit_qemu(QemuExitCode::Success);
     } else {
         serial_println!("[failed: the overflow reached the TCB header]");

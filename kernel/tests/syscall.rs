@@ -33,7 +33,7 @@
 use core::panic::PanicInfo;
 
 use jos::memory::BootstrapFrameAllocator;
-use jos::{serial_print, syscall, usermode};
+use jos::{syscall, usermode};
 use x86_64::VirtAddr;
 
 /// The assembled SYS_ADD/SYS_EXIT round-trip program (see the disassembly above).
@@ -63,7 +63,7 @@ static mut SYSCALL_STACK: KernelStack = KernelStack([0; KSTACK_SIZE]);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("syscall::add_roundtrip_and_exit...\t");
+    jos::ktap::single("syscall::add_roundtrip_and_exit");
 
     // gdt/tss (user segments + rsp0) and the production idt.
     jos::init();

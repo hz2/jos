@@ -26,7 +26,7 @@ use jos::cap::{KernelCapSpace, Tcb, UntypedRegion};
 use jos::cpu_local;
 use jos::memory::BootstrapFrameAllocator;
 use jos::vspace::VSpace;
-use jos::{gdt, sched, serial_print, syscall, usermode};
+use jos::{gdt, sched, syscall, usermode};
 use jos_core::pte::PteFlags;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::FrameAllocator;
@@ -70,7 +70,7 @@ static mut CSPACE: Option<KernelCapSpace> = None;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(_magic: u32, info_ptr: u32) -> ! {
-    serial_print!("sched_preempt::timer_preempts_and_switches_thread...\t");
+    jos::ktap::single("sched_preempt::timer_preempts_and_switches_thread");
     INFO_PTR.store(info_ptr, Ordering::SeqCst);
 
     jos::init();

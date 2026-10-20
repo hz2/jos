@@ -33,7 +33,7 @@
 use jos_core::cap_rights::Rights;
 use jos_core::cap_space::{CapSpace, MintError};
 use jos_core::cap_table::CapRef;
-use jos_core::rng::{KernelRng, SimRng};
+use jos_core::rng::{KernelRng, OpMix, SimRng};
 use jos_core::trace::{CapOp, CapOutcome, ObjectToken, Refusal, TraceEvent};
 
 // capacity of the simulated capability space. small enough that the space fills
@@ -53,6 +53,18 @@ const SEEDS: u64 = 256;
 const STEPS: usize = 30;
 #[cfg(not(miri))]
 const STEPS: usize = 400;
+
+/// The operation mix for `seed`: the tuned mix (insert and mint dominate, so
+/// derivation trees form and churn) on even seeds, and an activated swarm mix
+/// drawn from the seed on odd ones, so skewed ratios (revoke-heavy, insert-free)
+/// get explored too. Insert, mint, remove, revoke, check, in that order.
+fn op_mix(seed: u64) -> OpMix<5> {
+    if seed.is_multiple_of(2) {
+        OpMix::fixed([35, 35, 12, 10, 8])
+    } else {
+        OpMix::swarm(&mut SimRng::new(!seed))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // small conversions (slots are bounded by N, so these never truncate)
@@ -88,6 +100,8 @@ struct ModelCap {
 struct Sim {
     seed: u64,
     rng: SimRng,
+    /// How often each operation is picked; see [`op_mix`].
+    mix: OpMix<5>,
     space: CapSpace<ObjectToken, N>,
     model: [Option<ModelCap>; N],
     /// Monotone source of fresh object identities, so every Insert names a
@@ -105,6 +119,7 @@ impl Sim {
         Self {
             seed,
             rng: SimRng::new(seed),
+            mix: op_mix(seed),
             space: CapSpace::new(),
             model: [None; N],
             next_object: 1,
@@ -189,35 +204,28 @@ impl Sim {
         as_u32(usize::try_from(self.rng.below(N as u64)).expect("below(N) < N"))
     }
 
-    /// Draws the next operation. The weighting builds derivation trees (insert +
-    /// mint dominate) while still tearing them down (remove + revoke) and reading
-    /// them back (check), so the space is constantly filling, churning, and
-    /// reusing slots.
+    /// Draws the next operation, in the proportions [`op_mix`] chose for this
+    /// seed.
     fn gen_op(&mut self) -> CapOp {
-        let roll = self.rng.below(100);
-        if roll < 35 {
-            CapOp::Insert {
+        match self.mix.pick(&mut self.rng) {
+            0 => CapOp::Insert {
                 object: self.fresh_object(),
                 rights: self.random_rights(),
-            }
-        } else if roll < 70 {
-            CapOp::Mint {
+            },
+            1 => CapOp::Mint {
                 source: self.random_slot(),
                 mask: self.random_rights(),
-            }
-        } else if roll < 82 {
-            CapOp::Remove {
+            },
+            2 => CapOp::Remove {
                 slot: self.random_slot(),
-            }
-        } else if roll < 92 {
-            CapOp::Revoke {
+            },
+            3 => CapOp::Revoke {
                 slot: self.random_slot(),
-            }
-        } else {
-            CapOp::Check {
+            },
+            _ => CapOp::Check {
                 slot: self.random_slot(),
                 required: self.random_rights(),
-            }
+            },
         }
     }
 

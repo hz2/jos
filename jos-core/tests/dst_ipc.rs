@@ -28,7 +28,7 @@ use std::env;
 
 use jos_core::endpoint::{Endpoint, Message, RecvOutcome, SendOutcome};
 use jos_core::fault::FaultConfig;
-use jos_core::rng::{KernelRng, SimRng};
+use jos_core::rng::{KernelRng, OpMix, SimRng};
 
 // number of shared endpoints. small, so senders and receivers genuinely
 // contend each one (capacity-1 forces parking and interleaving).
@@ -43,6 +43,17 @@ const SEEDS: u64 = 96;
 const STEPS: usize = 40;
 #[cfg(not(miri))]
 const STEPS: usize = 600;
+
+/// The action mix for `seed`: uniform on even seeds, an activated swarm mix
+/// drawn from the seed on odd ones (a burst of generates with no receives, say).
+/// Generate, deposit, receive, in that order.
+fn op_mix(seed: u64) -> OpMix<3> {
+    if seed.is_multiple_of(2) {
+        OpMix::fixed([1, 1, 1])
+    } else {
+        OpMix::swarm(&mut SimRng::new(!seed))
+    }
+}
 
 // how many fresh messages a run may generate before senders only drain.
 #[cfg(miri)]
@@ -77,6 +88,8 @@ struct IpcSim {
     seed: u64,
     regime: &'static str,
     rng: SimRng,
+    /// How often each action is picked; see [`op_mix`].
+    mix: OpMix<3>,
     config: FaultConfig,
 
     /// The systems under test: E verified endpoints.
@@ -111,6 +124,7 @@ impl IpcSim {
             seed,
             regime,
             rng: SimRng::new(seed),
+            mix: op_mix(seed),
             config,
             endpoints: [Endpoint::new(); E],
             slot_shadow: [None; E],
@@ -276,7 +290,7 @@ impl IpcSim {
     fn step(&mut self) {
         self.mature_delays();
         let e = self.random_endpoint();
-        match self.rng.below(3) {
+        match self.mix.pick(&mut self.rng) {
             0 => self.generate(e),
             1 => self.deposit(e),
             _ => self.recv(e),

@@ -29,7 +29,7 @@ use jos_core::cap_rights::Rights;
 use jos_core::cap_space::{CapSpace, MintError};
 use jos_core::cap_table::CapRef;
 use jos_core::fault::{FaultConfig, FaultInjector};
-use jos_core::rng::{KernelRng, SimRng};
+use jos_core::rng::{KernelRng, OpMix, SimRng};
 use jos_core::trace::{CapOp, CapOutcome, ObjectToken, Refusal, TraceEvent};
 
 // capacity of the simulated capability space (matches dst_capspace.rs).
@@ -47,6 +47,18 @@ const SEEDS: u64 = 128;
 const STEPS: usize = 30;
 #[cfg(not(miri))]
 const STEPS: usize = 500;
+
+/// The operation mix for `seed`: the tuned mix (insert and mint dominate, so
+/// derivation trees form and churn) on even seeds, and an activated swarm mix
+/// drawn from the seed on odd ones, so skewed ratios (revoke-heavy, insert-free)
+/// get explored too. Insert, mint, remove, revoke, check, in that order.
+fn op_mix(seed: u64) -> OpMix<5> {
+    if seed.is_multiple_of(2) {
+        OpMix::fixed([35, 35, 12, 10, 8])
+    } else {
+        OpMix::swarm(&mut SimRng::new(!seed))
+    }
+}
 
 fn as_u32(x: usize) -> u32 {
     u32::try_from(x).expect("slot/count fits in u32 (bounded by N)")
@@ -122,6 +134,8 @@ struct FaultSim {
     seed: u64,
     regime: &'static str,
     rng: SimRng,
+    /// How often each operation is picked; see [`op_mix`].
+    mix: OpMix<5>,
     injector: FaultInjector,
     space: CapSpace<ObjectToken, N>,
     model: [Option<ModelCap>; N],
@@ -142,6 +156,7 @@ impl FaultSim {
             seed,
             regime,
             rng: SimRng::new(seed),
+            mix: op_mix(seed),
             injector: FaultInjector::new(config),
             space: CapSpace::new(),
             model: [None; N],
@@ -171,26 +186,21 @@ impl FaultSim {
     }
 
     fn gen_op(&mut self) -> CapOp {
-        let roll = self.rng.below(100);
-        if roll < 35 {
-            CapOp::Insert {
+        match self.mix.pick(&mut self.rng) {
+            0 => CapOp::Insert {
                 object: self.fresh_object(),
                 rights: self.random_rights(),
-            }
-        } else if roll < 70 {
-            CapOp::Mint {
+            },
+            1 => CapOp::Mint {
                 source: self.random_slot(),
                 mask: self.random_rights(),
-            }
-        } else if roll < 82 {
-            CapOp::Remove { slot: self.random_slot() }
-        } else if roll < 92 {
-            CapOp::Revoke { slot: self.random_slot() }
-        } else {
-            CapOp::Check {
+            },
+            2 => CapOp::Remove { slot: self.random_slot() },
+            3 => CapOp::Revoke { slot: self.random_slot() },
+            _ => CapOp::Check {
                 slot: self.random_slot(),
                 required: self.random_rights(),
-            }
+            },
         }
     }
 

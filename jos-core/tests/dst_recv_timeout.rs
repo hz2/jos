@@ -43,7 +43,7 @@ use std::env;
 use jos_core::clock::{Duration, Instant, KernelClock, SimClock};
 use jos_core::endpoint::{Endpoint, Message, RecvOutcome, SendOutcome};
 use jos_core::fault::FaultConfig;
-use jos_core::rng::{KernelRng, SimRng};
+use jos_core::rng::{KernelRng, OpMix, SimRng};
 use jos_core::timer::{TimerId, TimerQueue};
 
 // shared endpoints; receivers contend them so capacity-1 forces parking.
@@ -62,6 +62,17 @@ const SEEDS: u64 = 96;
 const STEPS: usize = 50;
 #[cfg(not(miri))]
 const STEPS: usize = 800;
+
+/// The action mix for `seed`: uniform on even seeds, an activated swarm mix
+/// drawn from the seed on odd ones (time racing ahead of deposits, say).
+/// Generate, deposit, receive, advance time, in that order.
+fn op_mix(seed: u64) -> OpMix<4> {
+    if seed.is_multiple_of(2) {
+        OpMix::fixed([1, 1, 1, 1])
+    } else {
+        OpMix::swarm(&mut SimRng::new(!seed))
+    }
+}
 
 // the horizon deadlines are drawn within; STEPS advances of a few ticks each
 // sweep the clock well past it, so the final phase always crosses every deadline.
@@ -106,6 +117,8 @@ struct Sim {
     seed: u64,
     regime: &'static str,
     rng: SimRng,
+    /// How often each action is picked; see [`op_mix`].
+    mix: OpMix<4>,
     config: FaultConfig,
 
     clock: SimClock,
@@ -159,6 +172,7 @@ impl Sim {
             seed,
             regime,
             rng,
+            mix: op_mix(seed),
             config,
             clock,
             endpoints: [Endpoint::new(); E],
@@ -301,8 +315,8 @@ impl Sim {
     }
 
     fn step(&mut self) {
-        // a weighted action mix: generate, deposit, receive, or advance time.
-        match self.rng.below(4) {
+        // generate, deposit, receive, or advance time, in this seed's mix.
+        match self.mix.pick(&mut self.rng) {
             0 => {
                 let ep = self.random_endpoint();
                 self.generate(ep);

@@ -77,6 +77,17 @@ Check items off in the same commit that finishes them.
       (implemented and tested; not yet proved)
 - [ ] ARITH-3: trace encoding round-trip harness
 
+## Testing layers
+
+- [x] activated swarm operation mixes in every DST harness (odd seeds)
+- [ ] QEMU matrix: run the suite under TCG and KVM (`-accel kvm -cpu host`) and a
+      few `-cpu` models
+- [ ] QEMU record/replay (`-icount rr=record/replay`) so a failing QEMU test
+      replays instruction for instruction
+- [ ] model-based kernel testing: a ring-3 syscall interpreter driven over
+      serial by a host-side Hypothesis state machine, checked against a
+      reference model (easier once the M2 user crate exists)
+
 ## Docs and process
 
 - [x] git hooks (`.githooks/`): style, clippy, tests on commit; full gate on push

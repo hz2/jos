@@ -136,16 +136,115 @@ impl KernelRng for SimRng {
 }
 
 // ---------------------------------------------------------------------------
+// operation mixes for simulation workloads
+// ---------------------------------------------------------------------------
+
+/// How often a simulation picks each of its `K` operations.
+///
+/// A fixed mix averages away the skewed ratios some bugs need (many revokes
+/// against few mints, say). [`swarm`](OpMix::swarm) is activated swarm testing:
+/// each operation gets its own weight drawn from the seed, so across seeds the
+/// mix ranges over every ratio between operations, including ones that leave
+/// an operation out entirely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpMix<const K: usize> {
+    weights: [u64; K],
+}
+
+impl<const K: usize> OpMix<K> {
+    /// The largest weight [`swarm`](Self::swarm) draws.
+    pub const SWARM_SCALE: u64 = 100;
+
+    /// A mix with the given weights. If every weight is zero, every operation
+    /// gets weight one instead, so a pick always has something to choose.
+    #[must_use]
+    pub fn fixed(weights: [u64; K]) -> Self {
+        if weights.iter().all(|&w| w == 0) {
+            Self { weights: [1; K] }
+        } else {
+            Self { weights }
+        }
+    }
+
+    /// A mix whose weights are each drawn uniformly from `[0, SWARM_SCALE]`.
+    #[must_use]
+    pub fn swarm(rng: &mut impl KernelRng) -> Self {
+        let mut weights = [0; K];
+        for w in &mut weights {
+            *w = rng.below(Self::SWARM_SCALE + 1);
+        }
+        Self::fixed(weights)
+    }
+
+    /// Returns the weight of operation `op`, or zero if it is out of range.
+    #[must_use]
+    pub fn weight(&self, op: usize) -> u64 {
+        self.weights.get(op).copied().unwrap_or(0)
+    }
+
+    /// Picks an operation in `[0, K)`, each with probability proportional to
+    /// its weight; an operation of weight zero is never picked.
+    pub fn pick(&self, rng: &mut impl KernelRng) -> usize {
+        let total = self.weights.iter().sum();
+        pick_index(&self.weights, map_below(rng.next_u64(), total))
+    }
+}
+
+/// Returns the operation whose cumulative weight range holds `roll`, for a
+/// `roll` below the sum of `weights`.
+fn pick_index<const K: usize>(weights: &[u64; K], roll: u64) -> usize {
+    let mut below = 0;
+    for (op, &w) in weights.iter().enumerate() {
+        below += w;
+        if roll < below {
+            return op;
+        }
+    }
+    // unreachable for a roll under the total; the last operation is a safe answer.
+    K.saturating_sub(1)
+}
+
+// ---------------------------------------------------------------------------
 // unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{KernelRng, SimRng};
+    use super::{KernelRng, OpMix, SimRng};
     // the test harness links std; the library itself stays no_std.
     extern crate std;
     use std::collections::BTreeSet;
     use std::vec::Vec;
+
+    #[test]
+    fn fixed_mix_follows_its_weights() {
+        let mix = OpMix::fixed([3, 0, 1]);
+        let mut rng = SimRng::new(7);
+        let mut counts = [0_u32; 3];
+        for _ in 0..4000 {
+            counts[mix.pick(&mut rng)] += 1;
+        }
+        assert_eq!(counts[1], 0, "a zero-weight operation was picked");
+        // roughly three to one; wide margins keep this deterministic test robust.
+        assert!(counts[0] > 2 * counts[2] && counts[0] < 4 * counts[2]);
+    }
+
+    #[test]
+    fn all_zero_weights_fall_back_to_uniform() {
+        let mix = OpMix::fixed([0, 0]);
+        assert_eq!((mix.weight(0), mix.weight(1)), (1, 1));
+    }
+
+    #[test]
+    fn swarm_mixes_differ_across_seeds() {
+        let mixes: Vec<OpMix<5>> = (0..16).map(|s| OpMix::swarm(&mut SimRng::new(s))).collect();
+        assert!(mixes.windows(2).any(|w| w[0] != w[1]));
+        for mix in &mixes {
+            for op in 0..5 {
+                assert!(mix.weight(op) <= OpMix::<5>::SWARM_SCALE);
+            }
+        }
+    }
 
     #[test]
     fn same_seed_same_stream() {
@@ -283,5 +382,21 @@ mod kani_proofs {
     fn below_zero_maps_to_zero() {
         let x: u64 = kani::any();
         assert!(map_below(x, 0) == 0);
+    }
+
+    /// An operation mix only ever picks an operation in range with a nonzero
+    /// weight, for any weights a swarm can draw and any roll below their total.
+    #[kani::proof]
+    #[kani::unwind(5)] // K + 1
+    fn pick_lands_on_a_weighted_operation() {
+        let weights: [u64; 4] = kani::any();
+        kani::assume(weights.iter().all(|&w| w <= super::OpMix::<4>::SWARM_SCALE));
+        let total: u64 = weights.iter().sum();
+        kani::assume(total > 0);
+        let roll: u64 = kani::any();
+        kani::assume(roll < total);
+        let op = super::pick_index(&weights, roll);
+        assert!(op < 4);
+        assert!(weights[op] > 0);
     }
 }

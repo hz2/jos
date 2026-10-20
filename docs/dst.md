@@ -200,6 +200,21 @@ DST_SEED=42 cargo test -p jos-core dst_capspace
 
 The run is a pure function of its seed. Same seed, same op stream, same failure.
 
+## Operation mixes (activated swarm testing)
+
+A harness that picks operations in fixed proportions averages away the skewed
+mixes some bugs need: a revoke-heavy run with almost no inserts, or a burst of
+sends with no receives. Each harness therefore takes its proportions from an
+`OpMix` (`jos-core/src/rng.rs`). Even seeds use the harness's tuned mix;
+odd seeds use `OpMix::swarm`, which draws an independent weight for every
+operation from the seed (activated swarm testing, after Groce et al.'s swarm
+testing), so across the sweep the ratios cover the whole space, including
+mixes that leave an operation out. The two halves find different things. On
+`dst_capspace` the tuned seeds hold the space full far more often, while the
+swarm seeds reach deeper revoked subtrees (8 capabilities against 6) and
+revoke stale slots ten times as often. Because the mix comes from the seed, a
+reported seed still reproduces exactly.
+
 ## Kani gotcha: 64-bit multiply hang
 
 CBMC (the backend Kani uses) bit-blasts multipliers into SAT clauses. A 64x64

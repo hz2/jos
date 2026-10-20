@@ -45,8 +45,10 @@ const NO_THREAD: usize = usize::MAX;
 
 /// Raw TCB pointers indexed by scheduler thread ID.
 ///
-/// Written once during `register_thread` (before any thread runs), read from
-/// the timer IRQ. Single-CPU + interrupts disabled at write time -> no races.
+/// Written by `register_thread` and cleared (to null) by `retire_thread`, both
+/// with interrupts disabled; read from the timer IRQ. Single-CPU, so no races.
+/// Ids are never reused, so a stale id (in a reply binding, say) can only ever
+/// find null, never another thread.
 static mut THREAD_TABLE: [*mut Tcb; MAX_THREADS] = [core::ptr::null_mut(); MAX_THREADS];
 static mut THREAD_COUNT: usize = 0;
 
@@ -150,16 +152,17 @@ impl IrqFrame {
     }
 }
 
-/// Returns the TCB pointer for `id`, or null if `id` is out of range.
+/// Returns the TCB pointer for `id`, or null if `id` is out of range or the
+/// thread was retired.
 ///
 /// # Safety
 ///
-/// `id` must be a value previously returned by [`register_thread`]. The
-/// returned pointer is valid for the kernel's lifetime.
+/// `id` must be a value previously returned by [`register_thread`]. A non-null
+/// pointer is valid for the kernel's lifetime.
 pub unsafe fn thread_table_entry(id: usize) -> *mut Tcb {
     if id < MAX_THREADS {
         // SAFETY: id is in range and came from register_thread per the caller
-        // contract; THREAD_TABLE[id] is never modified after that.
+        // contract; the entry only ever changes from a TCB to null.
         unsafe { THREAD_TABLE[id] }
     } else {
         core::ptr::null_mut()
@@ -213,7 +216,48 @@ pub unsafe fn try_register_thread(tcb: *mut Tcb) -> Option<usize> {
 /// Call after [`register_thread`] for every thread that is not the initial
 /// running thread (the initial thread uses [`set_current`] instead).
 pub fn mark_ready(id: usize) {
+    // a retired thread has no table entry; waking it would run nothing.
+    // SAFETY: reads one entry; an out-of-range id reads as null.
+    if unsafe { thread_table_entry(id) }.is_null() {
+        return;
+    }
     POLICY.lock().enqueue(id);
+}
+
+/// Takes thread `id` off the scheduler for good: it leaves the ready set and
+/// its table entry is cleared, so a later wakeup (an answer to a call it made,
+/// say) finds nothing to resume. Returns `true` if `id` is the thread on the
+/// CPU, which the caller must then not return to.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled.
+pub unsafe fn retire_thread(id: usize) -> bool {
+    if id >= MAX_THREADS {
+        return false;
+    }
+    POLICY.lock().remove(id);
+    // SAFETY: id is in range; per this function's contract nothing reads or
+    // writes the table concurrently.
+    unsafe { THREAD_TABLE[id] = core::ptr::null_mut() };
+    CURRENT.load(Ordering::Relaxed) == id
+}
+
+/// Calls `f` with the id and TCB of every registered thread not yet retired.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled; `f` must not register or retire
+/// threads.
+pub unsafe fn for_each_thread(mut f: impl FnMut(usize, *mut Tcb)) {
+    // SAFETY: per this function's contract the table is not written while it
+    // is copied here.
+    let (table, count) = unsafe { (*core::ptr::addr_of!(THREAD_TABLE), THREAD_COUNT) };
+    for (id, &tcb) in table.iter().enumerate().take(count) {
+        if !tcb.is_null() {
+            f(id, tcb);
+        }
+    }
 }
 
 /// Inform the scheduler which thread is currently on the CPU.

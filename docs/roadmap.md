@@ -54,6 +54,8 @@ speak IPC.
       kernel stack)
 - [x] copy capabilities into another thread's CNode (`CNodeCopy`)
 - [x] revoke from userspace (`Revoke`), across every capability space
+- [x] revoking a thread, or the CNode or VSpace it runs in, stops it (seL4
+      final-capability semantics: only when no capability to the object is left)
 - [x] cross-space derivation tree: parent links name a space and a slot, so
       revoking a capability reaches its copies in other CNodes (decided: a
       global tree, the seL4 model)

@@ -32,10 +32,13 @@ Check items off in the same commit that finishes them.
       and launch it
 - [x] `CNodeCopy` (20): copy an attenuated capability into another CNode; the
       copy stays in a global derivation tree, so revoking the source reaches it
-- [ ] revoking a started thread, or the CNode or VSpace it runs in
+- [x] revoking a started thread, or the CNode or VSpace it runs in, stops it for
+      good once that object has no capability left (revoking a copy does not):
+      it leaves the run queue and any IPC wait, and a late answer finds nothing
+- [ ] reuse retired thread ids; today they are never reused, since a reply
+      object may still name one
 - [ ] the root task must be registered with the scheduler like any thread, or
       the timer never switches to the threads it starts
-- [ ] revoking a VSpace capability while a thread still runs in it
 - [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized
       object is built by value on a syscall stack any more
 - [x] capability transfer with an IPC message: the sender names a slot in its

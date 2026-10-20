@@ -1164,6 +1164,45 @@ pub fn abort_call(thread_id: usize) {
     resume(thread_id, IpcSyscallError::NoReply as u64 | IPC_ERR_FLAG, 0);
 }
 
+/// Stops every thread `doomed` picks, for good: it leaves the scheduler and any
+/// IPC wait, so nothing resumes it. If the current thread is among them, the
+/// syscall stub idles instead of returning to it.
+pub fn retire_threads(mut doomed: impl FnMut(&Tcb) -> bool) {
+    let mut ids = [usize::MAX; MAX_THREADS];
+    let mut count = 0;
+    // SAFETY: the revoke paths run single-CPU with interrupts disabled, and the
+    // closure only reads each TCB.
+    unsafe {
+        crate::sched::for_each_thread(|id, tcb| {
+            if count < MAX_THREADS && doomed(&*tcb) {
+                ids[count] = id;
+                count += 1;
+            }
+        });
+    }
+    for &id in &ids[..count] {
+        // a parked sender or receiver must not be handed a message later.
+        for entry in BLOCKED_SENDS.lock().iter_mut() {
+            if entry.is_some_and(|s| s.thread_id == id) {
+                *entry = None;
+            }
+        }
+        for entry in BLOCKED_RECVS.lock().iter_mut() {
+            if entry.is_some_and(|r| r.thread_id == id) {
+                *entry = None;
+            }
+        }
+        // SAFETY: id came from for_each_thread, so its entry is a live TCB;
+        // single-CPU with interrupts disabled, as retire_thread requires.
+        unsafe {
+            (*crate::sched::thread_table_entry(id)).state = TcbState::Retired;
+            if crate::sched::retire_thread(id) {
+                (*cpu_local::cpu_local_ptr()).need_yield = 1;
+            }
+        }
+    }
+}
+
 /// Parks the current thread: saves its user context for a later [`resume`] and
 /// tells the syscall stub to yield instead of returning to user mode.
 fn park_current() {

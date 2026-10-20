@@ -217,6 +217,14 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         self.table.get(cap_ref)
     }
 
+    /// Returns `true` if any live capability in this space satisfies `pred`.
+    #[must_use]
+    pub fn any(&self, mut pred: impl FnMut(&Capability<O>) -> bool) -> bool {
+        let mut found = false;
+        self.table.for_each(|_, cap| found = found || pred(cap));
+        found
+    }
+
     /// Returns a live, generation-checked [`CapRef`] for capability `slot`, or
     /// `None` if the slot is out of range or empty.
     ///
@@ -547,6 +555,17 @@ mod tests {
         assert_eq!(cap.rights, Rights::all());
         assert_eq!(cap.parent, None);
         assert_eq!(space.len(), 1);
+    }
+
+    #[test]
+    fn any_sees_only_live_capabilities() {
+        let mut space: CapSpace<Obj, 16> = CapSpace::new();
+        let r = space.insert(7, Rights::all()).unwrap();
+        space.insert(8, Rights::READ).unwrap();
+        assert!(space.any(|c| c.object == 7));
+        assert!(!space.any(|c| c.object == 9));
+        space.remove(r);
+        assert!(!space.any(|c| c.object == 7));
     }
 
     #[test]

@@ -135,6 +135,36 @@ pub unsafe fn transfer_cap(source: CapLink, dest: *mut KernelCapSpace, slot: usi
     }
 }
 
+/// Returns `true` if a live capability in `local` or in any registered space
+/// still names `object`.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled, and no exclusive reference into a
+/// registered space may be live.
+unsafe fn still_named(object: ObjectId, local: Option<&KernelCapSpace>) -> bool {
+    if local.is_some_and(|s| s.any(|c| c.object == object)) {
+        return true;
+    }
+    // SAFETY: per this function's contract; the registered entries live for the
+    // kernel lifetime and are only read here.
+    unsafe {
+        let all: &[*mut KernelCapSpace; MAX_CSPACES] = &*core::ptr::addr_of!(CSPACES);
+        all[..CSPACE_COUNT].iter().any(|&s| (*s).any(|c| c.object == object))
+    }
+}
+
+/// Returns `true` if the thread `tcb` is `object`, or runs in it (its `CSpace`
+/// or `VSpace`).
+fn runs_on(tcb: &Tcb, object: ObjectId) -> bool {
+    match object.kind() {
+        ObjectKind::Tcb => core::ptr::from_ref(tcb).addr() == object.addr,
+        ObjectKind::CNode => tcb.cspace_root == Some(object),
+        ObjectKind::VSpace => tcb.vspace_root == object.phys_addr(),
+        _ => false,
+    }
+}
+
 // --------------------------------------------------------------------------
 // Object handle
 // --------------------------------------------------------------------------
@@ -729,6 +759,8 @@ pub enum TcbState {
     Inactive,
     /// Runnable / running.
     Running,
+    /// Stopped for good: its TCB, `CNode`, or `VSpace` lost its last capability.
+    Retired,
 }
 
 /// A thread control block: a thread's saved context plus the roots of its
@@ -1765,6 +1797,9 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                 | ObjectKind::Reply
                 | ObjectKind::Frame
                 | ObjectKind::PageTable
+                | ObjectKind::Tcb
+                | ObjectKind::CNode
+                | ObjectKind::VSpace
         );
         if acted_on && count < MAX_BLOCKERS {
             blockers[count] = Some(object);
@@ -1776,7 +1811,8 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
     // outstanding ref (including one a blocked future holds) is now stale. a
     // registered space revokes across every registered space, so copies in other
     // threads' CNodes go too; an unregistered one (id 0) stays local.
-    let removed = if space.id() == SpaceId(0) {
+    let is_local = space.id() == SpaceId(0);
+    let removed = if is_local {
         space.for_each_in_subtree(cap_ref, |_r, cap| collect(cap.object));
         space.revoke(cap_ref)
     } else {
@@ -1791,6 +1827,9 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
             })
         }
     };
+    // an unregistered space is not in the registry, so it is searched on its own
+    // for capabilities that survived the revoke.
+    let local = if is_local { Some(&*space) } else { None };
 
     // wake phase: take and fire each parked waiter, AFTER releasing the object
     // lock (the wake transport is lock-free, but keep the wake off the locked
@@ -1846,6 +1885,15 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
             ObjectKind::PageTable => {
                 // unmap the table and everything mapped beneath it.
                 let _ = crate::mapping::unmap_object(obj.phys_addr());
+            }
+            // a thread stops for good once its TCB, or the CNode or VSpace it
+            // runs in, has no capability left anywhere; revoking only a copy
+            // leaves it running.
+            ObjectKind::Tcb | ObjectKind::CNode | ObjectKind::VSpace
+                // SAFETY: single-CPU revoke path; the spaces are only read.
+                if !unsafe { still_named(obj, local) } =>
+            {
+                crate::syscall::retire_threads(|tcb| runs_on(tcb, obj));
             }
             // only the kinds matched above are collected in the mark phase.
             _ => {}

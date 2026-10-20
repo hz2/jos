@@ -227,6 +227,11 @@ jos intentionally departs from seL4 in three places:
   outstanding ref to it goes stale at once. A subtree revoke removes the
   subtree leaves first across every registered space; userspace asks for it
   with the `Revoke` syscall.
+  A thread stops for good when its TCB, or the CNode or VSpace it runs in,
+  loses its last capability: it leaves the run queue and any IPC wait. Because
+  a TCB does not hold capabilities to its own CNode and VSpace (seL4 TCBs do),
+  revoking every capability to them is what retires the thread; revoking a
+  copy, while the original remains, leaves it running.
 
 - **Two-level addressing (global object table + per-CSpace cap table).** seL4
   addresses objects via raw CNode pointers traversed from a root CNode. jos

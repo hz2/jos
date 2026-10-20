@@ -28,15 +28,60 @@ grub-mkrescue -d "$(dirname "$(command -v grub-mkrescue)")/../lib/grub/i386-pc" 
     -o "$ISO" "$BUILD_DIR" >/dev/null 2>&1 \
   || grub-mkrescue -o "$ISO" "$BUILD_DIR" >/dev/null 2>&1
 
+# JOS_QEMU_ACCEL picks the accelerator: tcg (default, software emulation) or
+# kvm (hardware virtualization; -cpu host, since max under kvm means the host).
+# JOS_QEMU_CPU overrides the cpu model either way.
+case "${JOS_QEMU_ACCEL:-tcg}" in
+    tcg) ACCEL=(-accel tcg); CPU="${JOS_QEMU_CPU:-max}" ;;
+    kvm) ACCEL=(-accel kvm); CPU="${JOS_QEMU_CPU:-host}" ;;
+    *) echo "run-qemu: JOS_QEMU_ACCEL must be tcg or kvm" >&2; exit 2 ;;
+esac
+
+# JOS_QEMU_RR=record or replay runs under deterministic record/replay into
+# JOS_QEMU_RR_FILE: a recorded failure replays instruction for instruction.
+# replay needs instruction counting and the cd image behind blkreplay, so its
+# reads are part of the recording too; it only works under tcg.
+DISK=(-cdrom "$ISO")
+RR=()
+if [ -n "${JOS_QEMU_RR:-}" ]; then
+    case "$JOS_QEMU_RR" in
+        record|replay) ;;
+        *) echo "run-qemu: JOS_QEMU_RR must be record or replay" >&2; exit 2 ;;
+    esac
+    if [ "${JOS_QEMU_ACCEL:-tcg}" != tcg ]; then
+        echo "run-qemu: record/replay needs JOS_QEMU_ACCEL=tcg" >&2
+        exit 2
+    fi
+    RR_FILE="${JOS_QEMU_RR_FILE:?run-qemu: set JOS_QEMU_RR_FILE for record/replay}"
+    RR=(-icount "shift=auto,rr=$JOS_QEMU_RR,rrfile=$RR_FILE")
+    # a replay must boot the very image the recording read, and grub-mkrescue
+    # output is not byte-stable, so the recording keeps its own copy.
+    if [ "$JOS_QEMU_RR" = record ]; then
+        cp "$ISO" "$RR_FILE.iso"
+        sha256sum < "$KERNEL" > "$RR_FILE.kernel"
+    elif ! sha256sum < "$KERNEL" | cmp -s - "$RR_FILE.kernel"; then
+        echo "run-qemu: $RR_FILE recorded a different kernel than $KERNEL" >&2
+        exit 2
+    fi
+    ISO="$RR_FILE.iso"
+    DISK=(
+        -drive "file=$ISO,if=none,id=iso,media=cdrom,readonly=on,snapshot=on"
+        -drive "driver=blkreplay,if=none,image=iso,id=iso-rr"
+        -device "ide-cd,drive=iso-rr"
+    )
+fi
+
 # boot headless, bounded by a timeout so a wedged guest fails the test instead
 # of hanging it (override with JOS_QEMU_TIMEOUT seconds). capture qemu's exit
 # code: isa-debug-exit maps a guest write of N at port 0xf4 to a host exit of (N<<1)|1, so success (0x10) => 33.
 set +e
 timeout --foreground -k 5 "${JOS_QEMU_TIMEOUT:-120}" qemu-system-x86_64 \
     -machine q35 \
-    -cpu max \
+    "${ACCEL[@]}" \
+    -cpu "$CPU" \
     -m 128M \
-    -cdrom "$ISO" \
+    "${DISK[@]}" \
+    "${RR[@]}" \
     -serial mon:stdio \
     -display none \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

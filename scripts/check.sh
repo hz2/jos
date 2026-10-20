@@ -10,8 +10,9 @@
 #   kani [harness]  bounded proofs (all, or one harness)
 #   verus           verus proof module (jos-core/src/proof.rs)
 #   qemu [test]     boot kernel tests under qemu (all, or one by name)
+#   qemu-kvm [test] the same under kvm instead of tcg, skipped without /dev/kvm
 #   fast            style + clippy + test (pre-commit)
-#   ci              fast + miri + kani + qemu (pre-push, ci)
+#   ci              fast + miri + kani + qemu + qemu-kvm (pre-push, ci)
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -48,18 +49,27 @@ qemu() {
         (cd kernel && cargo test --test "$1")
     fi
 }
+qemu-kvm() {
+    # timing differs a lot between accelerators, so a test that only passes
+    # under one of them is caught here.
+    if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        echo "[check] qemu-kvm: no usable /dev/kvm, skipped"
+        return 0
+    fi
+    JOS_QEMU_ACCEL=kvm qemu "$@"
+}
 fast() { style; clippy; test; }
-ci() { fast; miri; kani; qemu; }
+ci() { fast; miri; kani; qemu; qemu-kvm; }
 
 if [ $# -eq 0 ]; then
-    sed -n '5,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '5,16p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
 gate=$1
 shift
 case "$gate" in
-    style|clippy|test|miri|kani|verus|qemu|fast|ci)
+    style|clippy|test|miri|kani|verus|qemu|qemu-kvm|fast|ci)
         echo "[check] $gate $*"
         "$gate" "$@"
         ;;

@@ -10,6 +10,7 @@
 | bounded proofs | `#[cfg(kani)] mod kani_proofs` | `check.sh kani` | pre-push, CI |
 | functional proofs | `jos-core/src/proof.rs` | `check.sh verus` | manual |
 | boot / integration | `kernel/tests/*.rs`, one QEMU image each | `check.sh qemu` | pre-push, CI |
+| boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push, CI (skipped without `/dev/kvm`) |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
@@ -18,6 +19,13 @@ two labels and copied into the user code page (see `kernel/tests/badged_ipc.rs`)
 
 Every new oracle or proof gets a negative control: break the property, confirm
 the test fails, revert.
+
+Running under both TCG and KVM matters because their timing differs by orders
+of magnitude: a loop that spans several timer ticks under TCG finishes inside
+one under KVM. `tcb_revoke` first measured its waits in loop iterations and
+checked nothing under KVM (its mutation still passed); it now waits on the TSC.
+A test that waits for something to happen or not happen should measure time,
+not iterations, and its negative control should fail under both accelerators.
 
 ## Background notes (blog_os era)
 

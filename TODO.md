@@ -84,10 +84,10 @@ Check items off in the same commit that finishes them.
 ## Testing layers
 
 - [x] activated swarm operation mixes in every DST harness (odd seeds)
-- [ ] QEMU matrix: run the suite under TCG and KVM (`-accel kvm -cpu host`) and a
-      few `-cpu` models
-- [ ] QEMU record/replay (`-icount rr=record/replay`) so a failing QEMU test
-      replays instruction for instruction
+- [x] run the QEMU suite under KVM as well as TCG (`check.sh qemu-kvm`, in ci)
+- [ ] a few `-cpu` models in the matrix (`JOS_QEMU_CPU`), e.g. without SMAP
+- [x] QEMU record/replay (`JOS_QEMU_RR`) so a failing QEMU test replays
+      instruction for instruction
 - [ ] model-based kernel testing: a ring-3 syscall interpreter driven over
       serial by a host-side Hypothesis state machine, checked against a
       reference model (easier once the M2 user crate exists)

@@ -107,6 +107,24 @@ with ring 0 barred from executing or touching user pages. The timeout
 (`JOS_QEMU_TIMEOUT`, default 120 s) turns a wedged guest into a failure, and a
 fatal page fault exits QEMU with the failure code instead of halting.
 
+The runner takes a few more knobs from the environment:
+
+| variable | effect |
+|---|---|
+| `JOS_QEMU_ACCEL` | `tcg` (default, software emulation) or `kvm` (hardware virtualization, with `-cpu host`) |
+| `JOS_QEMU_CPU` | overrides the CPU model |
+| `JOS_QEMU_RR` | `record` or `replay`: deterministic record/replay into `JOS_QEMU_RR_FILE` (TCG only) |
+
+A recording keeps the exact ISO it booted (`<file>.iso`) and the kernel's hash
+(`<file>.kernel`), so a replay boots the same image and refuses a different
+kernel. To capture a failing test and replay it instruction for instruction:
+
+```bash
+cd kernel
+JOS_QEMU_RR=record JOS_QEMU_RR_FILE=/tmp/fail.rr cargo test --test tcb_revoke
+JOS_QEMU_RR=replay JOS_QEMU_RR_FILE=/tmp/fail.rr cargo test --test tcb_revoke
+```
+
 ## Testing
 
 Tests are headless QEMU integration tests; output comes back over the serial
@@ -115,6 +133,7 @@ port and the guest exits via the `isa-debug-exit` device:
 ```bash
 scripts/check.sh qemu              # every kernel test
 scripts/check.sh qemu badged_ipc   # one test
+scripts/check.sh qemu-kvm            # every kernel test under KVM
 ```
 
 The `isa-debug-exit` device maps a guest write of `N` at port `0xf4` to a host

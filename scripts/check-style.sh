@@ -17,13 +17,20 @@ report() {
 for f in "$@"; do
     [ -f "$f" ] || continue
     case "$f" in
-        *.rs|*.md|*.toml|*.sh|*.s|*.nix|*.json|*.yml) ;;
+        *.rs|*.md|*.toml|*.sh|*.s|*.nix|*.json|*.yml|*.expect) ;;
         *) continue ;;
     esac
 
     # non-ascii covers em dashes, smart quotes, and emojis in one rule.
     if hits=$(grep -nP '[^\x00-\x7F]' "$f"); then
         report "$f: non-ascii characters (no em dashes or emojis):"
+        echo "$hits" | head -5 >&2
+    fi
+
+    # a stray control character (a raw NUL, say) makes tools take the file for
+    # binary and skip it; source spells such bytes as escapes.
+    if hits=$(grep -naP '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]' "$f" | cat -v); then
+        report "$f: control characters (write an escape such as \\0 instead):"
         echo "$hits" | head -5 >&2
     fi
 

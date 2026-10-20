@@ -37,6 +37,7 @@ confirm the proof fails, revert.
 | CLOCK-1 | `KernelClock` is monotone; deadlines are never in the past | Kani | `clock.rs` |
 | SCHED-1 | round robin serves all N threads in N steps (starvation-freedom); removing a thread takes out exactly that one and keeps the others in order, and the queue invariant holds across enqueue, dequeue, and remove | Kani | `sched_policy.rs`, `run_queue.rs` |
 | INV-1 | the ring buffer and run queue declare their representation invariants (`kani::Invariant`), and every push, pop, enqueue, dequeue, and remove keeps them from any valid state, not only from states a few operations past empty | Kani | `ring_buffer.rs`, `run_queue.rs` |
+| PTE-SPLIT | splitting a 2 MiB page into 512 4 KiB entries preserves every translation in it and its present, writable, user, and no-execute bits (what makes a guard page safe to carve out of the identity map) | Kani | `pte.rs` |
 | IPC-1 | deadlock-freedom under receive-with-timeout | DST | `jos-core/tests/dst_recv_timeout.rs` |
 | ARITH-1 | Verus build plumbing works without breaking test, Miri, or Kani | Verus | `proof.rs` |
 

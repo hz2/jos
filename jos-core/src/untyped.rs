@@ -92,15 +92,23 @@ pub const PAGE_TABLE_SIZE: usize = 4096;
 
 /// Size of one `Tcb` (thread control block) object in bytes.
 ///
-/// 16 KiB: a [`TCB_HEADER_SIZE`]-byte header (the saved register context, the
-/// `CSpace`/`VSpace` roots, and scheduling state) followed by the thread's own
-/// kernel stack, which grows down from the end of the object. Carving one
-/// object gives a complete thread, so the kernel never allocates a stack.
-pub const TCB_SIZE: usize = 16 * 1024;
+/// 20 KiB, five pages: the first holds a [`TCB_HEADER_SIZE`]-byte header (the
+/// saved register context, the `CSpace`/`VSpace` roots, and scheduling state),
+/// the second is a guard page the kernel leaves unmapped, and the last three
+/// are the thread's own kernel stack, which grows down from the end of the
+/// object toward the guard. Carving one object gives a complete thread, so the
+/// kernel never allocates a stack, and a stack overflow faults on the guard
+/// instead of overwriting the header.
+pub const TCB_SIZE: usize = 20 * 1024;
 
-/// Size of the header at the start of a `Tcb` object; the rest of the object
-/// is the thread's kernel stack.
+/// Size of the header at the start of a `Tcb` object.
 pub const TCB_HEADER_SIZE: usize = 512;
+
+/// Offset of the unmapped guard page within a `Tcb` object.
+pub const TCB_GUARD_OFFSET: usize = 4096;
+
+/// Offset of the kernel stack within a `Tcb` object; it runs to the end.
+pub const TCB_STACK_OFFSET: usize = 2 * 4096;
 
 /// Alignment requirement of a `Tcb` object in bytes (page-aligned).
 pub const TCB_ALIGN: usize = 4096;

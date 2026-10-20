@@ -41,7 +41,7 @@ use jos_core::placement::{place, place_zeroed, PlaceError};
 use jos_core::untyped::{
     ObjectType, CNODE_ALIGN, CNODE_SIZE, ENDPOINT_ALIGN, ENDPOINT_SIZE, FRAME_ALIGN, FRAME_SIZE,
     NOTIFICATION_ALIGN, NOTIFICATION_SIZE, PAGE_TABLE_SIZE, REPLY_ALIGN, REPLY_SIZE, TCB_ALIGN,
-    TCB_HEADER_SIZE, TCB_SIZE,
+    TCB_GUARD_OFFSET, TCB_HEADER_SIZE, TCB_SIZE, TCB_STACK_OFFSET,
 };
 use spin::Mutex;
 
@@ -870,8 +870,9 @@ impl Default for Tcb {
 
 const _: () = assert!(core::mem::size_of::<Tcb>() == TCB_HEADER_SIZE);
 
-/// A whole TCB object as placed in untyped memory: the [`Tcb`] header, then the
-/// thread's kernel stack, which grows down from the end of the object.
+/// A whole TCB object as placed in untyped memory: the [`Tcb`] header page, an
+/// unmapped guard page, then the thread's kernel stack, which grows down from
+/// the end of the object toward the guard.
 ///
 /// Sized and aligned to match [`ObjectType::Tcb`], so carving one object gives
 /// a complete thread and the kernel never allocates a stack.
@@ -879,13 +880,20 @@ const _: () = assert!(core::mem::size_of::<Tcb>() == TCB_HEADER_SIZE);
 pub struct TcbObject {
     /// The thread control block itself.
     pub tcb: Tcb,
+    /// The rest of the header page.
+    _header_rest: [u8; TCB_GUARD_OFFSET - TCB_HEADER_SIZE],
+    /// Left unmapped by [`UntypedRegion::retype_tcb`], so a kernel stack
+    /// overflow faults here instead of overwriting the header.
+    _guard: [u8; TCB_STACK_OFFSET - TCB_GUARD_OFFSET],
     /// The thread's kernel stack.
-    stack: [u8; TCB_SIZE - TCB_HEADER_SIZE],
+    stack: [u8; TCB_SIZE - TCB_STACK_OFFSET],
 }
 
 const _: () = assert!(core::mem::size_of::<TcbObject>() == TCB_SIZE);
 const _: () = assert!(core::mem::align_of::<TcbObject>() == TCB_ALIGN);
 const _: () = assert!(core::mem::offset_of!(TcbObject, tcb) == 0);
+const _: () = assert!(core::mem::offset_of!(TcbObject, _guard) == TCB_GUARD_OFFSET);
+const _: () = assert!(core::mem::offset_of!(TcbObject, stack) == TCB_STACK_OFFSET);
 
 // --------------------------------------------------------------------------
 // CNode object
@@ -1098,10 +1106,13 @@ impl UntypedRegion {
     }
 
     /// Carves a fresh inactive [`Tcb`] out of this region and returns its
-    /// handle. Returns `None` if the region has no room for another `Tcb`.
+    /// handle, with the guard page under its kernel stack unmapped. Returns
+    /// `None` if the region has no room for another `Tcb`, or if the guard
+    /// cannot be unmapped (the split-table pool is exhausted); the memory is
+    /// spent either way, since untyped memory is never reclaimed.
     pub fn retype_tcb(&mut self) -> Option<ObjectId> {
         // reserve the whole object zeroed (the stack needs no other start), then
-        // write only the small header in place: the object is four pages, far
+        // write only the small header in place: the object is five pages, far
         // too big to build by value on a syscall stack.
         let id = self.retype_zeroed(ObjectType::Tcb, ObjectKind::Tcb)?;
         let ptr = core::ptr::with_exposed_provenance_mut::<TcbObject>(id.addr);
@@ -1112,6 +1123,9 @@ impl UntypedRegion {
             core::ptr::addr_of_mut!((*ptr).tcb).write(Tcb::new());
             (*ptr).tcb.kernel_stack_top = (id.addr + TCB_SIZE) as u64;
         }
+        // SAFETY: the guard page lies inside the object just carved, and nothing
+        // reads or writes it; retype runs single-CPU with interrupts disabled.
+        unsafe { crate::guard_page::unmap_identity_page((id.addr + TCB_GUARD_OFFSET) as u64) }.ok()?;
         Some(id)
     }
 

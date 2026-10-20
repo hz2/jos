@@ -204,10 +204,14 @@ leaks the kernel GS base to user mode.
 
 ## Starting Threads
 
-A TCB object is 16 KiB: a 512-byte header (the saved register context, the
-`CSpace` and `VSpace` roots, scheduling state) followed by the thread's own
-kernel stack, so carving one object gives a complete thread and the kernel
-never allocates a stack. A thread that holds the capabilities starts another in
+A TCB object is 20 KiB, five pages: a header page (the saved register context,
+the `CSpace` and `VSpace` roots, scheduling state), a guard page, and the
+thread's own 12 KiB kernel stack, so carving one object gives a complete
+thread and the kernel never allocates a stack. `retype_tcb` unmaps the guard
+page from the kernel's identity map (splitting the 2 MiB page around it into
+4 KiB pages, a split Kani proves changes no other translation), so a kernel
+stack overflow faults there and double-faults onto its IST stack instead of
+overwriting the header. The boot stack has the same guard, set up in `boot.s`. A thread that holds the capabilities starts another in
 three steps, each checked on its own: `TcbConfigure` gives it a CNode and a
 `VSpace`, `TcbSetIpcBuffer` registers its buffer frame, and `TcbStart` sets its
 entry point and stack and hands it to the scheduler. A thread starts once.

@@ -31,6 +31,8 @@ pub mod executor;
 #[cfg(target_arch = "x86_64")]
 pub mod gdt;
 #[cfg(target_arch = "x86_64")]
+pub mod guard_page;
+#[cfg(target_arch = "x86_64")]
 pub mod interrupts;
 #[cfg(target_arch = "x86_64")]
 pub mod keyboard;

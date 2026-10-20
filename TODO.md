@@ -62,8 +62,10 @@ Check items off in the same commit that finishes them.
 - [ ] FPU/SSE save on context switch (latent bug once user code touches xmm)
 - [x] guard page under the boot stack, so an overflow double-faults instead of
       corrupting .bss
-- [ ] guard pages under per-thread kernel stacks (TCB objects and the test
-      harness stacks); a syscall path that overflows one corrupts memory silently
+- [x] guard pages under TCB kernel stacks: the page below each stack is unmapped,
+      so an overflow faults instead of overwriting the TCB header
+- [ ] guard pages for the test harness' static kernel stacks (`KSTACKS` in
+      `kernel/tests/common/threads.rs`), which are not TCB objects
 - [ ] NMI / #MC on IST stacks
 - [ ] give the blocking-IPC tables (`BLOCKED_SENDS` / `BLOCKED_RECVS`) a pure
       model in jos-core so the direct-handoff path is covered by Kani like the

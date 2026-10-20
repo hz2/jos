@@ -27,7 +27,7 @@ Everything the kernel manages is one of these:
 | `Untyped` | `cap.rs` / `untyped.rs` | `2^size_bits` bytes, naturally aligned | Raw memory region; all other objects carved from it |
 | `PageTable` | `cap.rs` | 4096 / 4096 bytes | One x86_64 page-table frame; used as PML4 root or intermediate table |
 | `CNode` (CSpace) | `cap.rs` | 4096 / 4096 bytes | A `KernelCNode` holding a `KernelCapSpace`; the per-task capability table |
-| `Tcb` | `cap.rs` | 16384 / 4096 bytes | Thread control block: a 512-byte header (saved context, CSpace and VSpace roots) followed by the thread's own kernel stack |
+| `Tcb` | `cap.rs` | 20480 / 4096 bytes | Thread control block: a header page (saved context, CSpace and VSpace roots), an unmapped guard page, then the thread's own 12 KiB kernel stack |
 | `Endpoint` | `cap.rs` | 128 / 64 bytes | Synchronous IPC endpoint with parked-sender and parked-receiver waker slots |
 | `Notification` | `cap.rs` | 64 / 64 bytes | Asynchronous signal word: badges OR together, one parked waiter |
 | `Reply` | `cap.rs` | 128 / 64 bytes | One-shot reply: bound to a caller by `Call`, answered once by `Reply` |

@@ -193,6 +193,25 @@ pub const fn is_present(entry: u64) -> bool {
     entry & PteFlags::PRESENT.bits() != 0
 }
 
+/// Size of the region one huge page-directory entry maps: 2 MiB.
+pub const HUGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Returns entry `i` (of 512) of the 4 KiB page table that replaces the huge
+/// page-directory entry `huge`: the `i`th page of the same 2 MiB region, with
+/// the same permission bits. `HUGE_PAGE` is dropped, since bit 7 means
+/// something else (PAT) in a 4 KiB entry, and so are the region's low address
+/// bits, where a huge entry keeps its own PAT bit.
+///
+/// Splitting a huge page this way changes no translation (proven below), which
+/// is what lets the kernel unmap one 4 KiB page of its identity map, a guard
+/// page, without disturbing its neighbours.
+#[must_use]
+pub const fn split_huge_entry(huge: u64, i: usize) -> u64 {
+    let base = frame_addr(huge) & !(HUGE_PAGE_SIZE - 1);
+    let page = (i as u64 % 512) * 4096;
+    encode(base + page, flags(huge) & !PteFlags::HUGE_PAGE.bits())
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -285,7 +304,7 @@ mod tests {
 
 #[cfg(kani)]
 mod kani_proofs {
-    use super::{ADDR_MASK, FLAGS_MASK, encode, flags, frame_addr};
+    use super::{ADDR_MASK, FLAGS_MASK, HUGE_PAGE_SIZE, PteFlags, encode, flags, frame_addr, split_huge_entry};
 
     /// The two masks partition all 64 bits: complementary and exhaustive.
     #[kani::proof]
@@ -332,5 +351,27 @@ mod kani_proofs {
         let entry = encode(addr, f);
         assert_eq!(frame_addr(entry), addr & ADDR_MASK);
         assert_eq!(flags(entry), f & FLAGS_MASK);
+    }
+
+    /// Splitting a huge page preserves every translation in it: for any
+    /// present 2 MiB entry and any offset into its region, the 4 KiB entry
+    /// covering that offset maps it to the same physical address, with the
+    /// same present, writable, user, and no-execute bits, and without
+    /// `HUGE_PAGE`.
+    #[kani::proof]
+    fn split_preserves_translation() {
+        let huge: u64 = kani::any();
+        kani::assume(huge & PteFlags::HUGE_PAGE.bits() != 0);
+        let offset: u64 = kani::any();
+        kani::assume(offset < HUGE_PAGE_SIZE);
+        let region = frame_addr(huge) & !(HUGE_PAGE_SIZE - 1);
+        let small = split_huge_entry(huge, (offset / 4096) as usize);
+        assert_eq!(frame_addr(small) + offset % 4096, region + offset);
+        let kept = PteFlags::PRESENT
+            | PteFlags::WRITABLE
+            | PteFlags::USER
+            | PteFlags::NO_EXECUTE;
+        assert_eq!(flags(small) & kept.bits(), flags(huge) & kept.bits());
+        assert_eq!(small & PteFlags::HUGE_PAGE.bits(), 0);
     }
 }

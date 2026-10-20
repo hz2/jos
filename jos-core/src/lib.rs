@@ -38,6 +38,7 @@ pub mod cap_rights;
 pub mod cap_space;
 pub mod cap_table;
 pub mod clock;
+pub mod elf;
 pub mod endpoint;
 pub mod fault;
 pub mod frame_allocator;

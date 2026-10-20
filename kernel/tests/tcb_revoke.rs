@@ -56,7 +56,7 @@ core::arch::global_asm!(
     "20:", "pause", "cmp qword ptr [r12], 0", "je 20b",
     "mov eax, 21", "mov edi, 2", "syscall", "cmp rax, 1", "jne 9f",
     "mov rbx, [r12]",
-    "mov ecx, 0x2000000", "21:", "dec ecx", "jnz 21b",
+    "call 70f",
     "cmp rbx, [r12]", "jne 9f",
     // 2: copy the endpoint, READ only, into slot 0 of B's and C's CNodes
     "mov eax, 20", "mov edi, 5", "mov esi, 8", "mov edx, 0x10000", "syscall", "test rax, rax", "jne 9f",
@@ -66,14 +66,14 @@ core::arch::global_asm!(
     "mov eax, 19", "mov edi, 4", "lea rsi, [rip + 52f]", "mov rdx, 0x200000001800", "syscall",
     "test rax, rax", "jne 9f",
     "22:", "pause", "cmp qword ptr [r12 + 8], 0", "je 22b",
-    "mov ecx, 0x800000", "23:", "dec ecx", "jnz 23b",
+    "call 70f",
     "mov eax, 21", "mov edi, 5", "syscall", "cmp rax, 1", "jne 9f",
     // 3: start C; a blocking send must reach C, and B must get nothing
     "mov eax, 17", "mov edi, 6", "mov esi, 7", "xor edx, edx", "syscall", "test rax, rax", "jne 9f",
     "mov eax, 19", "mov edi, 6", "lea rsi, [rip + 53f]", "mov rdx, 0x200000001800", "syscall",
     "test rax, rax", "jne 9f",
     "mov eax, 6", "mov edi, 8", "mov esi, 0x77", "syscall", "test rax, rax", "jne 9f",
-    "mov ecx, 0x4000000", "24:", "cmp qword ptr [r12 + 0x18], 0x77", "je 25f", "dec ecx", "jnz 24b",
+    "call 72f", "24:", "cmp qword ptr [r12 + 0x18], 0x77", "je 25f", "call 73f", "jb 24b",
     "jmp 9f",
     "25:",
     "cmp qword ptr [r12 + 0x10], 0", "jne 9f",
@@ -82,7 +82,7 @@ core::arch::global_asm!(
     "mov eax, 8", "mov edi, 6", "mov esi, 0xff", "xor edx, edx", "syscall",
     "mov rdi, rax", "mov eax, 21", "syscall", "cmp rax, 1", "jne 9f",
     "mov eax, 6", "mov edi, 8", "mov esi, 0x78", "syscall", "test rax, rax", "jne 9f",
-    "mov ecx, 0x4000000", "26:", "cmp qword ptr [r12 + 0x18], 0x78", "je 27f", "dec ecx", "jnz 26b",
+    "call 72f", "26:", "cmp qword ptr [r12 + 0x18], 0x78", "je 27f", "call 73f", "jb 26b",
     "jmp 9f",
     "27:",
     // 5: start D, wait until it runs, revoke the address space; it must freeze
@@ -92,13 +92,23 @@ core::arch::global_asm!(
     "28:", "pause", "cmp qword ptr [r12 + 0x20], 0", "je 28b",
     "mov eax, 21", "xor edi, edi", "syscall", "cmp rax, 1", "jne 9f",
     "mov rbx, [r12 + 0x20]",
-    "mov ecx, 0x2000000", "29:", "dec ecx", "jnz 29b",
+    "call 70f",
     "cmp rbx, [r12 + 0x20]", "jne 9f",
     "mov eax, 1", "mov edi, 0x10", "syscall",
     "9:",
     "mov eax, 1", "mov edi, 0x11", "syscall",
     "3:",
     "jmp 3b",
+    // time is read from the tsc, not counted in loop iterations, so a wait spans
+    // several timer ticks on any accelerator (a tcg loop runs far slower than a
+    // kvm one). 70: spin for 2^31 cycles. 72: start a 2^31-cycle deadline in
+    // r14; 73: set CF while it has not passed. both clobber rax and rdx.
+    "70:", "call 72f",
+    "71:", "pause", "call 73f", "jb 71b",
+    "ret",
+    "72:", "rdtsc", "shl rdx, 32", "or rax, rdx", "mov r14, rax", "ret",
+    "73:", "rdtsc", "shl rdx, 32", "or rax, rdx", "sub rax, r14",
+    "mov rdx, 0x80000000", "cmp rax, rdx", "ret",
     // A and D: bump a counter forever
     "51:", "mov r12, 0x200000001000",
     "31:", "lock inc qword ptr [r12]", "jmp 31b",

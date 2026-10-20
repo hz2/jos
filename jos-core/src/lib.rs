@@ -44,6 +44,7 @@ pub mod fault;
 pub mod frame_allocator;
 pub mod ipc_buffer;
 pub mod mapping;
+pub mod multiboot2;
 pub mod notification;
 pub mod page_table;
 pub mod placement;

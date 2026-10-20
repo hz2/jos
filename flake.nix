@@ -42,15 +42,15 @@
         # `verify` shell so the default shell stays minimal and rock-solid.
         verus = pkgs.callPackage ./nix/verus.nix { };
 
-        # Kani 0.67.0 pins its own nightly (nightly-2025-11-21, rustc 1.93). It
+        # Kani 0.68.0 pins its own nightly (nightly-2026-08-21). It
         # execs ./toolchain/bin/cargo and its kani-compiler links that toolchain's
         # librustc_driver. Build exactly that toolchain via fenix (cargo + rustc +
         # rust-src for build-std + rustc-dev for librustc_driver + std), and hand it
         # to the kani derivation, replacing what `cargo kani setup` would fetch.
         kaniToolchainOf = fenix.packages.${system}.toolchainOf {
           channel = "nightly";
-          date = "2025-11-21";
-          sha256 = "sha256-P39FCgpfDT04989+ZTNEdM/k/AE869JKSB4qjatYTSs=";
+          date = "2026-08-21";
+          sha256 = "sha256-PDDMZVp1SdCzABXNAy+Unocj2lrQOfZy0EUgu66k520=";
         };
         kaniToolchain = fenix.packages.${system}.combine [
           kaniToolchainOf.cargo

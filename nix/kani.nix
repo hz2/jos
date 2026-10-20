@@ -19,18 +19,18 @@
 #     `toolchain/` dir it expects `cargo kani setup` to have created as a
 #     symlink to the matching rustup toolchain). And kani-compiler is a rustc
 #     driver linked against librustc_driver-<hash>.so from that same toolchain
-#     (nightly-2025-11-21, rustc 1.93). We satisfy both by symlinking
-#     `toolchain` -> kaniToolchain (a full fenix nightly-2025-11-21 with
+#     (nightly-2026-08-21). We satisfy both by symlinking
+#     `toolchain` -> kaniToolchain (a full fenix nightly-2026-08-21 with
 #     cargo+rustc+rust-src+rustc-dev+std) and putting its lib dir on
 #     LD_LIBRARY_PATH so librustc_driver resolves.
 
 stdenv.mkDerivation rec {
   pname = "kani";
-  version = "0.67.0";
+  version = "0.68.0";
 
   src = fetchurl {
     url = "https://github.com/model-checking/kani/releases/download/kani-${version}/kani-${version}-x86_64-unknown-linux-gnu.tar.gz";
-    hash = "sha256-O196/TtRYD7nINt7wbxP5GtaT1022q2ZOcS0xli1GsA=";
+    hash = "sha256-MuK0hNc+3gu/ZKLPCHnEJZQiSX2K7E7mfUSN6a54Q9M=";
   };
 
   nativeBuildInputs = [ autoPatchelfHook makeWrapper ];

@@ -588,7 +588,9 @@ const _: () = assert!(core::mem::align_of::<Notification>() == NOTIFICATION_ALIG
 pub struct ReplyInner {
     /// The verified one-shot reply state.
     state: reply::Reply,
-    /// Scheduler id of the bound caller; `Some` exactly when `state` is waiting.
+    /// Scheduler token of the bound caller (see [`crate::sched::token`]), so a
+    /// caller that retires is never confused with the next thread in its slot;
+    /// `Some` exactly when `state` is waiting.
     caller: Option<usize>,
 }
 
@@ -599,7 +601,7 @@ impl ReplyInner {
         self.state.is_idle()
     }
 
-    /// Binds `caller` (a scheduler thread id) as the thread awaiting an answer.
+    /// Binds `caller` (a scheduler token) as the thread awaiting an answer.
     ///
     /// # Errors
     ///
@@ -610,8 +612,8 @@ impl ReplyInner {
         Ok(())
     }
 
-    /// Answers the bound caller with `message`, returning its thread id so the
-    /// kernel can resume it. The message passes through the model (reply, then
+    /// Answers the bound caller with `message`, returning its token so the
+    /// kernel can resume it if it still runs. The message passes through the model (reply, then
     /// take), so the one-shot rule enforced is the verified one.
     ///
     /// # Errors
@@ -624,7 +626,7 @@ impl ReplyInner {
     }
 
     /// Abandons the binding (the reply capability was revoked), returning the
-    /// caller that was waiting, if any, so it can be failed instead of hanging.
+    /// caller's token, if any, so it can be failed instead of hanging.
     pub fn cancel(&mut self) -> Option<usize> {
         self.state.cancel();
         self.caller.take()
@@ -1945,7 +1947,7 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                 // a caller blocked on a revoked reply could never be answered:
                 // fail its call instead of leaving it parked forever.
                 let caller = reply_object(obj).and_then(|r| r.inner.lock().cancel());
-                if let Some(tid) = caller {
+                if let Some(tid) = caller.and_then(crate::sched::thread_of) {
                     crate::syscall::abort_call(tid);
                 }
             }

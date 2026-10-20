@@ -585,7 +585,7 @@ mod tests {
 /// relative to the array.
 #[cfg(kani)]
 mod kani_proofs {
-    use super::{BootInformation, MemoryArea, TAG_END, TAG_MEMORY_MAP, TAG_MODULE};
+    use super::{BootInformation, TAG_END, TAG_MODULE, memory_map_entries};
 
     /// Decodes the little-endian `u32` at byte `at` of `buf`.
     fn le32(buf: &[u8], at: usize) -> u32 {
@@ -633,39 +633,30 @@ mod kani_proofs {
         assert!(tags.next().is_none());
     }
 
-    /// The memory map yields exactly the entries the format places in each
-    /// memory map tag, in order, each decoded from bytes inside its own tag:
-    /// entry k of a tag sits at payload offset 8 + k * entry_size and ends
-    /// inside the tag, and a tag whose entry size is below 24 yields nothing.
+    /// One memory map tag yields exactly the entries the format places in it,
+    /// in order: entry k is the entry_size bytes at payload offset
+    /// 8 + k * entry_size, ending inside the payload, and a tag whose entry size
+    /// is below 24 yields nothing. With the tag walk proved to stay inside the
+    /// structure, every memory map entry lies inside its own tag. (Proving the
+    /// whole walk again over a symbolic structure took cbmc past 8 GB.)
     #[kani::proof]
-    #[kani::unwind(9)] // at most 72 / 8 - 1 = 8 tags fit, plus one exit check
+    #[kani::unwind(4)] // a 56-byte payload holds at most two 24-byte entries, plus one exit check
     fn memory_map_entries_lie_inside_their_tag() {
-        // 72 bytes is the smallest structure with two entries in one tag.
-        let buf: [u8; 72] = kani::any();
-        let Ok(info) = BootInformation::parse(&buf) else { return };
-        let mut areas = info.memory_map();
-        for tag in info.tags() {
-            if tag.tag_type != TAG_MEMORY_MAP || tag.payload.len() < 4 {
-                continue;
-            }
-            let start = offset_in(&buf, tag.payload);
-            let end = start + tag.payload.len();
-            let entry_size = le32(&buf, start) as usize;
-            if entry_size < 24 {
-                continue;
-            }
-            let mut at = start + 8;
-            while at + entry_size <= end {
-                let want = MemoryArea {
-                    base: le64(&buf, at),
-                    length: le64(&buf, at + 8),
-                    area_type: le32(&buf, at + 16),
-                };
-                assert!(areas.next() == Some(want));
+        let bytes: [u8; 56] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= bytes.len());
+        let payload = &bytes[..len];
+        let mut entries = memory_map_entries(payload);
+        let entry_size = if len >= 4 { le32(payload, 0) as usize } else { 0 };
+        if entry_size >= 24 {
+            let mut at = 8;
+            while at + entry_size <= len {
+                let Some(entry) = entries.next() else { panic!("an entry was skipped") };
+                assert!(offset_in(payload, entry) == at && entry.len() == entry_size);
                 at += entry_size;
             }
         }
-        assert!(areas.next().is_none());
+        assert!(entries.next().is_none());
     }
 
     /// Every module is decoded from its own tag: the addresses from the first

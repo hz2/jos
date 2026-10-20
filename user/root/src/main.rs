@@ -16,7 +16,9 @@
 use libjos::abi::{BootInfo, IpcSyscallError, layout, map_flags, root_slot};
 use libjos::jos_core::cap_rights::Rights;
 use libjos::jos_core::untyped::ObjectType;
+use libjos::mem::{self, Error};
 use libjos::sys::{self, Slot};
+use libjos::thread::Thread;
 use libjos::{ktap, println, rt};
 
 libjos::root_entry!(main);
@@ -25,7 +27,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 9] = [
+const CHECKS: [(&str, Check); 14] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -35,7 +37,18 @@ const CHECKS: [(&str, Check); 9] = [
     ("writable_and_executable_is_refused", writable_and_executable_is_refused),
     ("console_without_write_is_refused", console_without_write_is_refused),
     ("machine_without_write_is_refused", machine_without_write_is_refused),
+    ("threads_run_and_report_back", threads_run_and_report_back),
+    ("thread_ids_are_reused", thread_ids_are_reused),
+    ("stale_reply_reaches_no_new_thread", stale_reply_reaches_no_new_thread),
+    ("nonblocking_send_reaches_a_parked_receiver", nonblocking_send_reaches_a_parked_receiver),
+    ("nonblocking_recv_takes_a_parked_sender", nonblocking_recv_takes_a_parked_sender),
 ];
+
+/// What a thread sends to say it is about to block.
+const READY: u64 = 0x5EAD;
+
+/// What a thread sends when its work is done.
+const DONE: u64 = 0xD0E;
 
 /// Runs the mode the command line names.
 fn main(boot: &'static BootInfo) -> ! {
@@ -100,9 +113,31 @@ fn ensure(condition: bool, why: &'static str) -> Result<(), &'static str> {
     if condition { Ok(()) } else { Err(why) }
 }
 
-/// The first untyped capability the kernel handed over.
-fn untyped(boot: &BootInfo) -> Result<Slot, &'static str> {
-    boot.untyped().first().map(|u| u.slot).ok_or("no untyped memory")
+/// Retypes an object for a check, naming the failure.
+fn object(ty: ObjectType) -> Result<Slot, &'static str> {
+    mem::retype(ty).map_err(|e| match e {
+        Error::NoSlot => "out of slots",
+        Error::NoMemory => "out of untyped memory",
+        Error::Retype(_) | Error::Ipc(_) => "retype refused",
+    })
+}
+
+/// Frees the objects a check made.
+fn release(slots: &[Slot]) -> Result<(), &'static str> {
+    for &slot in slots {
+        mem::release(slot).map_err(|_| "release refused")?;
+    }
+    Ok(())
+}
+
+/// Packs three 16-bit fields (slots, or small values) into a thread argument.
+fn pack(a: u64, b: u64, c: u64) -> u64 {
+    a | b << 16 | c << 32
+}
+
+/// Returns field `i` of a [`pack`]ed argument.
+fn field(arg: u64, i: u32) -> u64 {
+    (arg >> (16 * i)) & 0xFFFF
 }
 
 /// The boot information agrees with the fixed layout and with itself.
@@ -114,7 +149,8 @@ fn boot_info_is_consistent(boot: &BootInfo) -> Result<(), &'static str> {
     ensure(!boot.untyped().is_empty(), "no untyped memory")?;
     let first_free = root_slot::FIRST_UNTYPED + boot.untyped_count;
     ensure(boot.empty.start == first_free, "empty slots do not follow the untyped")?;
-    ensure(boot.empty.end == boot.cnode_slots, "empty slots do not run to the end")
+    ensure(boot.empty.end == boot.cnode_slots, "empty slots do not run to the end")?;
+    ensure(libjos::console::ipc_buffer() == boot.ipc_buffer, "the stack does not find the ipc buffer")
 }
 
 /// The arithmetic probe crosses the boundary both ways.
@@ -123,46 +159,44 @@ fn add_probe_round_trips(_: &BootInfo) -> Result<(), &'static str> {
 }
 
 /// A retyped endpoint carries a word from a send to a receive.
-fn endpoint_carries_a_word(boot: &BootInfo) -> Result<(), &'static str> {
-    let ep = boot.empty.start;
-    sys::retype(untyped(boot)?, ObjectType::Endpoint, ep).map_err(|_| "retype endpoint")?;
+fn endpoint_carries_a_word(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
     sys::send(ep, 0x1234).map_err(|_| "send")?;
     let received = sys::recv(ep).map_err(|_| "recv")?;
+    let empty = sys::recv(ep);
+    release(&[ep])?;
     ensure(received == (0x1234, 0), "wrong word or badge")?;
-    ensure(sys::recv(ep) == Err(IpcSyscallError::WouldBlock), "empty endpoint did not refuse")?;
-    sys::revoke(ep).map(|_| ()).map_err(|_| "revoke")
+    ensure(empty == Err(IpcSyscallError::WouldBlock), "empty endpoint did not refuse")
 }
 
 /// A badged copy stamps its badge on what is sent through it.
-fn badge_arrives_with_the_message(boot: &BootInfo) -> Result<(), &'static str> {
-    let ep = boot.empty.start;
-    sys::retype(untyped(boot)?, ObjectType::Endpoint, ep).map_err(|_| "retype endpoint")?;
+fn badge_arrives_with_the_message(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
     let badged = sys::mint(ep, Rights::ALL, 7).map_err(|_| "mint")?;
     sys::send(badged, 99).map_err(|_| "send")?;
     let received = sys::recv(ep).map_err(|_| "recv")?;
-    ensure(received == (99, 7), "badge did not arrive")?;
-    sys::revoke(ep).map(|_| ()).map_err(|_| "revoke")
+    // revoking the original takes the badged copy with it.
+    release(&[ep])?;
+    ensure(received == (99, 7), "badge did not arrive")
 }
 
 /// Revoking an endpoint removes it and the copy derived from it.
-fn revoke_reaches_every_copy(boot: &BootInfo) -> Result<(), &'static str> {
-    let ep = boot.empty.start;
-    sys::retype(untyped(boot)?, ObjectType::Endpoint, ep).map_err(|_| "retype endpoint")?;
+fn revoke_reaches_every_copy(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
     let copy = sys::mint(ep, Rights::READ, 0).map_err(|_| "mint")?;
     ensure(sys::revoke(ep) == Ok(2), "revoke did not remove both")?;
+    mem::free_slot(ep);
     ensure(sys::recv(copy) == Err(IpcSyscallError::BadCap), "copy survived")?;
     ensure(sys::recv(ep) == Err(IpcSyscallError::BadCap), "original survived")
 }
 
 /// A page built from untyped maps into the root's own address space and
 /// holds data.
-fn fresh_page_maps_and_holds_data(boot: &BootInfo) -> Result<(), &'static str> {
+fn fresh_page_maps_and_holds_data(_: &BootInfo) -> Result<(), &'static str> {
     // a 2 MiB region of the first GiB that the image and the window leave alone.
     const VADDR: u64 = layout::USER_START + 0x1000_0000;
-    let (table, frame) = (boot.empty.start, boot.empty.start + 1);
-    let mem = untyped(boot)?;
-    sys::retype(mem, ObjectType::PageTable, table).map_err(|_| "retype table")?;
-    sys::retype(mem, ObjectType::Frame, frame).map_err(|_| "retype frame")?;
+    let table = object(ObjectType::PageTable)?;
+    let frame = object(ObjectType::Frame)?;
     sys::map_page_table(root_slot::VSPACE, table, VADDR).map_err(|_| "map table")?;
     sys::map_frame(root_slot::VSPACE, frame, VADDR, map_flags::WRITE).map_err(|_| "map frame")?;
     let word = VADDR as *mut u64;
@@ -172,24 +206,20 @@ fn fresh_page_maps_and_holds_data(boot: &BootInfo) -> Result<(), &'static str> {
         word.write_volatile(0xFEED_F00D);
         word.read_volatile()
     };
-    ensure(seen == 0xFEED_F00D, "page did not hold the word")?;
     sys::unmap(frame).map_err(|_| "unmap")?;
-    sys::revoke(frame).map_err(|_| "revoke frame")?;
-    sys::revoke(table).map(|_| ()).map_err(|_| "revoke table")
+    release(&[frame, table])?;
+    ensure(seen == 0xFEED_F00D, "page did not hold the word")
 }
 
 /// The kernel never maps a page both writable and executable.
-fn writable_and_executable_is_refused(boot: &BootInfo) -> Result<(), &'static str> {
+fn writable_and_executable_is_refused(_: &BootInfo) -> Result<(), &'static str> {
     const VADDR: u64 = layout::USER_START + 0x1000_0000;
-    let (table, frame) = (boot.empty.start, boot.empty.start + 1);
-    let mem = untyped(boot)?;
-    sys::retype(mem, ObjectType::PageTable, table).map_err(|_| "retype table")?;
-    sys::retype(mem, ObjectType::Frame, frame).map_err(|_| "retype frame")?;
+    let table = object(ObjectType::PageTable)?;
+    let frame = object(ObjectType::Frame)?;
     sys::map_page_table(root_slot::VSPACE, table, VADDR).map_err(|_| "map table")?;
     let wx = sys::map_frame(root_slot::VSPACE, frame, VADDR, map_flags::WRITE | map_flags::EXECUTE);
-    ensure(wx == Err(IpcSyscallError::WritableExecutable), "w+x mapping was not refused")?;
-    sys::revoke(frame).map_err(|_| "revoke frame")?;
-    sys::revoke(table).map(|_| ()).map_err(|_| "revoke table")
+    release(&[frame, table])?;
+    ensure(wx == Err(IpcSyscallError::WritableExecutable), "w+x mapping was not refused")
 }
 
 /// A console capability without `WRITE` cannot print.
@@ -206,4 +236,122 @@ fn machine_without_write_is_refused(_: &BootInfo) -> Result<(), &'static str> {
     let refused = sys::machine_halt(read_only, 0);
     sys::revoke(read_only).map_err(|_| "revoke")?;
     ensure(refused == IpcSyscallError::Denied, "read-only machine halted")
+}
+
+/// Sends twice the value in field 2 on the endpoint in field 0.
+extern "C" fn double_and_report(arg: u64) {
+    let _ = sys::send_blocking(field(arg, 0), field(arg, 2) * 2);
+}
+
+/// Calls the endpoint in field 0 and waits for an answer that never comes.
+extern "C" fn call_and_wait(arg: u64) {
+    let _ = sys::call(field(arg, 0), 5);
+}
+
+/// Reports [`READY`] on field 1, receives on field 0 (blocking), and reports
+/// the word it got on field 1.
+extern "C" fn receive_and_report(arg: u64) {
+    let (inbox, report) = (field(arg, 0), field(arg, 1));
+    let _ = sys::send_blocking(report, READY);
+    let word = sys::recv_blocking(inbox).map_or(u64::MAX, |(w, _)| w);
+    let _ = sys::send_blocking(report, word);
+}
+
+/// Reports [`READY`] on field 1, sends 55 on field 0 (blocking), and reports
+/// [`DONE`] on field 1.
+extern "C" fn send_and_report(arg: u64) {
+    let (outbox, report) = (field(arg, 0), field(arg, 1));
+    let _ = sys::send_blocking(report, READY);
+    let _ = sys::send_blocking(outbox, 55);
+    let _ = sys::send_blocking(report, DONE);
+}
+
+/// A thread started from ring 3 runs in the root's spaces and reports back.
+fn threads_run_and_report_back(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
+    let thread = Thread::spawn(double_and_report, pack(ep, 0, 21), 2).map_err(|_| "spawn")?;
+    let got = sys::recv_blocking(ep);
+    thread.reap();
+    release(&[ep])?;
+    ensure(got == Ok((42, 0)), "the thread did not report 42")
+}
+
+/// Starting and exiting more threads than the scheduler holds at once works,
+/// because a retired thread's id is reused.
+fn thread_ids_are_reused(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
+    let mut result = Ok(());
+    for round in 0..80 {
+        let Ok(thread) = Thread::spawn(double_and_report, pack(ep, 0, round), 1) else {
+            result = Err("spawn failed: are thread ids reused?");
+            break;
+        };
+        let got = sys::recv_blocking(ep);
+        thread.reap();
+        if got != Ok((round * 2, 0)) {
+            result = Err("a thread reported the wrong word");
+            break;
+        }
+    }
+    release(&[ep])?;
+    result
+}
+
+/// An answer to a caller that has since retired reaches nothing, even when a
+/// new thread now holds the retired one's scheduler id.
+fn stale_reply_reaches_no_new_thread(_: &BootInfo) -> Result<(), &'static str> {
+    let call_ep = object(ObjectType::Endpoint)?;
+    let reply = object(ObjectType::Reply)?;
+    let inbox = object(ObjectType::Endpoint)?;
+    let report = object(ObjectType::Endpoint)?;
+    let caller = Thread::spawn(call_and_wait, pack(call_ep, 0, 0), 1).map_err(|_| "spawn caller")?;
+    let request = sys::recv_reply(call_ep, reply);
+    // the reply object stays bound to the caller as it retires.
+    caller.reap();
+    let waiter = Thread::spawn(receive_and_report, pack(inbox, report, 0), 1).map_err(|_| "spawn waiter")?;
+    let ready = sys::recv_blocking(report);
+    // the waiter is parked in its receive now; the stale answer must not wake it.
+    let _ = sys::reply(reply, 99);
+    let sent = sys::send(inbox, 42);
+    let got = sys::recv_blocking(report);
+    waiter.reap();
+    release(&[call_ep, reply, inbox, report])?;
+    ensure(request.map(|(word, _)| word) == Ok(5), "the call did not arrive")?;
+    ensure(ready == Ok((READY, 0)) && sent.is_ok(), "the waiter did not start")?;
+    ensure(got == Ok((42, 0)), "the stale answer woke the thread that reused the slot")
+}
+
+/// A non-blocking send hands its message to a receiver parked in a blocking
+/// receive, instead of leaving it in the endpoint where the receiver never
+/// looks.
+fn nonblocking_send_reaches_a_parked_receiver(_: &BootInfo) -> Result<(), &'static str> {
+    let inbox = object(ObjectType::Endpoint)?;
+    let report = object(ObjectType::Endpoint)?;
+    let waiter = Thread::spawn(receive_and_report, pack(inbox, report, 0), 1).map_err(|_| "spawn")?;
+    let ready = sys::recv_blocking(report);
+    let sent = sys::send(inbox, 77);
+    // with the message handed over, nothing is left in the endpoint.
+    let stranded = sys::recv(inbox);
+    let got = if stranded.is_err() { sys::recv_blocking(report) } else { Ok((0, 0)) };
+    waiter.reap();
+    release(&[inbox, report])?;
+    ensure(ready == Ok((READY, 0)) && sent.is_ok(), "the waiter did not start")?;
+    ensure(stranded == Err(IpcSyscallError::WouldBlock), "the message stayed in the endpoint")?;
+    ensure(got == Ok((77, 0)), "the parked receiver did not get the message")
+}
+
+/// A non-blocking receive takes the message of a sender parked in a blocking
+/// send, and completes that send.
+fn nonblocking_recv_takes_a_parked_sender(_: &BootInfo) -> Result<(), &'static str> {
+    let outbox = object(ObjectType::Endpoint)?;
+    let report = object(ObjectType::Endpoint)?;
+    let sender = Thread::spawn(send_and_report, pack(outbox, report, 0), 1).map_err(|_| "spawn")?;
+    let ready = sys::recv_blocking(report);
+    let taken = sys::recv(outbox);
+    let done = if taken.is_ok() { sys::recv_blocking(report) } else { Ok((0, 0)) };
+    sender.reap();
+    release(&[outbox, report])?;
+    ensure(ready == Ok((READY, 0)), "the sender did not start")?;
+    ensure(taken == Ok((55, 0)), "the parked sender's message was not taken")?;
+    ensure(done == Ok((DONE, 0)), "the parked sender's send did not complete")
 }

@@ -38,8 +38,8 @@ use crate::{
     interrupts::{InterruptIndex, PICS, TICK_COUNT},
 };
 
-/// Maximum number of threads the scheduler can track.
-pub const MAX_THREADS: usize = 8;
+/// Maximum number of threads the scheduler can track at once.
+pub const MAX_THREADS: usize = 64;
 
 const NO_THREAD: usize = usize::MAX;
 
@@ -47,10 +47,15 @@ const NO_THREAD: usize = usize::MAX;
 ///
 /// Written by `register_thread` and cleared (to null) by `retire_thread`, both
 /// with interrupts disabled; read from the timer IRQ. Single-CPU, so no races.
-/// Ids are never reused, so a stale id (in a reply binding, say) can only ever
-/// find null, never another thread.
+/// A retired thread's slot is reused, so anything that names a thread for
+/// longer than the table does (a reply binding) holds a [`token`] instead,
+/// which also carries the slot's generation.
 static mut THREAD_TABLE: [*mut Tcb; MAX_THREADS] = [core::ptr::null_mut(); MAX_THREADS];
+/// One past the highest slot ever used, so scans skip the untouched tail.
 static mut THREAD_COUNT: usize = 0;
+/// How many threads each slot has retired; a token from an older thread in
+/// the slot no longer matches.
+static mut GENERATIONS: [u32; MAX_THREADS] = [0; MAX_THREADS];
 
 /// Active scheduling policy. Change the alias to swap in a different policy.
 type Policy = RoundRobin<MAX_THREADS>;
@@ -188,12 +193,46 @@ pub fn current_thread_id() -> usize {
 pub unsafe fn register_thread(tcb: *mut Tcb) -> usize {
     // SAFETY: single-CPU; caller ensures interrupts are off.
     unsafe {
-        let id = THREAD_COUNT;
-        assert!(id < MAX_THREADS, "scheduler thread table full");
+        let id = free_slot().expect("scheduler thread table full");
         THREAD_TABLE[id] = tcb;
-        THREAD_COUNT += 1;
+        THREAD_COUNT = THREAD_COUNT.max(id + 1);
         id
     }
+}
+
+/// Returns the lowest slot with no live thread, if any.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled.
+unsafe fn free_slot() -> Option<usize> {
+    // SAFETY: per the contract nothing writes the table meanwhile.
+    let table = unsafe { &*core::ptr::addr_of!(THREAD_TABLE) };
+    table.iter().position(|tcb| tcb.is_null())
+}
+
+/// Returns a token naming thread `id` that stays valid only as long as that
+/// thread does: [`thread_of`] maps it back, and once the thread retires and
+/// its slot is reused the token names nothing.
+#[must_use]
+pub fn token(id: usize) -> usize {
+    // SAFETY: reads one generation; single-CPU, and an out-of-range id reads
+    // nothing.
+    let generation = unsafe { (*core::ptr::addr_of!(GENERATIONS)).get(id).copied().unwrap_or(0) };
+    (generation as usize) << 32 | id
+}
+
+/// Returns the thread a [`token`] names, if it is still registered.
+#[must_use]
+pub fn thread_of(token: usize) -> Option<usize> {
+    let id = token & 0xffff_ffff;
+    // SAFETY: reads one generation; single-CPU, and an out-of-range id reads
+    // nothing.
+    let generation = unsafe { (*core::ptr::addr_of!(GENERATIONS)).get(id).copied() }?;
+    // SAFETY: id is in range (its generation exists); thread_table_entry
+    // reads one entry.
+    let live = !unsafe { thread_table_entry(id) }.is_null();
+    (live && generation as usize == token >> 32).then_some(id)
 }
 
 /// Registers `tcb` like [`register_thread`], but returns `None` instead of
@@ -204,9 +243,7 @@ pub unsafe fn register_thread(tcb: *mut Tcb) -> usize {
 /// As [`register_thread`].
 pub unsafe fn try_register_thread(tcb: *mut Tcb) -> Option<usize> {
     // SAFETY: single-CPU; the caller ensures interrupts are off.
-    if unsafe { THREAD_COUNT } >= MAX_THREADS {
-        return None;
-    }
+    unsafe { free_slot() }?;
     // SAFETY: as above, and the table has room.
     Some(unsafe { register_thread(tcb) })
 }
@@ -226,7 +263,7 @@ pub fn mark_ready(id: usize) {
 
 /// Takes thread `id` off the scheduler for good: it leaves the ready set and
 /// its table entry is cleared, so a later wakeup (an answer to a call it made,
-/// say) finds nothing to resume. Returns `true` if `id` is the thread on the
+/// say) finds nothing to resume, and its slot is free for the next thread. Returns `true` if `id` is the thread on the
 /// CPU, which the caller must then not return to.
 ///
 /// # Safety
@@ -238,8 +275,12 @@ pub unsafe fn retire_thread(id: usize) -> bool {
     }
     POLICY.lock().remove(id);
     // SAFETY: id is in range; per this function's contract nothing reads or
-    // writes the table concurrently.
-    unsafe { THREAD_TABLE[id] = core::ptr::null_mut() };
+    // writes the table concurrently. the generation moves on, so tokens for
+    // this thread name nothing once the slot is reused.
+    unsafe {
+        THREAD_TABLE[id] = core::ptr::null_mut();
+        GENERATIONS[id] = GENERATIONS[id].wrapping_add(1);
+    }
     CURRENT.load(Ordering::Relaxed) == id
 }
 
@@ -379,9 +420,11 @@ unsafe extern "C" fn timer_irq_handler(frame: *mut IrqFrame) {
 ///
 /// Called from the `syscall_entry` stub when a blocking syscall sets the
 /// `need_yield` flag. Sets [`CURRENT`] to `NO_THREAD` (the blocked thread is
-/// removed from the active slot), resets `RSP` to this thread's kernel stack
-/// top, then spins on `sti; hlt` until the timer picks the next ready thread
-/// and `iretq`s away from the `hlt`.
+/// removed from the active slot). If another thread is ready it runs at once,
+/// so a handoff (a send that readied a receiver, say) costs a switch rather
+/// than a wait for the next tick. Otherwise this resets `RSP` to the thread's
+/// kernel stack top and spins on `sti; hlt` until the timer picks the next
+/// ready thread and `iretq`s away from the `hlt`.
 ///
 /// # Safety
 ///
@@ -390,6 +433,21 @@ unsafe extern "C" fn timer_irq_handler(frame: *mut IrqFrame) {
 /// must already be saved to its `Tcb` before calling this.
 pub extern "C" fn enter_idle_from_syscall() -> ! {
     CURRENT.store(NO_THREAD, Ordering::Relaxed);
+    let next = { POLICY.lock().dequeue() };
+    if let Some(next_id) = next {
+        // SAFETY: THREAD_TABLE entries set by register_thread live for the
+        // kernel's lifetime; ring 0 with interrupts disabled on the syscall
+        // path. a ready thread's saved context is a ring-3 one, and GS holds
+        // the kernel block, which resume_context swaps back before iretq.
+        unsafe {
+            let next_tcb = THREAD_TABLE[next_id];
+            if !next_tcb.is_null() {
+                CURRENT.store(next_id, Ordering::Relaxed);
+                crate::cpu_local::switch_to(next_tcb);
+                crate::usermode::resume_context(&(*next_tcb).context);
+            }
+        }
+    }
     // SAFETY: ring-0, GS = CpuLocal; kernel_rsp holds this thread's stack top.
     // sti enables the timer IRQ so the next tick can switch to a ready thread.
     // the hlt/jmp loop is abandoned by the timer handler's iretq.

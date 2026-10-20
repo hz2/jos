@@ -1,37 +1,38 @@
 //! Console output through a Console capability.
 //!
 //! The kernel never reads a user pointer: a program copies the bytes into the
-//! data area of its own IPC buffer and passes only their length. [`print!`]
-//! and [`println!`](crate::println) format into a small stack buffer first, so
-//! a typical line costs one syscall.
+//! data area of its own IPC buffer and passes only their length. Each thread
+//! finds its IPC buffer from its stack pointer: every thread runs in a thread
+//! block (`abi::layout::THREAD_BLOCK`), and the buffer sits at a fixed offset
+//! in it, so threads sharing an address space never write each other's
+//! buffers. [`print!`] and [`println!`](crate::println) format into a small
+//! stack buffer first, so a typical line costs one syscall.
 
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::abi::IpcSyscallError;
+use crate::abi::layout::{THREAD_BLOCK, THREAD_IPC_BUFFER};
 use crate::sys::{self, Slot};
 use jos_core::ipc_buffer::{DATA_LEN, DATA_OFFSET};
 
 /// The console slot plus one; zero means this program has no console.
 static CONSOLE: AtomicU64 = AtomicU64::new(0);
 
-/// Virtual address of this thread's IPC buffer; zero means none.
-static IPC_BUFFER: AtomicU64 = AtomicU64::new(0);
-
-/// Points console output at the capability in `console`, writing through the
-/// IPC buffer mapped at `ipc_buffer`.
-pub fn init(console: Slot, ipc_buffer: u64) {
-    IPC_BUFFER.store(ipc_buffer, Ordering::Relaxed);
+/// Points console output at the capability in `console`, for every thread of
+/// this program.
+pub fn init(console: Slot) {
     CONSOLE.store(console + 1, Ordering::Relaxed);
 }
 
-/// Returns the virtual address of this thread's IPC buffer, if it has one.
+/// Returns the virtual address of the calling thread's IPC buffer: the fixed
+/// offset in the thread block its stack lives in.
 #[must_use]
-pub fn ipc_buffer() -> Option<u64> {
-    match IPC_BUFFER.load(Ordering::Relaxed) {
-        0 => None,
-        addr => Some(addr),
-    }
+pub fn ipc_buffer() -> u64 {
+    let rsp: u64;
+    // SAFETY: reads the stack pointer and nothing else.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    (rsp & !(THREAD_BLOCK - 1)) + THREAD_IPC_BUFFER
 }
 
 /// Writes `bytes` to the console, one data-area-sized chunk per syscall.
@@ -42,12 +43,12 @@ pub fn ipc_buffer() -> Option<u64> {
 /// refused the write.
 pub fn write_bytes(bytes: &[u8]) -> Result<(), IpcSyscallError> {
     let console = CONSOLE.load(Ordering::Relaxed).checked_sub(1).ok_or(IpcSyscallError::BadCap)?;
-    let buffer = ipc_buffer().ok_or(IpcSyscallError::NoIpcBuffer)?;
-    let data = usize::try_from(buffer).map_err(|_| IpcSyscallError::NoIpcBuffer)? + DATA_OFFSET;
+    let data = usize::try_from(ipc_buffer()).map_err(|_| IpcSyscallError::NoIpcBuffer)? + DATA_OFFSET;
     for chunk in bytes.chunks(DATA_LEN) {
-        // SAFETY: the IPC buffer is a writable page mapped at `buffer` for this
-        // thread, so the data area holds DATA_LEN bytes from `data`, and no
-        // reference into it is live; a chunk is at most DATA_LEN bytes.
+        // SAFETY: the thread block convention maps this thread's IPC buffer
+        // writable at that address, so the data area holds DATA_LEN bytes from
+        // `data`, and no reference into it is live; a chunk is at most DATA_LEN
+        // bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(chunk.as_ptr(), data as *mut u8, chunk.len());
         }

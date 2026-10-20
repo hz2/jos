@@ -85,3 +85,15 @@ pub(super) fn sys_tcb_start(tcb_slot: u64, entry: u64, stack_top: u64) -> u64 {
     started.map_or_else(|e: IpcSyscallError| e as u64, |()| 0)
 }
 
+
+/// Implements [`Syscall::ThreadExit`]: retires the calling thread, so the stub
+/// switches to another instead of returning to it.
+pub(super) fn sys_thread_exit() -> u64 {
+    let current = crate::cpu_local::cpu_local_ptr();
+    // SAFETY: the per-CPU block is read on the single-CPU syscall path.
+    let tcb = unsafe { (*current).current_tcb };
+    // retire_threads takes the thread out of the scheduler and every wait, and
+    // sets need_yield because it is the thread on the cpu.
+    retire_threads(|t| core::ptr::eq(t, tcb));
+    0 // ignored: the stub yields instead of sysretq'ing
+}

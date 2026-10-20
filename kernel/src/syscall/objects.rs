@@ -164,15 +164,29 @@ pub(super) fn sys_invoke(cap_slot: u64, method: u64, arg0: u64) -> u64 {
         ObjectKind::Endpoint => match method {
             ENDPOINT_SEND => {
                 let message = Message::new(0, [arg0, 0, 0, 0]);
+                // a receiver parked in a blocking receive takes it directly.
+                if cap.rights.contains(Rights::WRITE)
+                    && ipc::hand_to_parked_receiver(cap.object.phys_addr(), &message, cap.badge.0)
+                {
+                    return 0;
+                }
                 match cap_send(space, cap_ref, message) {
                     Ok(()) => 0,
                     Err(e) => invoke_errno(e),
                 }
             }
-            ENDPOINT_RECV => match cap_recv(space, cap_ref) {
-                Ok(message) => message.words[0],
-                Err(e) => invoke_errno(e),
-            },
+            ENDPOINT_RECV => {
+                // a sender parked in a blocking send is taken first.
+                if cap.rights.contains(Rights::READ)
+                    && let Some((message, _)) = ipc::take_from_parked_sender(cap.object.phys_addr(), None)
+                {
+                    return message.words[0];
+                }
+                match cap_recv(space, cap_ref) {
+                    Ok(message) => message.words[0],
+                    Err(e) => invoke_errno(e),
+                }
+            }
             _ => err(InvokeError::BadMethod),
         },
         // no methods defined for the other object kinds yet.

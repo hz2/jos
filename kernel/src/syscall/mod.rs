@@ -281,6 +281,8 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::ConsoleWrite) => platform::sys_console_write(arg0, arg1).into(),
         // machine_halt(machine_slot = arg0, code = arg1); returns only if refused.
         Some(Syscall::MachineHalt) => platform::sys_machine_halt(arg0, arg1).into(),
+        // thread_exit(): the stub switches away for good.
+        Some(Syscall::ThreadExit) => thread::sys_thread_exit().into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it

@@ -158,11 +158,16 @@ pub enum Syscall {
     /// `WRITE` on the Machine capability; does not return unless the
     /// capability is refused.
     MachineHalt = 23,
+    /// `thread_exit()`: stops the calling thread for good, as revoking its TCB
+    /// would. It needs no capability: a thread can always stop itself, which
+    /// takes nothing from anyone else. Whoever holds its capabilities still
+    /// revokes them to reclaim the slots. Does not return.
+    ThreadExit = 24,
 }
 
 impl Syscall {
     /// Every syscall, in number order; the numbers are dense from 0.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Add,
         Self::Exit,
         Self::IpcSend,
@@ -187,6 +192,7 @@ impl Syscall {
         Self::Revoke,
         Self::ConsoleWrite,
         Self::MachineHalt,
+        Self::ThreadExit,
     ];
 
     /// Maps a raw syscall number to its enum form, or `None` if it is unknown.
@@ -533,10 +539,34 @@ pub mod layout {
     /// The root task's read-only [`BootInfo`](super::BootInfo) page.
     pub const ROOT_BOOT_INFO: u64 = ROOT_IPC_BUFFER + 0x1000;
 
+    /// Size and alignment of a thread block: the region that holds one
+    /// thread's stack and IPC buffer. A thread finds its own IPC buffer by
+    /// rounding its stack pointer down to a block boundary and adding
+    /// [`THREAD_IPC_BUFFER`], so no thread-local storage is needed.
+    pub const THREAD_BLOCK: u64 = 0x2_0000;
+    /// Offset in a thread block of the lowest stack page (page 0 is a guard).
+    pub const THREAD_STACK: u64 = 0x1000;
+    /// Pages of stack a thread block can hold.
+    pub const THREAD_STACK_PAGES: u64 = 16;
+    /// Offset in a thread block of the IPC buffer, one guard page above the
+    /// top of the stack.
+    pub const THREAD_IPC_BUFFER: u64 = THREAD_STACK + THREAD_STACK_PAGES * 0x1000 + 0x1000;
+    /// Where userspace places the thread blocks of the threads it starts: the
+    /// second GiB of user space, clear of the root task's image and window.
+    pub const THREAD_BLOCKS_START: u64 = USER_START + 0x4000_0000;
+    /// One past the last thread block address.
+    pub const THREAD_BLOCKS_END: u64 = USER_START + 0x8000_0000;
+
     // everything in the window fits in it, and the image ends where it begins.
     const _: () = assert!(ROOT_BOOT_INFO + 0x1000 <= ROOT_WINDOW + 0x20_0000);
     const _: () = assert!(ROOT_WINDOW.is_multiple_of(0x20_0000));
     const _: () = assert!(ROOT_IMAGE_BASE < ROOT_IMAGE_LIMIT);
+    // the root task's window is a thread block like any other.
+    const _: () = assert!(ROOT_WINDOW.is_multiple_of(THREAD_BLOCK));
+    const _: () = assert!(ROOT_STACK_BOTTOM == ROOT_WINDOW + THREAD_STACK);
+    const _: () = assert!(ROOT_STACK_PAGES == THREAD_STACK_PAGES);
+    const _: () = assert!(ROOT_IPC_BUFFER == ROOT_WINDOW + THREAD_IPC_BUFFER);
+    const _: () = assert!(THREAD_IPC_BUFFER + 0x1000 <= THREAD_BLOCK);
 }
 
 /// The capability slots the kernel fills in the root task's `CNode`. Slot 0 is

@@ -38,7 +38,8 @@ pub unsafe fn init_root(boot: u64) -> &'static BootInfo {
         // without trustworthy boot information there is no console to report on.
         halt(BAD_BOOT_INFO);
     }
-    crate::console::init(root_slot::CONSOLE, info.ipc_buffer);
+    crate::console::init(root_slot::CONSOLE);
+    crate::mem::init(info);
     info
 }
 

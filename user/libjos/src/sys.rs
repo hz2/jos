@@ -310,3 +310,12 @@ pub fn machine_halt(machine: Slot, code: u64) -> IpcSyscallError {
         Ok(()) => panic!("machine_halt returned success"),
     }
 }
+
+/// `thread_exit()`: stops the calling thread for good.
+pub fn thread_exit() -> ! {
+    let _ = syscall1(Syscall::ThreadExit as u64, 0);
+    // the kernel never returns to a thread that exited.
+    loop {
+        core::hint::spin_loop();
+    }
+}

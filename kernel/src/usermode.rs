@@ -259,6 +259,31 @@ pub unsafe fn enter_user_mode_with_arg(entry: VirtAddr, stack_top: VirtAddr, arg
 /// and TSS `rsp0` must name this thread's kernel stack (`switch_to`), so the
 /// first syscall or interrupt lands there.
 pub unsafe fn enter_context(context: &crate::cap::SavedContext) -> ! {
+    // SAFETY: forwarded to this function's contract; GS still holds its boot
+    // value, the user one, so no swap.
+    unsafe { iret_to(context, false) }
+}
+
+/// Like [`enter_context`], but from a path that runs on the kernel's GS (the
+/// per-CPU block, after a syscall entry's `swapgs`): swaps the user GS back in
+/// before the `iretq`.
+///
+/// # Safety
+///
+/// As [`enter_context`], and GS must hold the per-CPU block.
+pub unsafe fn resume_context(context: &crate::cap::SavedContext) -> ! {
+    // SAFETY: forwarded to this function's contract.
+    unsafe { iret_to(context, true) }
+}
+
+/// Loads every register from `context` and `iretq`s into it, swapping GS
+/// first when `swap_gs` is set.
+///
+/// # Safety
+///
+/// As [`enter_context`]; `swap_gs` must say whether GS holds the kernel's
+/// per-CPU block.
+unsafe fn iret_to(context: &crate::cap::SavedContext, swap_gs: bool) -> ! {
     use crate::cap::SavedContext;
     use core::mem::offset_of;
     use x86_64::instructions::segmentation::{DS, ES, Segment};
@@ -270,10 +295,11 @@ pub unsafe fn enter_context(context: &crate::cap::SavedContext) -> ! {
         DS::set_reg(sel.user_data);
         ES::set_reg(sel.user_data);
     }
-    // SAFETY: the pushes build a well-formed iretq frame from the context, then
-    // every general register is loaded from it, rdi (the pointer) last; per the
-    // contract the frame names ring-3 code and stack, so iretq drops to ring 3
-    // and never returns.
+    // SAFETY: the pushes build a well-formed iretq frame from the context, the
+    // swap (if asked for) restores the user GS while rsi still holds the flag,
+    // then every general register is loaded from the context, rdi (the
+    // pointer) last; per the contract the frame names ring-3 code and stack,
+    // so iretq drops to ring 3 and never returns.
     unsafe {
         core::arch::asm!(
             "push qword ptr [rdi + {ss}]",
@@ -281,6 +307,10 @@ pub unsafe fn enter_context(context: &crate::cap::SavedContext) -> ! {
             "push qword ptr [rdi + {rflags}]",
             "push qword ptr [rdi + {cs}]",
             "push qword ptr [rdi + {rip}]",
+            "test rsi, rsi",
+            "jz 2f",
+            "swapgs",
+            "2:",
             "mov rax, [rdi + {rax}]",
             "mov rbx, [rdi + {rbx}]",
             "mov rcx, [rdi + {rcx}]",
@@ -298,6 +328,7 @@ pub unsafe fn enter_context(context: &crate::cap::SavedContext) -> ! {
             "mov rdi, [rdi + {rdi}]",
             "iretq",
             in("rdi") core::ptr::from_ref(context),
+            in("rsi") u64::from(swap_gs),
             ss = const offset_of!(SavedContext, ss),
             rsp = const offset_of!(SavedContext, rsp),
             rflags = const offset_of!(SavedContext, rflags),

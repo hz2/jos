@@ -35,6 +35,13 @@ pub(super) fn sys_ipc_send(cap_slot: u64, word: u64) -> u64 {
         Ok(message) => message,
         Err(e) => return e as u64,
     };
+    // a receiver parked in a blocking receive takes the message directly; it
+    // would never look in the endpoint's slot again.
+    if let Ok((endpoint_addr, badge)) = resolve_endpoint_slot(cap_slot, Rights::WRITE)
+        && hand_to_parked_receiver(endpoint_addr, &message, badge)
+    {
+        return 0;
+    }
     match cap_send(space, cap_ref, message) {
         Ok(()) => 0,
         Err(e) => ipc_errno(e),
@@ -56,6 +63,12 @@ pub(super) fn sys_ipc_recv(cap_slot: u64) -> SyscallRet {
     let Some(cap_ref) = space.ref_at(slot) else {
         return bad_cap;
     };
+    // a sender parked in a blocking send is waiting for exactly this receive.
+    if let Ok((endpoint_addr, _)) = resolve_endpoint_slot(cap_slot, Rights::READ)
+        && let Some((message, badge)) = take_from_parked_sender(endpoint_addr, None)
+    {
+        return SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge };
+    }
     match cap_recv_badged(space, cap_ref) {
         Ok((message, badge)) => SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge.0 },
         Err(e) => (ipc_errno(e) | IPC_ERR_FLAG).into(),
@@ -169,26 +182,9 @@ pub(super) fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
         Err(e) => return e as u64,
     };
 
-    // check for a waiting receiver and deliver directly (bypassing the endpoint
-    // buffer so we don't deposit a message that the parked receiver will miss).
-    {
-        let mut recvs = BLOCKED_RECVS.lock();
-        for entry in recvs.iter_mut() {
-            if let Some(recv) = entry
-                && recv.endpoint_addr == endpoint_addr {
-                    let recv_tid = recv.thread_id;
-                    *entry = None;
-                    drop(recvs);
-                    // hand the message straight to the parked receiver: its
-                    // buffer gets the words, its saved rax word 0, rdx the badge.
-                    resume_with(recv_tid, &message, badge);
-                    return 0; // send succeeded immediately
-                }
-        }
-    }
-
-    // no receiver waiting: try the non-blocking deposit path (handles the case
-    // where a receiver already called cap_recv and left a message slot open).
+    // no receiver parked and no room to deposit: park; otherwise the
+    // non-blocking path (which hands a parked receiver the message first) is
+    // the whole send.
     let nb = sys_ipc_send(cap_slot, word);
     if nb != IpcSyscallError::WouldBlock as u64 {
         return nb;
@@ -242,29 +238,9 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
         Err(e) => return err(e),
     };
 
-    // check for a waiting sender.
-    let waiting = {
-        let mut sends = BLOCKED_SENDS.lock();
-        sends
-            .iter_mut()
-            .find(|e| e.is_some_and(|s| s.endpoint_addr == endpoint_addr))
-            .and_then(Option::take)
-    };
-    if let Some(send) = waiting {
-        if send.call {
-            // the caller stays parked until a Reply answers it. with no reply
-            // object it could never be answered, so fail its call instead.
-            let bound = reply
-                .and_then(cap::reply_object)
-                .is_some_and(|r| r.inner.lock().bind(send.thread_id).is_ok());
-            if !bound {
-                abort_call(send.thread_id);
-            }
-        } else {
-            // a plain send completes now: wake the sender with success.
-            resume(send.thread_id, 0, 0);
-        }
-        return SyscallRet { rax: deliver_to(&send.message, current_tcb()), rdx: send.badge };
+    // a sender already parked on the endpoint rendezvouses now.
+    if let Some((message, badge)) = take_from_parked_sender(endpoint_addr, reply) {
+        return SyscallRet { rax: deliver_to(&message, current_tcb()), rdx: badge };
     }
 
     // no sender waiting: try cap_recv in case a message was already deposited.
@@ -289,6 +265,50 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
     // the sender overwrites rax/rdx with the word and badge before readying us.
     park_current();
     0.into() // ignored: the stub yields instead of sysretq'ing
+}
+
+/// Hands `message` straight to a thread parked in a blocking receive on the
+/// endpoint at `endpoint_addr`, if there is one: its buffer gets the words,
+/// its saved `rax` word 0 and `rdx` the badge. Returns whether one took it.
+pub(super) fn hand_to_parked_receiver(endpoint_addr: u64, message: &Message, badge: u64) -> bool {
+    let waiting = {
+        let mut recvs = BLOCKED_RECVS.lock();
+        recvs
+            .iter_mut()
+            .find(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
+            .and_then(Option::take)
+    };
+    let Some(recv) = waiting else {
+        return false;
+    };
+    resume_with(recv.thread_id, message, badge);
+    true
+}
+
+/// Takes the message of a thread parked in a blocking send on the endpoint at
+/// `endpoint_addr`, if there is one, and returns it with its badge. A plain
+/// sender is woken with success; a caller stays parked with `reply` bound to
+/// it, or, with no reply object to answer through, is failed with
+/// [`IpcSyscallError::NoReply`].
+pub(super) fn take_from_parked_sender(endpoint_addr: u64, reply: Option<ObjectId>) -> Option<(Message, u64)> {
+    let send = {
+        let mut sends = BLOCKED_SENDS.lock();
+        sends
+            .iter_mut()
+            .find(|e| e.is_some_and(|s| s.endpoint_addr == endpoint_addr))
+            .and_then(Option::take)
+    }?;
+    if send.call {
+        let bound = reply
+            .and_then(cap::reply_object)
+            .is_some_and(|r| r.inner.lock().bind(crate::sched::token(send.thread_id)).is_ok());
+        if !bound {
+            abort_call(send.thread_id);
+        }
+    } else {
+        resume(send.thread_id, 0, 0);
+    }
+    Some((send.message, send.badge))
 }
 
 /// Resolves `cap_slot` in the current `CSpace` to an endpoint the capability
@@ -520,7 +540,7 @@ pub(super) fn sys_call(cap_slot: u64, word: u64) -> u64 {
         let bound = recv
             .reply
             .and_then(cap::reply_object)
-            .is_some_and(|r| r.inner.lock().bind(cur).is_ok());
+            .is_some_and(|r| r.inner.lock().bind(crate::sched::token(cur)).is_ok());
         resume_with(recv.thread_id, &message, badge);
         if !bound {
             // a plain receive took the message but cannot answer it.
@@ -566,7 +586,8 @@ pub(super) fn sys_reply_recv(ep_slot: u64, reply_slot: u64, word: u64) -> Syscal
     // compose before receiving: the receive overwrites the buffer.
     let message = compose_current(word);
     let answered = cap::reply_object(reply).and_then(|r| r.inner.lock().answer(message).ok());
-    if let Some(caller) = answered {
+    // a caller that retired since it was bound gets nothing.
+    if let Some(caller) = answered.and_then(crate::sched::thread_of) {
         resume_with(caller, &message, 0);
     }
     sys_recv_reply(ep_slot, reply_slot)
@@ -624,7 +645,10 @@ pub(super) fn sys_reply(reply_slot: u64, word: u64) -> u64 {
     let answered = cap::reply_object(reply).map(|r| r.inner.lock().answer(message));
     match answered {
         Some(Ok(caller)) => {
-            resume_with(caller, &message, 0);
+            // a caller that retired since it was bound gets nothing.
+            if let Some(caller) = crate::sched::thread_of(caller) {
+                resume_with(caller, &message, 0);
+            }
             0
         }
         _ => IpcSyscallError::NoCaller as u64,

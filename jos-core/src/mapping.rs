@@ -129,6 +129,22 @@ impl<const N: usize> MappingTable<N> {
         }
     }
 
+    /// Removes every mapping at `level` that lies beneath `table` and calls
+    /// `f` with each: [`forget_beneath`](Self::forget_beneath) one level at a
+    /// time, for a caller that clears the deepest entries first without
+    /// keeping a list of them.
+    pub fn forget_beneath_at(&mut self, table: &Mapping, level: Level, mut f: impl FnMut(Mapping)) {
+        for slot in &mut self.entries {
+            if let Some(m) = *slot
+                && m.level == level
+                && m.is_beneath(table)
+            {
+                *slot = None;
+                f(m);
+            }
+        }
+    }
+
     /// Returns the number of recorded mappings.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -204,6 +220,24 @@ mod tests {
         assert!(t.find(0x6000).is_some());
         // the table itself is not beneath itself.
         assert!(t.find(0x9000).is_some());
+    }
+
+    #[test]
+    fn forget_beneath_at_drops_one_level() {
+        let mut t: MappingTable<4> = MappingTable::new();
+        // a page directory covering the first GiB, with a table and a frame under it.
+        let pd = Mapping { object: 0x9000, vspace: 0x1000, vaddr: 0, level: Level::Pd };
+        let pt = Mapping { object: 0xa000, vspace: 0x1000, vaddr: 0x20_0000, level: Level::Pt };
+        t.record(pd).unwrap();
+        t.record(pt).unwrap();
+        t.record(frame(0x5000, 0x20_1000)).unwrap();
+        let mut dropped = [0; 2];
+        t.forget_beneath_at(&pd, Level::Frame, |m| dropped[0] = m.object);
+        assert_eq!(dropped[0], 0x5000);
+        assert!(t.find(0xa000).is_some());
+        t.forget_beneath_at(&pd, Level::Pt, |m| dropped[1] = m.object);
+        assert_eq!(dropped[1], 0xa000);
+        assert_eq!(t.len(), 1);
     }
 }
 

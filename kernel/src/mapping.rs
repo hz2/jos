@@ -245,19 +245,12 @@ pub fn unmap_object(object: u64) -> bool {
     let Some(mapping) = mappings.forget(object) else {
         return false;
     };
-    let mut beneath = [None; MAX_MAPPINGS];
-    let mut count = 0;
-    if mapping.level != Level::Frame {
-        mappings.forget_beneath(&mapping, |m| {
-            beneath[count] = Some(m);
-            count += 1;
-        });
-    }
     // clear the deepest entries first, so every walk still reaches its entry
     // and no table is left holding a stale entry for when it is mapped again.
-    for level in [Level::Frame, Level::Pt, Level::Pd] {
-        for m in beneath.iter().flatten().filter(|m| m.level == level) {
-            clear(m);
+    // a level at a time: a list of them all would not fit a syscall stack.
+    if mapping.level != Level::Frame {
+        for level in [Level::Frame, Level::Pt, Level::Pd] {
+            mappings.forget_beneath_at(&mapping, level, |m| clear(&m));
         }
     }
     clear(&mapping);

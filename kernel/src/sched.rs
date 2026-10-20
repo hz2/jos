@@ -291,10 +291,13 @@ pub unsafe fn retire_thread(id: usize) -> bool {
 /// Single-CPU with interrupts disabled; `f` must not register or retire
 /// threads.
 pub unsafe fn for_each_thread(mut f: impl FnMut(usize, *mut Tcb)) {
-    // SAFETY: per this function's contract the table is not written while it
-    // is copied here.
-    let (table, count) = unsafe { (*core::ptr::addr_of!(THREAD_TABLE), THREAD_COUNT) };
-    for (id, &tcb) in table.iter().enumerate().take(count) {
+    // SAFETY: per this function's contract nothing else writes the count.
+    let count = unsafe { THREAD_COUNT }.min(MAX_THREADS);
+    for id in 0..count {
+        // one entry at a time, not a copy of the table on the stack, and no
+        // reference into it is held while f runs.
+        // SAFETY: id < MAX_THREADS; read through a raw pointer per the contract.
+        let tcb = unsafe { (*core::ptr::addr_of!(THREAD_TABLE))[id] };
         if !tcb.is_null() {
             f(id, tcb);
         }

@@ -38,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 26] = [
+const CHECKS: [(&str, Check); 30] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -65,6 +65,10 @@ const CHECKS: [(&str, Check); 26] = [
     ("a_process_runs_and_reports_its_exit", a_process_runs_and_reports_its_exit),
     ("a_process_cannot_read_its_parents_memory", a_process_cannot_read_its_parents_memory),
     ("a_process_holds_only_what_it_was_given", a_process_holds_only_what_it_was_given),
+    ("a_signal_reaches_a_waiting_thread", a_signal_reaches_a_waiting_thread),
+    ("signals_coalesce_until_collected", signals_coalesce_until_collected),
+    ("a_timed_wait_runs_out", a_timed_wait_runs_out),
+    ("revoking_a_notification_ends_its_waits", revoking_a_notification_ends_its_waits),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -1013,4 +1017,79 @@ fn a_process_cannot_read_its_parents_memory(_: &BootInfo) -> Result<(), &'static
 fn a_process_holds_only_what_it_was_given(_: &BootInfo) -> Result<(), &'static str> {
     let (got, _) = run_hello(HELLO_TRY_HALT)?;
     ensure(got == (IpcSyscallError::BadCap as u64, PROCESS_BADGE), "the process did not find the machine slot empty")
+}
+
+/// What [`wait_and_report`] adds to an error code to report it.
+const WAIT_FAILED: u64 = 0xE000;
+
+/// Waits on the notification in field 0 with no deadline and reports on the
+/// endpoint in field 1 what it ended with: the bits, or the error code plus
+/// [`WAIT_FAILED`] (word 0 of a message must leave bit 63 clear, which flags
+/// an error in the receiver's result).
+extern "C" fn wait_and_report(arg: u64) {
+    let (ntfn, report) = (field(arg, 0), field(arg, 1));
+    let word = match sys::wait(ntfn, libjos::abi::NO_TIMEOUT) {
+        Ok(bits) => bits,
+        Err(e) => WAIT_FAILED + e as u64,
+    };
+    let _ = sys::send_blocking(report, word);
+}
+
+/// A signal reaches a thread waiting on the notification, with the badge of
+/// the capability it was sent through.
+fn a_signal_reaches_a_waiting_thread(_: &BootInfo) -> Result<(), &'static str> {
+    let ntfn = object(ObjectType::Notification)?;
+    let report = object(ObjectType::Endpoint)?;
+    let badged = mem::mint(ntfn, Rights::ALL, 0b101).map_err(|_| "mint")?;
+    let waiter = Thread::spawn(wait_and_report, pack(ntfn, report, 0), 1).map_err(|_| "spawn")?;
+    // whether the waiter blocks first or finds the bits pending, it gets them.
+    spin_past_a_tick();
+    let signalled = sys::signal(badged);
+    let got = sys::recv_timeout(report, None, 2000);
+    waiter.reap();
+    release(&[badged, ntfn, report])?;
+    ensure(signalled.is_ok(), "the signal was refused")?;
+    ensure(got == Ok((0b101, 0)), "the waiter did not get the badge")
+}
+
+/// Signals sent before anyone collects them coalesce into one set of bits,
+/// which one wait collects and clears; an unbadged capability signals bit 0.
+fn signals_coalesce_until_collected(_: &BootInfo) -> Result<(), &'static str> {
+    let ntfn = object(ObjectType::Notification)?;
+    let high = mem::mint(ntfn, Rights::ALL, 0b100).map_err(|_| "mint")?;
+    let signalled = sys::signal(high).and_then(|()| sys::signal(ntfn)).and_then(|()| sys::signal(high));
+    let first = sys::wait(ntfn, 0);
+    let second = sys::wait(ntfn, 0);
+    release(&[high, ntfn])?;
+    ensure(signalled.is_ok(), "a signal was refused")?;
+    ensure(first == Ok(0b101), "the signals did not coalesce")?;
+    ensure(second == Err(IpcSyscallError::WouldBlock), "the bits were not cleared")
+}
+
+/// A timed wait on a notification nobody signals gives up, and a wait on an
+/// endpoint is refused.
+fn a_timed_wait_runs_out(_: &BootInfo) -> Result<(), &'static str> {
+    let ntfn = object(ObjectType::Notification)?;
+    let ep = object(ObjectType::Endpoint)?;
+    let waited = sys::wait(ntfn, 100);
+    let wrong = sys::wait(ep, 0);
+    release(&[ntfn, ep])?;
+    ensure(waited == Err(IpcSyscallError::TimedOut), "the wait did not time out")?;
+    ensure(wrong == Err(IpcSyscallError::NotNotification), "a wait on an endpoint was not refused")
+}
+
+/// Revoking the last capability to a notification ends the wait of a thread
+/// blocked on it, with `BadCap`.
+fn revoking_a_notification_ends_its_waits(_: &BootInfo) -> Result<(), &'static str> {
+    let ntfn = object(ObjectType::Notification)?;
+    let report = object(ObjectType::Endpoint)?;
+    let waiter = Thread::spawn(wait_and_report, pack(ntfn, report, 0), 1).map_err(|_| "spawn")?;
+    // a waiter that has not blocked yet finds the capability gone instead.
+    spin_past_a_tick();
+    release(&[ntfn])?;
+    let got = sys::recv_timeout(report, None, 2000);
+    waiter.reap();
+    release(&[report])?;
+    ensure(got != Err(IpcSyscallError::TimedOut), "the revoke left the waiter blocked")?;
+    ensure(got == Ok((WAIT_FAILED + IpcSyscallError::BadCap as u64, 0)), "the waiter did not end with BadCap")
 }

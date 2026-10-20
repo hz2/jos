@@ -87,7 +87,7 @@ fn take_deposited(cap_slot: u64) -> Option<(Message, u64)> {
 
 // --- blocking IPC -----------------------------------------------------------
 
-use jos_core::abi::NO_REPLY;
+use jos_core::abi::{NO_REPLY, NO_TIMEOUT};
 use jos_core::clock::{Duration, Instant};
 use jos_core::wait_table::{WaitTable, Waiter};
 use spin::Mutex;
@@ -114,6 +114,10 @@ static BLOCKED_SENDS: Mutex<WaitTable<Send, MAX_THREADS>> = Mutex::new(WaitTable
 /// reply object its `RecvReply` named, if any. A timed receive carries its
 /// deadline in timer ticks.
 static BLOCKED_RECVS: Mutex<WaitTable<Option<ObjectId>, MAX_THREADS>> = Mutex::new(WaitTable::new());
+
+/// Threads parked in `wait`, by notification address. A notification never
+/// holds bits while a thread waits on it: a signal hands them straight over.
+static NTFN_WAITERS: Mutex<WaitTable<(), MAX_THREADS>> = Mutex::new(WaitTable::new());
 
 /// Threads parked in `console_read`, each with the most bytes it takes. There
 /// is one console, so every reader waits on the same key.
@@ -303,19 +307,83 @@ pub(super) fn sys_recv_timeout(ep_slot: u64, reply_slot: u64, ms: u64) -> Syscal
 /// tick, and a tick that finds it busy only puts the wake off to the next one.
 pub fn expire_timed_waits() {
     let now = ticks_now();
-    let timed_out = IpcSyscallError::TimedOut as u64 | IPC_ERR_FLAG;
-    loop {
-        let expired = BLOCKED_RECVS.try_lock().and_then(|mut recvs| recvs.take_expired(now));
-        let Some(recv) = expired else { break };
-        resume(recv.thread, timed_out, 0);
-    }
-    loop {
-        let expired = CONSOLE_READERS.try_lock().and_then(|mut readers| readers.take_expired(now));
-        let Some(reader) = expired else { break };
-        resume(reader.thread, timed_out, 0);
-    }
+    expire(&BLOCKED_RECVS, now);
+    expire(&CONSOLE_READERS, now);
+    expire(&NTFN_WAITERS, now);
     // input a receive interrupt could not hand over waits at most a tick.
     console_input_arrived();
+}
+
+/// Resumes every waiter in `table` whose deadline `now` has reached with
+/// [`IpcSyscallError::TimedOut`], oldest first, trying the lock only (see
+/// [`expire_timed_waits`]).
+fn expire<T: Copy>(table: &Mutex<WaitTable<T, MAX_THREADS>>, now: Instant) {
+    loop {
+        let expired = table.try_lock().and_then(|mut waiters| waiters.take_expired(now));
+        let Some(waiter) = expired else { break };
+        resume(waiter.thread, IpcSyscallError::TimedOut as u64 | IPC_ERR_FLAG, 0);
+    }
+}
+
+/// Signals the notification `object` with `bits`: the thread that has waited
+/// longest in `wait` takes them at once; with none waiting they join the
+/// pending bits, and a kernel task waiting on it is woken (see
+/// `cap::notification_signal`).
+pub fn signal_notification(object: ObjectId, bits: u64) {
+    let waiter = NTFN_WAITERS.lock().take_oldest(object.phys_addr());
+    match waiter {
+        Some(waiter) => resume(waiter.thread, bits, 0),
+        None => cap::notification_signal(object, Badge(bits)),
+    }
+}
+
+/// Implements [`Syscall::Signal`]: signals with the capability's badge, or
+/// bit 0 for an unbadged capability, so a signal is never empty.
+pub(super) fn sys_signal(ntfn_slot: u64) -> u64 {
+    match resolve_notification_slot(ntfn_slot, Rights::WRITE) {
+        Ok((object, badge)) => {
+            signal_notification(object, if badge == 0 { 1 } else { badge });
+            0
+        }
+        Err(e) => e as u64,
+    }
+}
+
+/// Implements [`Syscall::Wait`]: collects the pending bits, or waits for a
+/// signal as `ms` says.
+pub(super) fn sys_wait(ntfn_slot: u64, ms: u64) -> SyscallRet {
+    let err = |e: IpcSyscallError| SyscallRet::from(e as u64 | IPC_ERR_FLAG);
+    let object = match resolve_notification_slot(ntfn_slot, Rights::READ) {
+        Ok((object, _)) => object,
+        Err(e) => return err(e),
+    };
+    if let Some(Badge(bits)) = cap::notification_poll(object) {
+        return SyscallRet::from(bits);
+    }
+    let cur = crate::sched::current_thread_id();
+    if ms == 0 || cur == usize::MAX {
+        return err(IpcSyscallError::WouldBlock);
+    }
+    let deadline = (ms != NO_TIMEOUT).then(|| deadline_after(ms));
+    if NTFN_WAITERS.lock().park(object.phys_addr(), cur, deadline, ()).is_err() {
+        return err(IpcSyscallError::WouldBlock);
+    }
+    // the signaller sets rax to the bits before readying us.
+    park_current();
+    0.into() // ignored: the stub yields instead of sysretq'ing
+}
+
+/// Resolves `slot` in the current `CSpace` to a notification the capability
+/// grants `right` on, returning it and the capability's badge.
+fn resolve_notification_slot(slot: u64, right: Rights) -> Result<(ObjectId, u64), IpcSyscallError> {
+    let cap = current_cap(slot).ok_or(IpcSyscallError::BadCap)?;
+    if cap.object.kind() != ObjectKind::Notification {
+        return Err(IpcSyscallError::NotNotification);
+    }
+    if !cap.rights.contains(right) {
+        return Err(IpcSyscallError::Denied);
+    }
+    Ok((cap.object, cap.badge.0))
 }
 
 /// Parks the current thread until console input arrives, or until
@@ -413,6 +481,12 @@ pub fn cancel_waits_on(endpoint_addr: u64) {
         let recv = BLOCKED_RECVS.lock().take_oldest(endpoint_addr);
         let Some(recv) = recv else { break };
         resume(recv.thread, bad_cap | IPC_ERR_FLAG, 0);
+    }
+    // a notification's waiters, when the address names one.
+    loop {
+        let waiter = NTFN_WAITERS.lock().take_oldest(endpoint_addr);
+        let Some(waiter) = waiter else { break };
+        resume(waiter.thread, bad_cap | IPC_ERR_FLAG, 0);
     }
     loop {
         let send = BLOCKED_SENDS.lock().take_oldest(endpoint_addr);
@@ -654,6 +728,7 @@ pub fn retire_threads(mut doomed: impl FnMut(&Tcb) -> bool) {
         let _ = BLOCKED_SENDS.lock().take_thread(id);
         let _ = BLOCKED_RECVS.lock().take_thread(id);
         let _ = CONSOLE_READERS.lock().take_thread(id);
+        let _ = NTFN_WAITERS.lock().take_thread(id);
         // SAFETY: id came from for_each_thread, so its entry is a live TCB;
         // single-CPU with interrupts disabled, as retire_thread requires.
         unsafe {

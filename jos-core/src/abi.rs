@@ -185,11 +185,21 @@ pub enum Syscall {
     /// or for as long as it takes when `ms` is [`NO_TIMEOUT`]. Needs `READ` on a
     /// Console capability.
     ConsoleRead = 27,
+    /// `signal(ntfn_slot) -> 0 | errno`: signals the notification with the
+    /// capability's badge (bit 0 for an unbadged one). The thread that has
+    /// waited longest takes the bits at once; with none waiting they join the
+    /// pending bits. Never blocks. Needs `WRITE` on a Notification capability.
+    Signal = 28,
+    /// `wait(ntfn_slot, ms) -> bits | errno`: collects the notification's
+    /// pending bits, never zero, clearing them. With none pending it waits as
+    /// [`Syscall::ConsoleRead`] does: not at all for `ms` 0, `ms` milliseconds,
+    /// or for as long as it takes for [`NO_TIMEOUT`]. Needs `READ`.
+    Wait = 29,
 }
 
 impl Syscall {
     /// Every syscall, in number order; the numbers are dense from 0.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 30] = [
         Self::Add,
         Self::Exit,
         Self::IpcSend,
@@ -218,6 +228,8 @@ impl Syscall {
         Self::TcbSetFaultHandler,
         Self::RecvTimeout,
         Self::ConsoleRead,
+        Self::Signal,
+        Self::Wait,
     ];
 
     /// Maps a raw syscall number to its enum form, or `None` if it is unknown.
@@ -316,13 +328,15 @@ pub enum IpcSyscallError {
     NoIpcBuffer = 31,
     /// A length exceeds the IPC buffer's data area.
     TooLong = 32,
-    /// A timed receive ran out of time before a message arrived.
+    /// A timed wait ran out of time before a message, input, or signal came.
     TimedOut = 33,
+    /// The slot does not name a notification.
+    NotNotification = 34,
 }
 
 impl IpcSyscallError {
     /// Every error, in code order; the codes are dense from 1.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::BadCap,
         Self::Denied,
         Self::NotEndpoint,
@@ -356,6 +370,7 @@ impl IpcSyscallError {
         Self::NoIpcBuffer,
         Self::TooLong,
         Self::TimedOut,
+        Self::NotNotification,
     ];
 
     /// Decodes an error code (without [`IPC_ERR_FLAG`]), or `None` if unknown.

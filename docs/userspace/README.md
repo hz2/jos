@@ -67,7 +67,8 @@ The checks cover the boot information, IPC, badges, revocation, mapping and
 W^X, attenuated console and machine capabilities, threads and thread-id reuse,
 stale replies, both directions of the parked-thread handoff, endpoint order,
 fault delivery including userspace demand paging, timed receives, revoking an
-endpoint with threads blocked on it, and processes (`user/hello` started from
+endpoint with threads blocked on it, notifications (signals reaching a waiting
+thread, coalescing, timing out, and ending on revoke), and processes (`user/hello` started from
 its boot module, exiting, isolated from its parent's memory, and holding only
 what it was given).
 

@@ -77,6 +77,8 @@ CNode, or VSpace loses its last capability.
 | 11 | `reply` | reply slot, word | `0` or an error |
 | 13 | `reply_recv` | endpoint slot, reply slot, word | as `recv_reply` |
 | 26 | `recv_timeout` | endpoint slot, reply slot or `NO_REPLY`, milliseconds | as `recv_reply`, or `TimedOut` |
+| 28 | `signal` | notification slot | `0` or an error |
+| 29 | `wait` | notification slot, milliseconds or `NO_TIMEOUT` | the pending bits; flagged errors |
 | 5 | `invoke` | slot, method, argument | method result; flagged errors |
 
 Sending needs `WRITE` on the endpoint capability, receiving needs `READ`. A
@@ -95,6 +97,19 @@ later message waits for the next receive instead.
 When the last capability to an endpoint is revoked, every thread parked on it
 resumes with `BadCap`: receivers and callers flagged, plain blocking senders
 unflagged. A thread parked there by a fault is stopped.
+
+A notification is the asynchronous counterpart: `signal` never blocks, and
+signals coalesce. It signals with the capability's badge (bit 0 for an
+unbadged one): the thread that has waited longest in `wait` takes the bits at
+once, and with none waiting they are OR-ed into the pending bits. `wait`
+collects and clears them, never returning zero, and with none pending waits
+as `console_read` does (not at all for `ms` 0, `ms` milliseconds in whole
+timer ticks, or for as long as it takes). `signal` needs `WRITE`, `wait`
+needs `READ`, and revoking the last capability to a notification ends its
+waits with `BadCap`.
+
+Word 0 of a message must leave bit 63 clear: a receive returns it in `rax`,
+where that bit marks the result as an error code.
 
 ### IPC buffer and capability transfer
 
@@ -230,7 +245,8 @@ served oldest first, each with what it asked for.
 | 30 | `NotMachine` | the slot does not name the machine |
 | 31 | `NoIpcBuffer` | the call passes data through the IPC buffer and the caller has none |
 | 32 | `TooLong` | a length exceeds the IPC buffer's data area |
-| 33 | `TimedOut` | a timed receive ran out of time before a message arrived |
+| 33 | `TimedOut` | a timed wait ran out of time before a message, input, or signal came |
+| 34 | `NotNotification` | the slot does not name a notification |
 
 ### Retype errors (`RetypeSyscallError`)
 

@@ -24,7 +24,7 @@ half, look at the other.
 | threads parked in blocking IPC, timeouts | `wait_table.rs` | `syscall/ipc.rs` (`BLOCKED_SENDS`, `BLOCKED_RECVS`, `expire_timed_waits`, `cancel_waits_on`) |
 | call and reply | `reply.rs` | `syscall/ipc.rs` |
 | IPC buffer, capability transfer | `ipc_buffer.rs` | `syscall/ipc.rs`, `cap.rs` (`transfer_cap`) |
-| notifications | `notification.rs` | `cap.rs` |
+| notifications | `notification.rs`, `wait_table.rs` | `cap.rs` (the object, the async path), `syscall/ipc.rs` (`sys_signal`, `sys_wait`, `NTFN_WAITERS`) |
 
 ## Memory and address spaces
 

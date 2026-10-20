@@ -84,7 +84,7 @@ mod vm;
 
 pub use ipc::{
     abort_call, cancel_waits_on, console_input_arrived, deliver_fault, expire_timed_waits, fault_endpoint,
-    forget_ipc_buffer, retire_threads,
+    forget_ipc_buffer, retire_threads, signal_notification,
 };
 
 pub use jos_core::abi::{
@@ -292,6 +292,10 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::RecvTimeout) => ipc::sys_recv_timeout(arg0, arg1, arg2),
         // console_read(console_slot = arg0, max = arg1, ms = arg2) -> byte count.
         Some(Syscall::ConsoleRead) => platform::sys_console_read(arg0, arg1, arg2),
+        // signal(ntfn_slot = arg0) -> 0 | errno.
+        Some(Syscall::Signal) => ipc::sys_signal(arg0).into(),
+        // wait(ntfn_slot = arg0, ms = arg1) -> bits.
+        Some(Syscall::Wait) => ipc::sys_wait(arg0, arg1),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it

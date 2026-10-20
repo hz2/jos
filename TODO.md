@@ -77,8 +77,11 @@ Check items off in the same commit that finishes them.
       verified line editor (LINE-1) in jos-core
 - [x] the root task's `shell`: help, info, mem, list, test [filter], bench,
       echo, halt; `cargo run` at a terminal boots into it
-- [ ] notification syscalls (signal, wait, poll), then console input as a
-      notification instead of a blocking read
+- [x] notification syscalls: `signal` (28) and `wait` (29, which polls with a
+      deadline of 0), over a fourth wait table; revoking a notification ends
+      its waits
+- [ ] console input, and later device interrupts, delivered as notification
+      signals (the `IrqHandler` object of M4)
 - [ ] gate the ambient `exit` probe (1) behind a test feature now that the
       Machine capability exists
 

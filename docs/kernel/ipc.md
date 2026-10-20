@@ -85,3 +85,19 @@ receivers parked forever. The root task's checks
 `calls_reach_the_longest_waiting_receiver` and
 `revoking_an_endpoint_ends_its_waits` fail if either fix is undone, and
 `a_timed_receive_runs_out` hangs without the timer's expiry.
+
+## Notifications
+
+A thread blocked in `wait` parks in a fourth wait table, `NTFN_WAITERS`, keyed
+by the notification's address. `signal` takes the oldest waiter there and
+resumes it with the bits; only with no thread waiting do the bits go into the
+notification object (the verified `jos_core::notification` state, NTFN-1),
+which coalesces them by OR and wakes a kernel task waiting through the async
+path. So the bits are never pending while a thread waits, and the in-kernel
+`cap_signal` goes through the same function, so a kernel task and a thread
+cannot strand each other's wake. `wait` collects pending bits first and only
+then parks; the timer tick expires a timed wait as it does a timed receive,
+and revoking the last capability to the notification ends every wait on it,
+through the same `cancel_waits_on` an endpoint uses. The root task's checks
+`a_signal_reaches_a_waiting_thread` and `revoking_a_notification_ends_its_waits`
+fail if the handoff or the cancel is taken out.

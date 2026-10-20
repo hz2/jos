@@ -325,6 +325,29 @@ pub fn console_read(console: Slot, max: usize, ms: u64) -> Result<u64, IpcSyscal
     flagged(syscall3(Syscall::ConsoleRead as u64, console, max as u64, ms).0)
 }
 
+/// `signal(ntfn)`: signals the notification with the capability's badge (bit
+/// 0 if it has none). Never blocks.
+///
+/// # Errors
+///
+/// [`IpcSyscallError::NotNotification`], or why the capability was refused.
+pub fn signal(ntfn: Slot) -> Result<(), IpcSyscallError> {
+    status_call(Syscall::Signal, ntfn, 0, 0)
+}
+
+/// `wait(ntfn, ms)`: collects the notification's pending bits, waiting `ms`
+/// milliseconds for a signal if there are none (0 to poll,
+/// [`NO_TIMEOUT`](crate::abi::NO_TIMEOUT) for as long as it takes).
+///
+/// # Errors
+///
+/// [`IpcSyscallError::WouldBlock`] or [`IpcSyscallError::TimedOut`] if no
+/// signal came, [`IpcSyscallError::NotNotification`], or why the capability
+/// was refused.
+pub fn wait(ntfn: Slot, ms: u64) -> Result<u64, IpcSyscallError> {
+    flagged(syscall2(Syscall::Wait as u64, ntfn, ms).0)
+}
+
 /// `machine_halt(machine, code)`: stops the machine; code 0 reports success.
 /// Returns only if the capability is refused, with the reason.
 ///

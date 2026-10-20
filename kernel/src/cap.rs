@@ -1794,12 +1794,44 @@ impl NotificationInner {
 ///
 /// See [`IpcError`] (invalid cap, insufficient rights, or not a notification).
 pub fn cap_signal(space: &KernelCapSpace, cap_ref: CapRef, badge: Badge) -> Result<(), IpcError> {
-    let notification = resolve_notification(space, cap_ref, Rights::WRITE)?;
+    resolve_notification(space, cap_ref, Rights::WRITE)?;
+    let object = space.lookup(cap_ref).ok_or(IpcError::InvalidCap)?.object;
+    // the same path as the signal syscall, so a thread blocked in wait hears it.
+    crate::syscall::signal_notification(object, badge.0);
+    Ok(())
+}
+
+/// Coalesces `badge` into the pending bits of the notification `object`, and
+/// wakes a kernel task waiting on it. `syscall::signal_notification` calls
+/// this when no thread is blocked in `wait` to take the bits instead.
+///
+/// `object` must name a notification.
+pub fn notification_signal(object: ObjectId, badge: Badge) {
+    if object.kind() != ObjectKind::Notification {
+        return;
+    }
+    // SAFETY: the kind was checked above, the object lives as long as the
+    // kernel (a static untyped region), and on the single-CPU syscall or task
+    // path no aliasing exclusive reference exists.
+    let notification = unsafe { object.as_notification() };
     let to_wake = notification.inner.lock().signal(badge);
     if let Some(waker) = to_wake {
         waker.wake();
     }
-    Ok(())
+}
+
+/// Collects and clears the pending bits of the notification `object`, if any
+/// are pending.
+pub fn notification_poll(object: ObjectId) -> Option<Badge> {
+    if object.kind() != ObjectKind::Notification {
+        return None;
+    }
+    // SAFETY: as in notification_signal.
+    let notification = unsafe { object.as_notification() };
+    match notification.inner.lock().try_collect() {
+        notification::PollOutcome::Collected(badge) => Some(badge),
+        notification::PollOutcome::Empty => None,
+    }
 }
 
 /// Future that waits for a notification, collecting (and clearing) its badge.
@@ -1956,6 +1988,11 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                 let waiter = notification.inner.lock().clear_parked();
                 if let Some(waker) = waiter {
                     waker.wake();
+                }
+                // as for an endpoint: threads blocked in wait end with it.
+                // SAFETY: single-CPU revoke path; the spaces are only read.
+                if !unsafe { still_named(obj, local) } {
+                    crate::syscall::cancel_waits_on(obj.phys_addr());
                 }
             }
             ObjectKind::Reply => {

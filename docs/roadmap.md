@@ -82,6 +82,7 @@ speak IPC.
       and reusable thread ids
 - [x] timed receives, and blocked waits that end when their endpoint goes
       away, over a verified table of parked threads (BLOCK-1)
+- [x] notification syscalls (`signal`, `wait` with a deadline) for threads
 - [x] a ring-3 test suite in the root task, each check isolated in its own
       thread with a deadline
 - [x] console input (IRQ4, `console_read`) and an interactive shell in the

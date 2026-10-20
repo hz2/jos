@@ -34,6 +34,7 @@ half, look at the other.
 | mapping registry | `mapping.rs` | `mapping.rs`, `syscall/vm.rs` |
 | address spaces | | `vspace.rs` |
 | physical frames | `frame_allocator.rs`, `bitmap.rs` | `memory.rs` |
+| free memory at boot (memory plan) | `boot_regions.rs` | `memory.rs` (`plan_memory`, the boot allocator) |
 | kernel heap | | `allocator.rs` |
 | guard pages (boot stack, TCB stacks) | `pte.rs` (`split_huge_entry`) | `arch/x86_64/boot.s`, `guard_page.rs` |
 
@@ -53,13 +54,26 @@ half, look at the other.
 | piece | where |
 |---|---|
 | multiboot2 header, long mode, identity map | `kernel/src/arch/x86_64/boot.s` |
-| boot information parsing | `kernel/src/arch/x86_64/multiboot2.rs` |
+| boot information parsing | `jos-core/src/multiboot2.rs`; the kernel side only builds the slice, in `kernel/src/arch/x86_64/multiboot2.rs` |
+| ELF loading | `jos-core/src/elf.rs` (the load plan); `kernel/src/rootserver.rs` maps it |
+| the root task: building and starting it | `kernel/src/rootserver.rs`, called from `kernel/src/main.rs` |
 | SMEP, SMAP, NX | `kernel/src/arch/x86_64/mod.rs` |
 | GDT, TSS, IST stacks | `kernel/src/gdt.rs` |
 | IDT, exceptions, PIC | `kernel/src/interrupts.rs` |
-| `syscall` entry stub, ABI, dispatcher | `kernel/src/syscall/mod.rs` |
-| first entry to ring 3 | `kernel/src/usermode.rs` |
+| syscall numbers, error codes, boot information, user layout (the ABI) | `jos-core/src/abi.rs` |
+| `syscall` entry stub, dispatcher | `kernel/src/syscall/mod.rs` |
+| console and machine syscalls | `kernel/src/syscall/platform.rs` |
+| first entry to ring 3 | `kernel/src/usermode.rs` (`enter_context` for the root task) |
 | serial and VGA output | `kernel/src/serial.rs`, `kernel/src/vga_buffer.rs` |
+
+## Userspace
+
+| piece | where |
+|---|---|
+| syscall stubs and typed wrappers | `user/libjos/src/syscall.rs`, `user/libjos/src/sys.rs` |
+| console output, entry point, panic handler, KTAP | `user/libjos/src/console.rs`, `rt.rs`, `ktap.rs` |
+| the root task | `user/root/src/main.rs` |
+| target and build-std config | `user/.cargo/config.toml` |
 
 ## Verification and testing
 
@@ -69,6 +83,7 @@ half, look at the other.
 | Verus proofs | `jos-core/src/proof.rs` |
 | deterministic simulation | `jos-core/tests/dst_*.rs`, with `rng.rs`, `fault.rs`, `trace.rs` |
 | QEMU integration tests | `kernel/tests/*.rs`; multi-thread ones share `kernel/tests/common/threads.rs` |
+| the root task booting end to end | `scripts/check.sh boot` |
 | in-kernel trace ring | `kernel/src/trace.rs` |
 | gates and runner | `scripts/check.sh`, `scripts/run-qemu.sh`, `.githooks/` |
 

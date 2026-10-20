@@ -11,6 +11,7 @@
 | functional proofs | `jos-core/src/proof.rs` | `check.sh verus` | manual |
 | boot / integration | `kernel/tests/*.rs`, one QEMU image each | `check.sh qemu` | pre-push to main, CI |
 | boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push to main, CI (skipped without `/dev/kvm`) |
+| first light | the real kernel boots the real root task (`user/root`) in test mode; its ring-3 checks print KTAP and halt the machine with the result | `check.sh boot` | pre-push to main, CI (TCG, and KVM when available) |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
@@ -19,6 +20,14 @@ two labels and copied into the user code page (see `kernel/tests/badged_ipc.rs`)
 
 Every new oracle or proof gets a negative control: break the property, confirm
 the test fails, revert.
+
+`check.sh boot` is the one gate that runs the production path end to end: it
+builds the kernel binary and the `user/` workspace, boots them with the root
+task module named `root test`, and lets the root task decide the exit code
+through its Machine capability. Its checks report in KTAP (`ok N name` /
+`not ok N name`, a `# run name` line before each, diagnostics as `#` lines),
+the format the host harness will parse. Removing the kernel's `WRITE` check
+on `console_write` makes it fail.
 
 Running under both TCG and KVM matters because their timing differs by orders
 of magnitude: a loop that spans several timer ticks under TCG finishes inside

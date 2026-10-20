@@ -27,9 +27,10 @@ the verify shell for `kani` and `verus`). The toolchain version is pinned in `fl
 The repository is a two-crate Cargo workspace, and the split is load-bearing:
 
 - `jos-core/` is pure, `no_std`, hardware-free logic (capability tables, ring
-  buffers, page-table math, the endpoint state machine, the DST harnesses). It
-  builds for the host, so it can be exercised under `cargo test`, Miri, and
-  Kani. See `capabilities.md` and `dst.md`.
+  buffers, page-table math, the endpoint state machine, the ELF and multiboot2
+  parsers, the shared syscall ABI, the DST harnesses). It builds for the host,
+  so it can be exercised under `cargo test`, Miri, and Kani. See
+  `capabilities.md` and `dst.md`.
 - `kernel/` is the bootable kernel: assembly, MMIO, and the hardware glue around
   `jos-core`.
 
@@ -37,6 +38,13 @@ The bare-metal target is configured in `kernel/.cargo/config.toml`, not at the
 workspace root. That file is discovered only when cargo is invoked from inside
 `kernel/`, so the kernel builds bare-metal while `jos-core` builds for the host
 by default. This is why kernel commands below are run from `kernel/`.
+
+`user/` is a second, separate workspace for userspace: `libjos` (the runtime)
+and `root` (the root task). `user/.cargo/config.toml` builds it for the
+built-in `x86_64-unknown-none` target (soft-float, static PIE, small code
+model) with `build-std`, so its commands run from `user/`. It depends on
+`jos-core` for the ABI, so the kernel and userspace share one definition of
+every syscall.
 
 ## The custom target
 
@@ -81,8 +89,14 @@ built-in `-kernel` loader (which is multiboot1-only and rejects an elf64 image):
 
 ```bash
 cd kernel && cargo build   # build the kernel elf
-cd kernel && cargo run     # build and boot under qemu
+cd kernel && cargo run     # build the kernel and user/, boot into the root task
+JOS_ROOT_ARGS=test cargo run   # the same, with the root task in test mode
 ```
+
+`cargo run` boots the kernel with the root task as a boot module: the runner
+builds `user/` first, then the kernel loads `root` and hands it the machine
+(see `architecture.md`, "The Root Task"). With no `root` module the kernel
+falls back to its in-kernel console.
 
 `cargo run` and `cargo test` go through the runner wired in
 `kernel/.cargo/config.toml`:
@@ -113,11 +127,20 @@ The runner takes a few more knobs from the environment:
 |---|---|
 | `JOS_QEMU_ACCEL` | `tcg` (default, software emulation) or `kvm` (hardware virtualization, with `-cpu host`) |
 | `JOS_QEMU_CPU` | overrides the CPU model |
+| `JOS_QEMU_MEM` | guest memory (default `128M`) |
+| `JOS_QEMU_SMP` | guest cpu count (default `1`) |
+| `JOS_QEMU_MACHINE` | machine type (default `q35`; `pc` also boots) |
+| `JOS_QEMU_TIMEOUT` | seconds before a wedged guest fails (default `120`; `0` for none) |
 | `JOS_QEMU_RR` | `record` or `replay`: deterministic record/replay into `JOS_QEMU_RR_FILE` (TCG only) |
+| `JOS_MODULES` | boot modules, `;`-separated `path [args]`; grub loads each with `module2`, and the kernel finds one by the first word of its args. Unset for the main kernel binary, it means the root task; set it empty for none |
+| `JOS_ROOT_ARGS` | the root task's arguments when `JOS_MODULES` is unset (default `hello`) |
+| `JOS_KEEP_ISO` | keep the per-run ISO tree and image instead of deleting them |
 
-A recording keeps the exact ISO it booted (`<file>.iso`) and the kernel's hash
-(`<file>.kernel`), so a replay boots the same image and refuses a different
-kernel. To capture a failing test and replay it instruction for instruction:
+Each run builds its ISO in a fresh directory next to the kernel, so runs never
+collide. A recording keeps the exact ISO it booted (`<file>.iso`) and a hash of
+the kernel and every module (`<file>.kernel`), so a replay boots the same image
+and refuses a different kernel or module. To capture a failing test and replay
+it instruction for instruction:
 
 ```bash
 cd kernel
@@ -133,7 +156,8 @@ port and the guest exits via the `isa-debug-exit` device:
 ```bash
 scripts/check.sh qemu              # every kernel test
 scripts/check.sh qemu badged_ipc   # one test
-scripts/check.sh qemu-kvm            # every kernel test under KVM
+scripts/check.sh qemu-kvm          # every kernel test under KVM
+scripts/check.sh boot              # the real kernel and root task, in test mode
 ```
 
 The `isa-debug-exit` device maps a guest write of `N` at port `0xf4` to a host
@@ -149,7 +173,7 @@ The pure-logic crate is tested on the host, with no QEMU:
 ```bash
 scripts/check.sh test     # unit + deterministic simulation tests
 scripts/check.sh miri     # undefined-behavior checking
-scripts/check.sh clippy   # both crates, -D warnings
+scripts/check.sh clippy   # jos-core, the kernel, and user/, -D warnings
 scripts/check.sh kani     # bounded proofs
 scripts/check.sh fast     # style + clippy + test: the pre-commit gate
 scripts/check.sh ci       # everything ci runs

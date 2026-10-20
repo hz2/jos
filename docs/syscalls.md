@@ -1,9 +1,11 @@
 # Syscall Reference
 
 Every jos syscall, its arguments, what it returns, and how it fails. The
-authoritative source is the `Syscall` enum in `kernel/src/syscall/mod.rs`; this page
-is the map. Capabilities are named by slot number in the calling thread's
-capability space, and every call checks the rights the capability carries.
+authoritative source is `jos-core/src/abi.rs`, which the kernel dispatches on
+and userspace (`user/libjos`) builds its calls from, so the two cannot drift;
+this page is the map. Capabilities are named by slot number in the calling
+thread's capability space, and every call checks the rights the capability
+carries.
 
 ## Calling convention
 
@@ -13,6 +15,7 @@ capability space, and every call checks the rights the capability carries.
 | `rdi`, `rsi`, `rdx` | arguments 0, 1, 2 |
 | `rdx` | second result on return (the sender's badge after a receive) |
 | `rcx`, `r11` | clobbered by `syscall` itself |
+| `rdi`, `rsi`, `r8`, `r9`, `r10` | not restored by the kernel; treat as clobbered |
 
 Calls that return data (a received word, a slot, a count) report errors with
 bit 63 set (`IPC_ERR_FLAG`), so any value below `1 << 63` is a real result.
@@ -98,6 +101,7 @@ user pointer. Its layout:
 | `0x20` | `send_cap`: slot of a capability to send, plus one | sender |
 | `0x28` | `recv_slot`: slot an incoming capability lands in, plus one | receiver |
 | `0x30` | `caps_received`: 1 if a capability arrived | kernel |
+| `0x800` to `0x1000` | data area: bytes a call passes by length (`console_write`) | caller |
 
 A capability rides along with `ipc_send`, `ipc_send_blocking`, or `call` when
 `send_cap` is set; that needs `GRANT` on the endpoint capability. The receiver
@@ -130,6 +134,21 @@ beneath it.
 A thread is configured, given a buffer, and started once; it then runs in ring
 3 under the scheduler. Configuring or starting it again fails with
 `AlreadyStarted`.
+
+### Console and machine
+
+| nr | name | arguments | returns |
+|---|---|---|---|
+| 22 | `console_write` | console slot, length | `0` or an error |
+| 23 | `machine_halt` | machine slot, code | does not return; an error if refused |
+
+The console and the machine are singleton objects, not carved from untyped
+memory; only the root task is handed capabilities to them, and it can pass on
+attenuated copies. `console_write` prints the first `length` bytes (at most
+2048) of the caller's IPC-buffer data area. `machine_halt` stops the machine:
+code `0` reports success to a test harness (QEMU exits with `33`), anything
+else failure. Both need `WRITE`, so a copy minted without it is refused with
+`Denied`.
 
 ## Error codes
 
@@ -165,6 +184,10 @@ A thread is configured, given a buffer, and started once; it then runs in ring
 | 26 | `SlotOccupied` | the destination slot is taken |
 | 27 | `SlotOutOfRange` | the destination slot is out of range |
 | 28 | `NotRegistered` | a capability was sent from an unregistered space |
+| 29 | `NotConsole` | the slot does not name the console |
+| 30 | `NotMachine` | the slot does not name the machine |
+| 31 | `NoIpcBuffer` | the call passes data through the IPC buffer and the caller has none |
+| 32 | `TooLong` | a length exceeds the IPC buffer's data area |
 
 ### Retype errors (`RetypeSyscallError`)
 
@@ -195,3 +218,36 @@ A thread is configured, given a buffer, and started once; it then runs in ring
 | 2 | `Denied` | the capability lacks the right the method needs |
 | 3 | `BadMethod` | the method is not defined for this object kind |
 | 4 | `WouldBlock` | the endpoint is full (send) or empty (receive) |
+
+## The root task's starting state
+
+The kernel starts the root task (the boot module named `root`) at its ELF
+entry point with `rdi` pointing at a read-only `BootInfo` page and `rsp` at
+the top of its stack. Its CNode holds these capabilities (`abi::root_slot`),
+all with every right:
+
+| slot | capability |
+|---|---|
+| 0 | empty, so a zero slot never names anything |
+| 1 | its own TCB |
+| 2 | its own CNode |
+| 3 | its own VSpace |
+| 4 | the frame holding its IPC buffer |
+| 5 | the frame holding its `BootInfo` page |
+| 6 | the console |
+| 7 | the machine |
+| 8 and up | one untyped region per free range of RAM, in `BootInfo.untyped` |
+
+`BootInfo` (`abi::BootInfo`, versioned and starting with a magic word) also
+gives the free slot range, each untyped region's physical address, size and
+already-used bytes, every boot module, the root task's own command line (the
+words after `root` on its module line), and how much RAM above the identity
+map was left out. The fixed addresses are in `abi::layout`:
+
+| address | what |
+|---|---|
+| `0x80_0040_0000` | the image's load base (static PIE, relocated by the kernel) |
+| `0x80_3FE0_0000` | an unmapped guard page under the stack |
+| `0x80_3FE0_1000` to `0x80_3FE1_1000` | the 64 KiB stack |
+| `0x80_3FE1_2000` | the IPC buffer |
+| `0x80_3FE1_3000` | the `BootInfo` page |

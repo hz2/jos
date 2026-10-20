@@ -4,7 +4,47 @@ The concrete next steps, highest leverage first. The milestone context lives in
 `docs/roadmap.md`; verification targets in `docs/verification.md`.
 Check items off in the same commit that finishes them.
 
-## Now: finish real IPC (M1)
+## Now: userspace that is not hand-assembled (M2)
+
+- [x] `user/` workspace built for `x86_64-unknown-none`: `libjos` (syscall
+      stubs and typed wrappers over the shared `jos_core::abi`, console output,
+      the entry point, KTAP helpers) and the root task
+- [x] the syscall numbers, error codes, type ids and argument packing live in
+      `jos_core::abi`, shared by the kernel and userspace
+- [x] ELF64 load planner in jos-core (`elf.rs`): static PIE or ET_EXEC,
+      page-disjoint W^X segments in a window, RELATIVE relocations only; host
+      tests with seeded mutation, Kani harnesses (run them under the memory cap)
+- [x] multiboot2 tags (`multiboot2.rs`) and free-memory arithmetic
+      (`boot_regions.rs`) in jos-core; the memory plan reserves the boot
+      modules and the info structure, which the boot allocator used to hand out
+- [x] the kernel loads the root task from the `root` boot module: objects from
+      untyped, W^X mappings through the registry, initial capabilities at the
+      `abi::root_slot` slots, a `BootInfo` page, registered with the scheduler
+- [x] Console and Machine capabilities: `console_write` (22) through the IPC
+      buffer's data area, `machine_halt` (23)
+- [x] `check.sh boot`: the real kernel boots the real root task in test mode,
+      under TCG and KVM, in `ci`; `cargo run` boots into the root task
+- [ ] mark ELF-1 and BOOT-2 proved in `docs/verification.md` once their Kani
+      harnesses have run under the memory cap
+- [ ] survivable user faults: exception entry for every vector, seL4-style
+      fault endpoints (`tcb_set_fault_handler`), a faulting thread with no
+      handler is retired instead of the kernel dying
+- [ ] capacity and reuse: generation-checked thread ids, `MAX_THREADS` 64,
+      CSpace registry slots freed with their CNode, a bigger mapping registry
+      without its stack scratch array
+- [ ] a ring-3 test suite in the root task: one fresh thread per test with the
+      runner as its fault handler, nested KTAP, `root test [filter]`
+- [ ] userspace process spawning: boot modules mapped read-only into the root
+      task and loaded with the same `jos_core::elf` planner
+- [ ] `jig`, the host harness: parallel QEMU runs, KTAP parsing, JUnit, log
+      tails and reproduce commands, a boot matrix (cpu, memory, smp, machine)
+- [ ] an executable spec of the syscall API in jos-core, run against the live
+      kernel from ring 3 (differential fuzzing) and against the core on the host
+- [ ] notification syscalls, console input (COM1 IRQ4), and the `jsh` shell
+- [ ] gate the ambient `exit` probe (1) behind a test feature now that the
+      Machine capability exists
+
+## Done: real IPC (M1), and what is left of it
 
 - [x] `Reply` kernel object wrapping `jos_core::reply::Reply` (`ObjectType::Reply`)
 - [x] `Call` (9), `RecvReply` (10), `Reply` (11) syscalls; revoking a bound reply
@@ -37,8 +77,8 @@ Check items off in the same commit that finishes them.
       it leaves the run queue and any IPC wait, and a late answer finds nothing
 - [ ] reuse retired thread ids; today they are never reused, since a reply
       object may still name one
-- [ ] the root task must be registered with the scheduler like any thread, or
-      the timer never switches to the threads it starts
+- [x] the root task is registered with the scheduler like any thread, so the
+      timer switches to the threads it starts
 - [x] CNodes are built in place (`CapSpace::init_in_place`), so no page-sized
       object is built by value on a syscall stack any more
 - [x] capability transfer with an IPC message: the sender names a slot in its
@@ -50,12 +90,6 @@ Check items off in the same commit that finishes them.
 - [ ] `revoke_across` rescans every space per removed capability; fine at 64
       slots, worth an index once spaces grow
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)
-
-## Next: userspace that is not hand-assembled (M2)
-
-- [ ] `user/` crate with syscall stubs; build it for `x86_64-unknown-none`
-- [ ] ELF64 parser in jos-core with Kani bounds harnesses and a fuzz target
-- [ ] loader maps PT_LOAD segments with W^X; root task gets the initial caps
 
 ## Hardening (small, do alongside)
 

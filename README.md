@@ -42,11 +42,13 @@ The formal docs are under [`docs/`](docs/).
 
 ## Status
 
-**Phases 0 to 3 are done; phase 4 (real IPC, userspace, drivers) is about a
-quarter of the way.** jos boots, enters ring 3, and runs capability-checked
-syscalls on top of a verified pure-logic core. It does not yet load programs
-from ELF images or run userspace servers; see [`TODO.md`](TODO.md) for the next
-steps and [`docs/roadmap.md`](docs/roadmap.md) for the full plan.
+**Phases 0 to 3 are done; phase 4 (real IPC, userspace, drivers) is well under
+way.** jos boots into a Rust root task loaded from an ELF boot module: the
+kernel hands it every initial capability, and from ring 3 it checks the
+capability model end to end and halts the machine with the result. Survivable
+user faults, process spawning from userspace, and a ring-3 test suite come
+next; see [`TODO.md`](TODO.md) for the next steps and
+[`docs/roadmap.md`](docs/roadmap.md) for the full plan.
 
 What works today:
 
@@ -57,6 +59,12 @@ What works today:
 - Capabilities with monotone rights attenuation, O(1) generation-counted
   revocation, and seL4-style badges: a server mints one badged endpoint cap per
   client, the badge can be set only once, and it arrives with every message.
+- A root task in Rust (`user/root`, on the `user/libjos` runtime): the kernel
+  loads it from the `root` boot module through a verified ELF load planner,
+  maps it W^X, and hands it its TCB, CNode, VSpace, IPC buffer, a `BootInfo`
+  page, the console and machine capabilities, and untyped memory covering all
+  free RAM (the seL4 root-server model).
+- One shared syscall ABI (`jos_core::abi`) for the kernel and userspace.
 - Userspace: ring 3 via `iretq`, a `SYSCALL`/`SYSRET` boundary, per-thread kernel
   stacks and capability spaces, IPC / `mint` / `retype` / `invoke` syscalls, W^X
   user pages.
@@ -76,9 +84,9 @@ What works today:
   first lemmas.
 - In-kernel structured tracing: every syscall recorded into a ring buffer.
 
-What is missing (in order): `Call`/`Reply` syscalls and an IPC buffer page,
-capability transfer, an ELF loader and a root task, FPU state, APIC/ACPI,
-userspace drivers, SMP.
+What is missing (in order): survivable user faults (fault endpoints), reusable
+thread ids, process spawning from userspace, a ring-3 test suite and host-side
+harness, FPU state, APIC/ACPI, userspace drivers, SMP.
 
 ## Layout
 
@@ -88,9 +96,11 @@ jos-core/   pure no_std kernel logic with no hardware dependencies: capabilities
             the clock, and the simulation harnesses. builds for the host.
 kernel/     the bootable kernel: assembly, MMIO, and the hardware glue around
             jos-core. builds bare-metal via kernel/.cargo/config.toml.
+user/       userspace: libjos (the runtime and syscall library) and the root
+            task. builds for x86_64-unknown-none via user/.cargo/config.toml.
 docs/       project documentation (see below).
 scripts/    check.sh (every gate), check-style.sh, and run-qemu.sh (the cargo runner).
-.githooks/  git hooks: fast gate on commit, full gate on push.
+.githooks/  git hooks: fast gate on commit, full gate on a push to main.
 ```
 
 The split is load-bearing: the verifiable logic lives in `jos-core` because Miri
@@ -124,10 +134,11 @@ for how the build and boot work.
 
 ```bash
 nix develop                    # enter the shell (also enables the git hooks)
-cd kernel && cargo run         # build and boot the kernel under qemu
+cd kernel && cargo run         # build and boot the kernel and root task under qemu
 scripts/check.sh               # list the gates
 scripts/check.sh fast          # style, clippy -D warnings, host tests
 scripts/check.sh qemu [test]   # boot every kernel test, or one by name
+scripts/check.sh boot           # the real kernel and root task, in test mode
 scripts/check.sh kani [name]   # bounded proofs, or one harness
 scripts/check.sh ci            # everything ci runs: fast + miri + kani + qemu
 ```

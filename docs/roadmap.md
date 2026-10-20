@@ -8,10 +8,12 @@ proof targets that travel with each milestone.
 
 ## Where we are (2026-10)
 
-jos boots on x86_64 under QEMU, enters ring 3, and runs capability-checked
-syscalls with a verified pure-logic core behind them. It cannot yet load a real
-program from disk or run a userspace server talking to clients; that is the
-gap this roadmap closes first.
+jos boots on x86_64 under QEMU into a Rust root task loaded from an ELF boot
+module, which runs in ring 3 with every initial capability and checks the
+capability model end to end (`scripts/check.sh boot`). What is missing for a
+userspace that can host servers and tests is survivable faults, reusable
+thread ids, process spawning from userspace, and a test harness that runs in
+ring 3; that is the gap this roadmap closes next.
 
 | Phase | Scope | State |
 |-------|-------|-------|
@@ -19,7 +21,7 @@ gap this roadmap closes first.
 | 1 | async executor, keyboard, PIC timer, IRQ handling | done |
 | 2 | untyped memory, retype, CSpace/CNode, rights, revoke, endpoints, notifications | done |
 | 3 | ring 3, SYSCALL/SYSRET, per-thread kernel stacks + CSpaces, preemptive round robin, W^X | done |
-| 4 | real IPC, userspace crate + ELF + root task, drivers | in progress (~25%) |
+| 4 | real IPC, userspace crate + ELF + root task, drivers | in progress (~40%) |
 | 5 | formal verification (Kani across jos-core, Verus spec of the cap state machine) | in progress |
 | 6 | SMP, scheduling contexts, WASM sandbox, agent namespaces, PQ crypto caps | future |
 
@@ -35,7 +37,7 @@ timer stub.
 Each milestone ships tests (and, where the logic lives in jos-core, a Kani
 harness) before the next one starts.
 
-### M1. Real IPC (in progress)
+### M1. Real IPC (done, save JPC-1)
 
 The base everything else stands on: servers, drivers, and the root task all
 speak IPC.
@@ -63,15 +65,21 @@ speak IPC.
       IPC buffer, gated by `GRANT`, linked into the derivation tree
 - [ ] JPC-1: Verus proof of rendezvous deadlock-freedom
 
-### M2. Userspace crate, ELF loader, root task
+### M2. Userspace crate, ELF loader, root task (in progress)
 
-- [ ] `user/` workspace member: a `no_std` syscall library plus a `root` binary
-- [ ] ELF64 loader (header parsing in jos-core so it can be fuzzed and Kani'd;
-      PT_LOAD segments mapped with W^X)
-- [ ] boot hands the root task every initial untyped cap plus its own
-      TCB/CSpace/VSpace (the seL4 root-server model; matches VISION's single
-      Kernel capability)
-- [ ] load the root image from a multiboot2 module
+- [x] `user/` workspace: `libjos` (a `no_std` syscall library over the shared
+      `jos_core::abi`) plus the `root` binary
+- [x] ELF64 load planning in jos-core (static PIE, W^X, RELATIVE relocations),
+      host-fuzzed and Kani-harnessed; the kernel maps PT_LOAD segments W^X
+- [x] boot hands the root task every initial untyped cap plus its own
+      TCB/CSpace/VSpace, IPC buffer and BootInfo, and the Console and Machine
+      capabilities (the seL4 root-server model)
+- [x] load the root image from a multiboot2 module; the memory plan keeps the
+      modules and the info structure out of the free memory
+- [ ] survivable user faults (fault endpoints) and reusable thread ids
+- [ ] a ring-3 test suite in the root task, and process spawning from userspace
+- [ ] `jig`, the host-side harness, and differential testing against an
+      executable spec
 
 ### M3. Hardware foundation
 

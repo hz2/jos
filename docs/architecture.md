@@ -65,7 +65,8 @@ slots; syscalls name them by slot number.
 |    swapgs; sysretq  (or park and switch if the call blocked)     |
 +-----------------------------------------------------------------+
 |  kernel objects (placed in untyped memory, no heap)              |
-|    Endpoint, Notification, Tcb, PageTable, CNode, Untyped        |
+|    Endpoint, Notification, Reply, Tcb, CNode, VSpace, PageTable, |
+|    Frame, Untyped; plus the Console and Machine singletons       |
 +-----------------------------------------------------------------+
 |  jos-core (pure, hardware-free, tested on the host)              |
 |    cap_table, cap_space, cap_rights   capabilities + revocation  |
@@ -152,7 +153,9 @@ it. The take-or-park step happens under one lock, so wakeups are never lost.
 ```
 PML4 (512 entries, 512 GiB each)
   index 0    identity map of the low 1 GiB (phys == virt, 2 MiB pages)
-  index 64   user window at 0x2000_0000_0000 (code + stack)
+  index 1-255 user space: the root task's image at 0x80_0040_0000, its
+             stack, IPC buffer and BootInfo at the top of that GiB
+             (kernel tests use index 64, 0x2000_0000_0000)
   index 256+ kernel heap / higher-half mappings
 ```
 
@@ -215,6 +218,45 @@ overwriting the header. The boot stack has the same guard, set up in `boot.s`. A
 three steps, each checked on its own: `TcbConfigure` gives it a CNode and a
 `VSpace`, `TcbSetIpcBuffer` registers its buffer frame, and `TcbStart` sets its
 entry point and stack and hands it to the scheduler. A thread starts once.
+
+## The Root Task
+
+The kernel creates exactly one thread itself, the seL4 root-server model; every
+other thread is started by userspace. Boot goes:
+
+```
+grub: multiboot2 kernel.elf, module2 root.elf "root <args>"
+  kernel_main: init, check the loader magic, syscall MSRs
+  memory plan:  available memory map areas
+                - the low megabyte and the kernel image
+                - the multiboot2 info structure
+                - the span holding the boot modules
+                clipped to the identity map (jos_core::boot_regions)
+  boot allocator: page tables and the heap
+  rootserver::start:
+    everything the allocator did not hand out -> untyped regions
+    carve from the largest: CNode, VSpace, TCB, IPC buffer, BootInfo,
+                            stack, image frames, page tables
+    load the ELF image (jos_core::elf), map W^X through mapping::map_*
+    install the initial capabilities, fill BootInfo
+    register the TCB, switch_to, iretq with every register from its context
+```
+
+The image is a static PIE built for `x86_64-unknown-none` (`user/`), loaded at
+a fixed base with its `R_X86_64_RELATIVE` relocations applied in place through
+the kernel's identity mapping of the fresh frames; segments are page-disjoint,
+never writable and executable, and mapped with their own access. The root task
+receives the capabilities `docs/syscalls.md` lists (its own TCB, CNode, VSpace,
+IPC buffer and BootInfo frames, the console, the machine, and every untyped
+region) and a read-only `BootInfo` page describing them. Without a `root`
+module the kernel falls back to its in-kernel console.
+
+`user/libjos` is the runtime every userspace program links: the `syscall`
+stubs (declaring every register the kernel clobbers), one typed wrapper per
+call over `jos_core::abi`, console output through the Console capability, the
+entry point, and KTAP helpers. The root task's `hello` and `test` modes run
+first-light checks from ring 3 and halt the machine with the result through
+its Machine capability, which is what `scripts/check.sh boot` runs.
 
 ## Per-CPU State and Context Switch
 

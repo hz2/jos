@@ -34,6 +34,7 @@ pub mod proof;
 
 pub mod abi;
 pub mod bitmap;
+pub mod boot_regions;
 pub mod cap_rights;
 pub mod cap_space;
 pub mod cap_table;

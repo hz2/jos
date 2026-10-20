@@ -152,6 +152,44 @@ impl<T, const N: usize> Default for RingBuffer<T, N> {
     }
 }
 
+/// The module invariant on the index fields: `len` in `[0, N]`, `head` and
+/// `tail` in `[0, N)`, and `head` exactly `len` slots past `tail`.
+#[cfg(kani)]
+impl<T, const N: usize> kani::Invariant for RingBuffer<T, N> {
+    fn is_safe(&self) -> bool {
+        self.len <= N
+            && (N == 0
+                || (self.head < N && self.tail < N && self.head == (self.tail + self.len) % N))
+    }
+}
+
+#[cfg(kani)]
+impl<T: kani::Arbitrary, const N: usize> RingBuffer<T, N> {
+    /// Returns an arbitrary buffer that satisfies the module invariant. Every
+    /// slot holds an arbitrary value, so whichever window is live is
+    /// initialized.
+    pub(crate) fn any_valid() -> Self {
+        let buf = Self {
+            storage: core::array::from_fn(|_| MaybeUninit::new(kani::any())),
+            head: kani::any(),
+            tail: kani::any(),
+            len: kani::any(),
+        };
+        kani::assume(kani::Invariant::is_safe(&buf));
+        buf
+    }
+
+    /// Returns the `k`th live element counted from the front, if `k < len`.
+    pub(crate) fn nth(&self, k: usize) -> Option<&T> {
+        if k >= self.len {
+            return None;
+        }
+        // SAFETY: k < len, so (tail + k) % N is in the live window, which the
+        // module invariant guarantees is initialized.
+        Some(unsafe { self.storage[(self.tail + k) % N].assume_init_ref() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RingBuffer;
@@ -424,5 +462,33 @@ mod kani_proofs {
         buf.push(b).unwrap();
         assert!(buf.pop() == Some(a));
         assert!(buf.pop() == Some(b));
+    }
+
+    /// From any valid state, not just those reachable in a few steps, a push
+    /// keeps the invariant and appends the value at the back.
+    #[kani::proof]
+    #[kani::unwind(5)] // N + 1 for the storage fill and the drop loop
+    fn push_preserves_invariant() {
+        let mut buf: RingBuffer<u32, 4> = RingBuffer::any_valid();
+        let len = buf.len();
+        let v: u32 = kani::any();
+        let pushed = buf.push(v).is_ok();
+        assert!(kani::Invariant::is_safe(&buf));
+        assert!(pushed == (len < 4));
+        if pushed {
+            assert!(buf.nth(len) == Some(&v));
+        }
+    }
+
+    /// From any valid state, a pop keeps the invariant and returns what was at
+    /// the front.
+    #[kani::proof]
+    #[kani::unwind(5)] // N + 1
+    fn pop_preserves_invariant() {
+        let mut buf: RingBuffer<u32, 4> = RingBuffer::any_valid();
+        let front = buf.nth(0).copied();
+        let popped = buf.pop();
+        assert!(kani::Invariant::is_safe(&buf));
+        assert!(popped == front);
     }
 }

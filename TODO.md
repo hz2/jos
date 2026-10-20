@@ -76,6 +76,10 @@ Check items off in the same commit that finishes them.
 - [ ] JPC-2: prove IPC buffer registration only accepts Frame capabilities
       (implemented and tested; not yet proved)
 - [ ] ARITH-3: trace encoding round-trip harness
+- [x] INV-1: ring buffer and run queue invariants declared to Kani and proved
+      preserved from any valid state
+- [ ] declare `kani::Invariant` for `CapTable` and `CapSpace` too, so autoharness
+      covers the capability API (it reports spurious failures without them)
 
 ## Testing layers
 

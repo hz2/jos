@@ -152,6 +152,40 @@ impl<const N: usize> Default for RunQueue<N> {
     }
 }
 
+/// The module invariant: the fifo is a valid ring buffer, every index in it is
+/// in range and appears once, and `queued` flags exactly those indices.
+#[cfg(kani)]
+impl<const N: usize> kani::Invariant for RunQueue<N> {
+    fn is_safe(&self) -> bool {
+        if !kani::Invariant::is_safe(&self.fifo) {
+            return false;
+        }
+        let mut seen = [false; N];
+        let mut k = 0;
+        while let Some(&id) = self.fifo.nth(k) {
+            if id >= N || seen[id] {
+                return false;
+            }
+            seen[id] = true;
+            k += 1;
+        }
+        seen == self.queued
+    }
+}
+
+#[cfg(kani)]
+impl<const N: usize> RunQueue<N> {
+    /// Returns an arbitrary queue that satisfies the module invariant.
+    fn any_valid() -> Self {
+        let q = Self {
+            fifo: RingBuffer::any_valid(),
+            queued: kani::any(),
+        };
+        kani::assume(kani::Invariant::is_safe(&q));
+        q
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RunQueue;
@@ -370,6 +404,43 @@ mod kani_proofs {
             assert_eq!(q.queued_count(), q.len());
             assert!(q.len() <= q.capacity());
         }
+    }
+
+    /// Every operation keeps the invariant from any valid state, not just from
+    /// states a few operations past an empty queue, and does what it says:
+    /// enqueue leaves `id` queued, dequeue clears what it returns, remove
+    /// leaves `id` unqueued, and none of them touches another index's
+    /// membership.
+    #[kani::proof]
+    #[kani::unwind(6)] // N + 2: the invariant scan reads one past the live window
+    fn operations_preserve_invariant() {
+        let mut q: RunQueue<N> = RunQueue::any_valid();
+        let before = q.queued;
+        let id: usize = kani::any();
+        let op: u8 = kani::any();
+        let touched = match op % 3 {
+            0 => {
+                q.enqueue(id);
+                assert!(id >= N || q.is_queued(id));
+                id
+            }
+            1 => match q.dequeue() {
+                Some(got) => {
+                    assert!(got < N && before[got] && !q.is_queued(got));
+                    got
+                }
+                None => N,
+            },
+            _ => {
+                q.remove(id);
+                assert!(!q.is_queued(id));
+                id
+            }
+        };
+        assert!(kani::Invariant::is_safe(&q));
+        let other: usize = kani::any();
+        kani::assume(other < N && other != touched);
+        assert!(q.is_queued(other) == before[other]);
     }
 
     /// Removing a queued index takes out exactly that index: it is no longer

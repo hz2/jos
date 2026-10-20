@@ -178,6 +178,18 @@ pub fn recv_reply(ep: Slot, reply: Slot) -> Result<(u64, u64), IpcSyscallError> 
     receive_call(Syscall::RecvReply, ep, reply, 0)
 }
 
+/// `recv_timeout(ep, reply, ms)`: a blocking receive that gives up after `ms`
+/// milliseconds (in whole timer ticks, rounded up). With a reply object it
+/// receives as [`recv_reply`] does, without one as [`recv_blocking`].
+///
+/// # Errors
+///
+/// [`IpcSyscallError::TimedOut`] if nothing arrived in time, or why a
+/// capability was refused.
+pub fn recv_timeout(ep: Slot, reply: Option<Slot>, ms: u64) -> Result<(u64, u64), IpcSyscallError> {
+    receive_call(Syscall::RecvTimeout, ep, reply.unwrap_or(crate::abi::NO_REPLY), ms)
+}
+
 /// `reply(reply, word)`: answers the caller bound to `reply`.
 ///
 /// # Errors

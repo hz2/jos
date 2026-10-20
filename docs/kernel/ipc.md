@@ -10,9 +10,11 @@ An endpoint has two places a message or a thread can wait:
 - **the slot**: the endpoint object (`jos_core::endpoint`, capacity one) holds
   at most one undelivered message, put there by a send that found no receiver;
 - **the parking tables**: `BLOCKED_SENDS` and `BLOCKED_RECVS` hold threads
-  parked in a blocking call, each entry with its endpoint, the parked thread,
-  and a park sequence number. A caller (`call`, or a fault) always parks here;
-  it never uses the slot.
+  parked in a blocking call. Both are `jos_core::wait_table::WaitTable`s
+  (BLOCK-1): each entry names the endpoint, the parked thread, and an optional
+  deadline, and carries what finishing the operation needs (a sender's message
+  and badge, a receiver's reply object). A caller (`call`, or a fault) always
+  parks here; it never uses the slot.
 
 ## The rules
 
@@ -27,8 +29,9 @@ Every path, blocking or not, keeps the same order:
    whose send completes (or, for a caller, whose reply object is bound, and a
    plain receive fails it with `NoReply`); otherwise a blocking receive parks,
    and a non-blocking one fails with `WouldBlock`.
-3. Parked threads are served oldest first by their park sequence number, not
-   by their position in the table, whose entries are reused in any order.
+3. Parked threads are served oldest first by the order they parked in, not by
+   their position in the table, whose entries are reused in any order. Every
+   take goes through the table, which also lets each waiter leave exactly once.
 
 A receiver is parked only when the slot is empty, and a send hands off to a
 parked receiver before it would use the slot, so a parked receiver never sits
@@ -51,3 +54,34 @@ parked sender.
 A woken thread does not wait for the next timer tick: when the thread on the
 CPU blocks or exits (`enter_idle_from_syscall`), the next ready thread runs at
 once. Only an idle CPU waits for an interrupt.
+
+## Timeouts
+
+`recv_timeout` parks a receiver with a deadline in timer ticks (54.9 ms each,
+rounded up, plus the tick in progress). On every tick the timer interrupt
+takes each receiver whose deadline has passed out of `BLOCKED_RECVS`, oldest
+first, and resumes it with `TimedOut`. A receiver that timed out has left the
+table, so a later message waits in the endpoint for the next receive instead of
+reaching a thread that stopped waiting. The interrupt only tries the table's
+lock: a revoke run by a kernel task may hold it with interrupts on, and a tick
+that finds it busy leaves the wake to the next one.
+
+## When an endpoint goes away
+
+A thread parked in a blocking call holds no capability the kernel could find
+stale; it only names the endpoint by address. So when a revoke removes the last
+capability to an endpoint, every wait on it ends there (seL4's
+`cancelAllIPC`): receivers and callers resume with `BadCap` (flagged), plain
+blocking senders with `BadCap`, and a thread parked by a fault, which has no
+call to fail, is stopped. Revoking one copy while others remain changes
+nothing for the waiters.
+
+## What broke before the wait tables
+
+A `call` took the first matching receiver by table position instead of the one
+that had waited longest, so a receiver that parked in an entry freed by an
+earlier waiter could jump the queue; and revoking an endpoint left its blocked
+receivers parked forever. The root task's checks
+`calls_reach_the_longest_waiting_receiver` and
+`revoking_an_endpoint_ends_its_waits` fail if either fix is undone, and
+`a_timed_receive_runs_out` hangs without the timer's expiry.

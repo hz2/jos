@@ -169,11 +169,19 @@ pub enum Syscall {
     /// looked up when a fault happens, and the capability there must name an
     /// endpoint and carry `WRITE`. Needs `WRITE` on the TCB capability.
     TcbSetFaultHandler = 25,
+    /// `recv_timeout(ep_slot, reply_slot, ms) -> word | errno` (badge in
+    /// `rdx`): a blocking receive that gives up with
+    /// [`IpcSyscallError::TimedOut`] once `ms` milliseconds have passed,
+    /// counted in whole ticks of the kernel timer and rounded up. With
+    /// `reply_slot` set to [`NO_REPLY`] it receives as
+    /// [`IpcRecvBlocking`](Syscall::IpcRecvBlocking) does; otherwise as
+    /// [`RecvReply`](Syscall::RecvReply), with that reply object.
+    RecvTimeout = 26,
 }
 
 impl Syscall {
     /// Every syscall, in number order; the numbers are dense from 0.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::Add,
         Self::Exit,
         Self::IpcSend,
@@ -200,6 +208,7 @@ impl Syscall {
         Self::MachineHalt,
         Self::ThreadExit,
         Self::TcbSetFaultHandler,
+        Self::RecvTimeout,
     ];
 
     /// Maps a raw syscall number to its enum form, or `None` if it is unknown.
@@ -212,6 +221,9 @@ impl Syscall {
 
 /// Sentinel returned in `rax` when the syscall number is not recognized.
 pub const ENOSYS: u64 = u64::MAX;
+
+/// The `reply_slot` of [`Syscall::RecvTimeout`] that names no reply object.
+pub const NO_REPLY: u64 = u64::MAX;
 
 /// Bit OR-ed into the result of a call that returns data, to mark it an error
 /// rather than a value. The high bit, so any real result below `1 << 63` is
@@ -292,11 +304,13 @@ pub enum IpcSyscallError {
     NoIpcBuffer = 31,
     /// A length exceeds the IPC buffer's data area.
     TooLong = 32,
+    /// A timed receive ran out of time before a message arrived.
+    TimedOut = 33,
 }
 
 impl IpcSyscallError {
     /// Every error, in code order; the codes are dense from 1.
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::BadCap,
         Self::Denied,
         Self::NotEndpoint,
@@ -329,6 +343,7 @@ impl IpcSyscallError {
         Self::NotMachine,
         Self::NoIpcBuffer,
         Self::TooLong,
+        Self::TimedOut,
     ];
 
     /// Decodes an error code (without [`IPC_ERR_FLAG`]), or `None` if unknown.
@@ -902,11 +917,12 @@ mod tests {
             assert_eq!(InvokeError::from_code(*e as u64), Some(*e));
         }
         // zero is success, never an error, and codes past the end decode to nothing.
+        let past_the_end = |len: usize| len as u64 + 1;
         assert_eq!(IpcSyscallError::from_code(0), None);
-        assert_eq!(IpcSyscallError::from_code(33), None);
-        assert_eq!(RetypeSyscallError::from_code(9), None);
-        assert_eq!(MintSyscallError::from_code(4), None);
-        assert_eq!(InvokeError::from_code(5), None);
+        assert_eq!(IpcSyscallError::from_code(past_the_end(IpcSyscallError::ALL.len())), None);
+        assert_eq!(RetypeSyscallError::from_code(past_the_end(RetypeSyscallError::ALL.len())), None);
+        assert_eq!(MintSyscallError::from_code(past_the_end(MintSyscallError::ALL.len())), None);
+        assert_eq!(InvokeError::from_code(past_the_end(InvokeError::ALL.len())), None);
     }
 
     #[test]

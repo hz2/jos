@@ -87,17 +87,16 @@ fn take_deposited(cap_slot: u64) -> Option<(Message, u64)> {
 
 // --- blocking IPC -----------------------------------------------------------
 
+use jos_core::abi::NO_REPLY;
+use jos_core::clock::{Duration, Instant};
+use jos_core::wait_table::{WaitTable, Waiter};
 use spin::Mutex;
 
 const MAX_THREADS: usize = crate::sched::MAX_THREADS;
 
-/// A parked thread waiting to send on a specific endpoint.
+/// What a parked sender needs to finish its send.
 #[derive(Clone, Copy)]
-struct BlockedSend {
-    /// Endpoint identity (the `phys_addr` of its `ObjectId`).
-    endpoint_addr: u64,
-    /// Scheduler id of the parked sender.
-    thread_id: usize,
+struct Send {
     /// The message: word 0 from the register, words 1 to 3 from the sender's
     /// IPC buffer, captured when it parked.
     message: Message,
@@ -105,37 +104,31 @@ struct BlockedSend {
     badge: u64,
     /// The sender is in a `Call` and waits for an answer through a reply object.
     call: bool,
-    /// When it parked ([`PARK_SEQ`]), so parked senders are taken oldest first.
-    seq: u64,
 }
 
-/// A parked thread waiting to receive on a specific endpoint.
-#[derive(Clone, Copy)]
-struct BlockedRecv {
-    /// Endpoint identity (the `phys_addr` of its `ObjectId`).
-    endpoint_addr: u64,
-    /// Scheduler id of the parked receiver.
-    thread_id: usize,
-    /// For `RecvReply`: the reply object a `Call` binds to its caller.
-    reply: Option<ObjectId>,
-    /// When it parked ([`PARK_SEQ`]), so parked receivers are served oldest
-    /// first.
-    seq: u64,
+/// Threads parked in a blocking send or call, by endpoint address. The table
+/// serves them oldest first and lets each leave once (BLOCK-1).
+static BLOCKED_SENDS: Mutex<WaitTable<Send, MAX_THREADS>> = Mutex::new(WaitTable::new());
+
+/// Threads parked in a blocking receive, by endpoint address, each with the
+/// reply object its `RecvReply` named, if any. A timed receive carries its
+/// deadline in timer ticks.
+static BLOCKED_RECVS: Mutex<WaitTable<Option<ObjectId>, MAX_THREADS>> = Mutex::new(WaitTable::new());
+
+/// Milliseconds per timer tick, rounded down: the PIT runs at its power-on
+/// rate, a tick every 54.9 ms, so dividing by 54 never waits less than asked.
+const TICK_MS: u64 = 54;
+
+/// The timer tick count, as an [`Instant`] the deadlines compare against.
+fn ticks_now() -> Instant {
+    Instant::new(crate::interrupts::TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed) as u64)
 }
 
-/// Counts parks, so the blocking tables (whose entries are reused in any
-/// order) can still hand out the oldest waiter first.
-static PARK_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// Returns the next park sequence number.
-fn next_seq() -> u64 {
-    PARK_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+/// The deadline of a wait of `ms` milliseconds starting now: whole ticks,
+/// rounded up, plus the tick in progress.
+fn deadline_after(ms: u64) -> Instant {
+    ticks_now().saturating_add(Duration::new(ms.div_ceil(TICK_MS).saturating_add(1)))
 }
-
-static BLOCKED_SENDS: Mutex<[Option<BlockedSend>; MAX_THREADS]> =
-    Mutex::new([None; MAX_THREADS]);
-static BLOCKED_RECVS: Mutex<[Option<BlockedRecv>; MAX_THREADS]> =
-    Mutex::new([None; MAX_THREADS]);
 
 /// Saves the current thread's user-space context into its Tcb so it can be
 /// resumed via iretq when woken. `wake_rax` is placed in rax (the syscall
@@ -222,20 +215,9 @@ pub(super) fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
     if cur == usize::MAX {
         return IpcSyscallError::WouldBlock as u64;
     }
-    {
-        let mut sends = BLOCKED_SENDS.lock();
-        if let Some(entry) = sends.iter_mut().find(|e| e.is_none()) {
-            *entry = Some(BlockedSend {
-                endpoint_addr,
-                thread_id: cur,
-                message,
-                badge,
-                call: false,
-                seq: next_seq(),
-            });
-        } else {
-            return IpcSyscallError::WouldBlock as u64; // table full
-        }
+    let parked = BLOCKED_SENDS.lock().park(endpoint_addr, cur, None, Send { message, badge, call: false });
+    if parked.is_err() {
+        return IpcSyscallError::WouldBlock as u64; // table full
     }
     save_blocking_context(0); // rax = 0 when woken (send returned success)
     // SAFETY: ring-0, single-CPU; need_yield is read by the syscall stub after
@@ -248,18 +230,20 @@ pub(super) fn sys_ipc_send_blocking(cap_slot: u64, word: u64) -> u64 {
 
 /// Blocking receive with no reply object; see [`recv_blocking`].
 pub(super) fn sys_ipc_recv_blocking(cap_slot: u64) -> SyscallRet {
-    recv_blocking(cap_slot, None)
+    recv_blocking(cap_slot, None, None)
 }
 
-/// The shared blocking receive behind [`Syscall::IpcRecvBlocking`] and
-/// [`Syscall::RecvReply`].
+/// The shared blocking receive behind [`Syscall::IpcRecvBlocking`],
+/// [`Syscall::RecvReply`], and [`Syscall::RecvTimeout`].
 ///
 /// Rendezvous with a sender already parked on the endpoint, or take a message
 /// already deposited; otherwise park this thread in `BLOCKED_RECVS` and yield.
 /// `reply` is the reply object a `RecvReply` named: a `Call` that meets it binds
 /// it to the caller, and a `Call` that meets a plain receive fails with
-/// [`IpcSyscallError::NoReply`] rather than waiting forever.
-fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
+/// [`IpcSyscallError::NoReply`] rather than waiting forever. A thread parked
+/// with a `deadline` is woken at that tick with [`IpcSyscallError::TimedOut`]
+/// if nothing arrived (see [`expire_timed_waits`]).
+fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>, deadline: Option<Instant>) -> SyscallRet {
     let err = |e: IpcSyscallError| SyscallRet::from(e as u64 | IPC_ERR_FLAG);
     let (endpoint_addr, _) = match resolve_endpoint_slot(cap_slot, Rights::READ) {
         Ok(found) => found,
@@ -281,35 +265,56 @@ fn recv_blocking(cap_slot: u64, reply: Option<ObjectId>) -> SyscallRet {
     if cur == usize::MAX {
         return err(IpcSyscallError::WouldBlock);
     }
-    {
-        let mut recvs = BLOCKED_RECVS.lock();
-        let Some(entry) = recvs.iter_mut().find(|e| e.is_none()) else {
-            return err(IpcSyscallError::WouldBlock);
-        };
-        *entry = Some(BlockedRecv { endpoint_addr, thread_id: cur, reply, seq: next_seq() });
+    if BLOCKED_RECVS.lock().park(endpoint_addr, cur, deadline, reply).is_err() {
+        return err(IpcSyscallError::WouldBlock);
     }
     // the sender overwrites rax/rdx with the word and badge before readying us.
     park_current();
     0.into() // ignored: the stub yields instead of sysretq'ing
 }
 
+/// Implements [`Syscall::RecvTimeout`]: [`recv_blocking`] until `ms`
+/// milliseconds from now, with the reply object in `reply_slot` unless that
+/// is [`NO_REPLY`].
+pub(super) fn sys_recv_timeout(ep_slot: u64, reply_slot: u64, ms: u64) -> SyscallRet {
+    let reply = if reply_slot == NO_REPLY {
+        None
+    } else {
+        match idle_reply(reply_slot) {
+            Ok(reply) => Some(reply),
+            Err(e) => return SyscallRet::from(e as u64 | IPC_ERR_FLAG),
+        }
+    };
+    recv_blocking(ep_slot, reply, Some(deadline_after(ms)))
+}
+
+/// Wakes every thread whose timed receive has run out of time, with
+/// [`IpcSyscallError::TimedOut`]. Called on every timer tick.
+///
+/// The table is only tried, never waited for: code that holds it with
+/// interrupts enabled (a revoke run from a kernel task) must not deadlock the
+/// tick, and a tick that finds it busy only puts the wake off to the next one.
+pub fn expire_timed_waits() {
+    let now = ticks_now();
+    loop {
+        let expired = BLOCKED_RECVS.try_lock().and_then(|mut recvs| recvs.take_expired(now));
+        let Some(recv) = expired else {
+            return;
+        };
+        resume(recv.thread, IpcSyscallError::TimedOut as u64 | IPC_ERR_FLAG, 0);
+    }
+}
+
 /// Hands `message` straight to a thread parked in a blocking receive on the
 /// endpoint at `endpoint_addr`, if there is one: its buffer gets the words,
 /// its saved `rax` word 0 and `rdx` the badge. Returns whether one took it.
 pub(super) fn hand_to_parked_receiver(endpoint_addr: u64, message: &Message, badge: u64) -> bool {
-    let waiting = {
-        let mut recvs = BLOCKED_RECVS.lock();
-        // the oldest receiver parked on the endpoint is served first.
-        recvs
-            .iter_mut()
-            .filter(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
-            .min_by_key(|e| e.map_or(u64::MAX, |r| r.seq))
-            .and_then(Option::take)
-    };
+    // the oldest receiver parked on the endpoint is served first.
+    let waiting = BLOCKED_RECVS.lock().take_oldest(endpoint_addr);
     let Some(recv) = waiting else {
         return false;
     };
-    resume_with(recv.thread_id, message, badge);
+    resume_with(recv.thread, message, badge);
     true
 }
 
@@ -319,26 +324,51 @@ pub(super) fn hand_to_parked_receiver(endpoint_addr: u64, message: &Message, bad
 /// it, or, with no reply object to answer through, is failed with
 /// [`IpcSyscallError::NoReply`].
 pub(super) fn take_from_parked_sender(endpoint_addr: u64, reply: Option<ObjectId>) -> Option<(Message, u64)> {
-    let send = {
-        let mut sends = BLOCKED_SENDS.lock();
-        // the oldest sender parked on the endpoint goes first.
-        sends
-            .iter_mut()
-            .filter(|e| e.is_some_and(|s| s.endpoint_addr == endpoint_addr))
-            .min_by_key(|e| e.map_or(u64::MAX, |s| s.seq))
-            .and_then(Option::take)
-    }?;
-    if send.call {
+    // the oldest sender parked on the endpoint goes first.
+    let send = BLOCKED_SENDS.lock().take_oldest(endpoint_addr)?;
+    if send.data.call {
         let bound = reply
             .and_then(cap::reply_object)
-            .is_some_and(|r| r.inner.lock().bind(crate::sched::token(send.thread_id)).is_ok());
+            .is_some_and(|r| r.inner.lock().bind(crate::sched::token(send.thread)).is_ok());
         if !bound {
-            abort_call(send.thread_id);
+            abort_call(send.thread);
         }
     } else {
-        resume(send.thread_id, 0, 0);
+        resume(send.thread, 0, 0);
     }
-    Some((send.message, send.badge))
+    Some((send.data.message, send.data.badge))
+}
+
+/// Ends every wait on the endpoint at `endpoint_addr`, which no capability
+/// names any more, so nothing could ever complete them (seL4's
+/// `cancelAllIPC`). Parked receivers, senders, and callers resume with
+/// [`IpcSyscallError::BadCap`]; a thread parked by a fault, which has no call
+/// to fail, is stopped.
+pub fn cancel_waits_on(endpoint_addr: u64) {
+    let bad_cap = IpcSyscallError::BadCap as u64;
+    loop {
+        let recv = BLOCKED_RECVS.lock().take_oldest(endpoint_addr);
+        let Some(recv) = recv else { break };
+        resume(recv.thread, bad_cap | IPC_ERR_FLAG, 0);
+    }
+    loop {
+        let send = BLOCKED_SENDS.lock().take_oldest(endpoint_addr);
+        let Some(send) = send else { break };
+        fail_sender(&send, bad_cap);
+    }
+}
+
+/// Resumes a parked sender with error `code`, flagged for a caller the way
+/// [`Syscall::Call`] returns errors, or stops it if a fault parked it.
+fn fail_sender(send: &Waiter<Send>, code: u64) {
+    // SAFETY: the id came from register_thread; a null entry is skipped.
+    let tcb = unsafe { crate::sched::thread_table_entry(send.thread) };
+    // SAFETY: a non-null entry is a live TCB; single-CPU with interrupts off.
+    if !tcb.is_null() && unsafe { (*tcb).state } == TcbState::Faulted {
+        retire_threads(|t| core::ptr::eq(t, tcb));
+        return;
+    }
+    resume(send.thread, if send.data.call { code | IPC_ERR_FLAG } else { code }, 0);
 }
 
 /// Resolves `cap_slot` in the current `CSpace` to an endpoint the capability
@@ -527,28 +557,17 @@ pub fn fault_endpoint(tcb: &Tcb) -> Option<(u64, u64)> {
 /// parked until one arrives. Returns `false` if nothing could ever answer it
 /// (the parked receiver has no reply object), so the caller stops the thread.
 pub fn deliver_fault(thread_id: usize, endpoint_addr: u64, badge: u64, message: &Message) -> bool {
-    let waiting = {
-        let mut recvs = BLOCKED_RECVS.lock();
-        recvs
-            .iter_mut()
-            .filter(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
-            .min_by_key(|e| e.map_or(u64::MAX, |r| r.seq))
-            .and_then(Option::take)
-    };
+    let waiting = BLOCKED_RECVS.lock().take_oldest(endpoint_addr);
     if let Some(recv) = waiting {
         let bound = recv
-            .reply
+            .data
             .and_then(cap::reply_object)
             .is_some_and(|r| r.inner.lock().bind(crate::sched::token(thread_id)).is_ok());
-        resume_with(recv.thread_id, message, badge);
+        resume_with(recv.thread, message, badge);
         return bound;
     }
-    let mut sends = BLOCKED_SENDS.lock();
-    let Some(entry) = sends.iter_mut().find(|e| e.is_none()) else {
-        return false;
-    };
-    *entry = Some(BlockedSend { endpoint_addr, thread_id, message: *message, badge, call: true, seq: next_seq() });
-    true
+    let call = Send { message: *message, badge, call: true };
+    BLOCKED_SENDS.lock().park(endpoint_addr, thread_id, None, call).is_ok()
 }
 
 /// Stops every thread `doomed` picks, for good: it leaves the scheduler and any
@@ -569,16 +588,8 @@ pub fn retire_threads(mut doomed: impl FnMut(&Tcb) -> bool) {
     }
     for &id in &ids[..count] {
         // a parked sender or receiver must not be handed a message later.
-        for entry in BLOCKED_SENDS.lock().iter_mut() {
-            if entry.is_some_and(|s| s.thread_id == id) {
-                *entry = None;
-            }
-        }
-        for entry in BLOCKED_RECVS.lock().iter_mut() {
-            if entry.is_some_and(|r| r.thread_id == id) {
-                *entry = None;
-            }
-        }
+        let _ = BLOCKED_SENDS.lock().take_thread(id);
+        let _ = BLOCKED_RECVS.lock().take_thread(id);
         // SAFETY: id came from for_each_thread, so its entry is a live TCB;
         // single-CPU with interrupts disabled, as retire_thread requires.
         unsafe {
@@ -622,19 +633,14 @@ pub(super) fn sys_call(cap_slot: u64, word: u64) -> u64 {
         return err(IpcSyscallError::WouldBlock);
     }
 
-    let waiting = {
-        let mut recvs = BLOCKED_RECVS.lock();
-        recvs
-            .iter_mut()
-            .find(|e| e.is_some_and(|r| r.endpoint_addr == endpoint_addr))
-            .and_then(Option::take)
-    };
+    // the oldest receiver parked on the endpoint takes the call.
+    let waiting = BLOCKED_RECVS.lock().take_oldest(endpoint_addr);
     if let Some(recv) = waiting {
         let bound = recv
-            .reply
+            .data
             .and_then(cap::reply_object)
             .is_some_and(|r| r.inner.lock().bind(crate::sched::token(cur)).is_ok());
-        resume_with(recv.thread_id, &message, badge);
+        resume_with(recv.thread, &message, badge);
         if !bound {
             // a plain receive took the message but cannot answer it.
             return err(IpcSyscallError::NoReply);
@@ -644,12 +650,8 @@ pub(super) fn sys_call(cap_slot: u64, word: u64) -> u64 {
         return 0; // ignored: the stub yields instead of sysretq'ing
     }
 
-    {
-        let mut sends = BLOCKED_SENDS.lock();
-        let Some(entry) = sends.iter_mut().find(|e| e.is_none()) else {
-            return err(IpcSyscallError::WouldBlock);
-        };
-        *entry = Some(BlockedSend { endpoint_addr, thread_id: cur, message, badge, call: true, seq: next_seq() });
+    if BLOCKED_SENDS.lock().park(endpoint_addr, cur, None, Send { message, badge, call: true }).is_err() {
+        return err(IpcSyscallError::WouldBlock);
     }
     park_current();
     0 // ignored
@@ -658,15 +660,26 @@ pub(super) fn sys_call(cap_slot: u64, word: u64) -> u64 {
 /// Implements [`Syscall::RecvReply`]: a blocking receive that names an idle reply
 /// object, so a `Call` that arrives can be answered later.
 pub(super) fn sys_recv_reply(ep_slot: u64, reply_slot: u64) -> SyscallRet {
-    let err = |e: IpcSyscallError| SyscallRet::from(e as u64 | IPC_ERR_FLAG);
-    let reply = match resolve_reply_slot(reply_slot) {
-        Ok(obj) => obj,
-        Err(e) => return err(e),
-    };
-    if !cap::reply_object(reply).is_some_and(|r| r.inner.lock().is_idle()) {
-        return err(IpcSyscallError::ReplyBusy);
+    match idle_reply(reply_slot) {
+        Ok(reply) => recv_blocking(ep_slot, Some(reply), None),
+        Err(e) => SyscallRet::from(e as u64 | IPC_ERR_FLAG),
     }
-    recv_blocking(ep_slot, Some(reply))
+}
+
+/// Resolves `reply_slot` to a reply object no caller is bound to, which a
+/// receive may hand to the next `Call`.
+///
+/// # Errors
+///
+/// Why [`resolve_reply_slot`] refused the slot, or
+/// [`IpcSyscallError::ReplyBusy`] if a caller is bound already.
+fn idle_reply(reply_slot: u64) -> Result<ObjectId, IpcSyscallError> {
+    let reply = resolve_reply_slot(reply_slot)?;
+    if cap::reply_object(reply).is_some_and(|r| r.inner.lock().is_idle()) {
+        Ok(reply)
+    } else {
+        Err(IpcSyscallError::ReplyBusy)
+    }
 }
 
 /// Implements [`Syscall::ReplyRecv`]: answers the bound caller, if any, then

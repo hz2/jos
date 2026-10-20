@@ -335,6 +335,8 @@ unsafe extern "C" fn timer_irq_handler(frame: *mut IrqFrame) {
 
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     crate::clock::on_timer_tick();
+    // threads whose timed receive ran out become ready before the pick below.
+    crate::syscall::expire_timed_waits();
 
     // send EOI before potentially-long scheduler work so the PIC can deliver
     // further interrupts as soon as IF is re-enabled.

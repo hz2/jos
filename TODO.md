@@ -39,10 +39,15 @@ Check items off in the same commit that finishes them.
       parked threads are served oldest first (`docs/kernel/ipc.md`)
 - [x] libjos: slot allocation, retype and map helpers, thread spawning with
       thread blocks (each thread finds its IPC buffer from its stack pointer)
-- [ ] capacity: CSpace registry slots freed with their CNode, a bigger mapping
-      registry without its stack scratch array
-- [ ] a receive with a timeout, so a ring-3 check that waits on a message that
-      never comes fails fast instead of hanging the run
+- [ ] capacity: CSpace registry slots freed with their CNode, and a bigger
+      mapping registry (`unmap_object` no longer keeps a stack scratch array)
+- [x] `recv_timeout` (26): a ring-3 check that waits on a message that never
+      comes fails fast with `TimedOut` instead of hanging the run
+- [x] the blocking tables are a verified `jos_core::wait_table` (BLOCK-1): a
+      `call` now reaches the longest-waiting receiver too, and revoking the
+      last capability to an endpoint ends every wait on it with `BadCap`
+- [x] kernel stack overflows fault on the guard page (inline stack probes);
+      the deepest syscall path uses 4.9 KiB of the 12 KiB stack
 - [ ] `mint` into a slot the caller names (today the kernel picks the lowest
       free one, which libjos has to claim after the fact)
 - [ ] a ring-3 test suite in the root task: one fresh thread per test with the

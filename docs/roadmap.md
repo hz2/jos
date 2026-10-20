@@ -80,6 +80,8 @@ speak IPC.
       modules and the info structure out of the free memory
 - [x] survivable user faults (fault endpoints, demand paging from userspace)
       and reusable thread ids
+- [x] timed receives, and blocked waits that end when their endpoint goes
+      away, over a verified table of parked threads (BLOCK-1)
 - [ ] a ring-3 test suite in the root task, and process spawning from userspace
 - [x] `jig`, the host-side harness: parallel QEMU boots read as KTAP, JUnit,
       reproduce commands, a machine matrix

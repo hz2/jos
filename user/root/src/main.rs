@@ -27,7 +27,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 18] = [
+const CHECKS: [(&str, Check); 22] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -46,6 +46,10 @@ const CHECKS: [(&str, Check); 18] = [
     ("invalid_opcode_reaches_its_handler", invalid_opcode_reaches_its_handler),
     ("fault_without_a_handler_stops_only_that_thread", fault_without_a_handler_stops_only_that_thread),
     ("handled_page_fault_resumes_the_thread", handled_page_fault_resumes_the_thread),
+    ("a_timed_receive_runs_out", a_timed_receive_runs_out),
+    ("a_timed_receive_takes_what_arrives_in_time", a_timed_receive_takes_what_arrives_in_time),
+    ("revoking_an_endpoint_ends_its_waits", revoking_an_endpoint_ends_its_waits),
+    ("calls_reach_the_longest_waiting_receiver", calls_reach_the_longest_waiting_receiver),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -252,12 +256,32 @@ extern "C" fn call_and_wait(arg: u64) {
     let _ = sys::call(field(arg, 0), 5);
 }
 
-/// Reports [`READY`] on field 1, receives on field 0 (blocking), and reports
-/// the word it got on field 1.
+/// Takes the call that starts a thread on `start` and, in one syscall,
+/// answers it with [`READY`] and parks in a receive on `inbox` with `reply`:
+/// the starter's call ([`spawn_parked`]) returns only once this thread is
+/// parked, whatever the timer does in between.
+fn park_after_answering(inbox: Slot, start: Slot, reply: Slot) -> Result<(u64, u64), IpcSyscallError> {
+    sys::recv_reply(start, reply)?;
+    sys::reply_recv(inbox, reply, READY)
+}
+
+/// Starts `entry`, which must begin with [`park_after_answering`] on `start`,
+/// and returns once it is parked.
+fn spawn_parked(entry: libjos::thread::Entry, arg: u64, start: Slot) -> Result<Thread, &'static str> {
+    let thread = Thread::spawn(entry, arg, 1).map_err(|_| "spawn")?;
+    if sys::call(start, 0) == Ok(READY) {
+        Ok(thread)
+    } else {
+        thread.reap();
+        Err("the thread did not reach its receive")
+    }
+}
+
+/// Parks in a receive on field 0 ([`park_after_answering`], started on field
+/// 1, reply object in field 2) and reports the word it got on field 1.
 extern "C" fn receive_and_report(arg: u64) {
-    let (inbox, report) = (field(arg, 0), field(arg, 1));
-    let _ = sys::send_blocking(report, READY);
-    let word = sys::recv_blocking(inbox).map_or(u64::MAX, |(w, _)| w);
+    let (inbox, report, reply) = (field(arg, 0), field(arg, 1), field(arg, 2));
+    let word = park_after_answering(inbox, report, reply).map_or(u64::MAX, |(w, _)| w);
     let _ = sys::send_blocking(report, word);
 }
 
@@ -328,12 +352,12 @@ fn stale_reply_reaches_no_new_thread(_: &BootInfo) -> Result<(), &'static str> {
     let reply = object(ObjectType::Reply)?;
     let inbox = object(ObjectType::Endpoint)?;
     let report = object(ObjectType::Endpoint)?;
+    let waiter_reply = object(ObjectType::Reply)?;
     let caller = Thread::spawn(call_and_wait, pack(call_ep, 0, 0), 1).map_err(|_| "spawn caller")?;
     let request = sys::recv_reply(call_ep, reply);
     // the reply object stays bound to the caller as it retires.
     caller.reap();
-    let waiter = Thread::spawn(receive_and_report, pack(inbox, report, 0), 1).map_err(|_| "spawn waiter")?;
-    let ready = sys::recv_blocking(report);
+    let waiter = spawn_parked(receive_and_report, pack(inbox, report, waiter_reply), report)?;
     // the waiter is parked in its receive now; the stale answer must not wake
     // it, which it would get to show while this thread spins.
     let _ = sys::reply(reply, 99);
@@ -341,9 +365,9 @@ fn stale_reply_reaches_no_new_thread(_: &BootInfo) -> Result<(), &'static str> {
     let sent = sys::send_blocking(inbox, 42);
     let got = sys::recv_blocking(report);
     waiter.reap();
-    release(&[call_ep, reply, inbox, report])?;
+    release(&[call_ep, reply, inbox, report, waiter_reply])?;
     ensure(request.map(|(word, _)| word) == Ok(5), "the call did not arrive")?;
-    ensure(ready == Ok((READY, 0)) && sent.is_ok(), "the waiter did not start")?;
+    ensure(sent.is_ok(), "the waiter did not take the message")?;
     ensure(got == Ok((42, 0)), "the stale answer woke the thread that reused the slot")
 }
 
@@ -353,15 +377,15 @@ fn stale_reply_reaches_no_new_thread(_: &BootInfo) -> Result<(), &'static str> {
 fn nonblocking_send_reaches_a_parked_receiver(_: &BootInfo) -> Result<(), &'static str> {
     let inbox = object(ObjectType::Endpoint)?;
     let report = object(ObjectType::Endpoint)?;
-    let waiter = Thread::spawn(receive_and_report, pack(inbox, report, 0), 1).map_err(|_| "spawn")?;
-    let ready = sys::recv_blocking(report);
+    let reply = object(ObjectType::Reply)?;
+    let waiter = spawn_parked(receive_and_report, pack(inbox, report, reply), report)?;
     let sent = sys::send(inbox, 77);
     // with the message handed over, nothing is left in the endpoint.
     let stranded = sys::recv(inbox);
     let got = if stranded.is_err() { sys::recv_blocking(report) } else { Ok((0, 0)) };
     waiter.reap();
-    release(&[inbox, report])?;
-    ensure(ready == Ok((READY, 0)) && sent.is_ok(), "the waiter did not start")?;
+    release(&[inbox, report, reply])?;
+    ensure(sent.is_ok(), "the send was refused")?;
     ensure(stranded == Err(IpcSyscallError::WouldBlock), "the message stayed in the endpoint")?;
     ensure(got == Ok((77, 0)), "the parked receiver did not get the message")
 }
@@ -528,4 +552,85 @@ fn handled_page_fault_resumes_the_thread(_: &BootInfo) -> Result<(), &'static st
     ensure(words[0] == PAGE_FAULT, "not a page fault")?;
     ensure(answered.is_ok(), "the reply was refused")?;
     ensure(got == Ok((0x77, 0)), "the resumed thread did not read the mapped page")
+}
+
+/// Parks in a receive on field 0 ([`park_after_answering`], started on field
+/// 1, reply object in field 2) and reports on field 1 the error code it ended
+/// with, or 0 if a message came.
+extern "C" fn receive_and_report_error(arg: u64) {
+    let (inbox, report, reply) = (field(arg, 0), field(arg, 1), field(arg, 2));
+    let code = park_after_answering(inbox, report, reply).err().map_or(0, |e| e as u64);
+    let _ = sys::send_blocking(report, code);
+}
+
+/// Parks to receive a call on field 0 ([`park_after_answering`], started on
+/// field 1, reply object in field 2) and answers it with the reply object's
+/// slot, which tells the threads apart.
+extern "C" fn answer_with_reply_slot(arg: u64) {
+    let (ep, start, reply) = (field(arg, 0), field(arg, 1), field(arg, 2));
+    if park_after_answering(ep, start, reply).is_ok() {
+        let _ = sys::reply(reply, reply);
+    }
+}
+
+/// A timed receive on an endpoint nothing sends to gives up, and leaves no
+/// trace behind: a later send is not handed to the receiver that gave up, but
+/// waits in the endpoint for the next receive.
+fn a_timed_receive_runs_out(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
+    let waited = sys::recv_timeout(ep, None, 100);
+    let sent = sys::send(ep, 9);
+    let later = sys::recv(ep);
+    release(&[ep])?;
+    ensure(waited == Err(IpcSyscallError::TimedOut), "the receive did not time out")?;
+    ensure(sent.is_ok() && later == Ok((9, 0)), "the receiver that timed out still took a message")
+}
+
+/// A timed receive takes a message that comes before its time is up.
+fn a_timed_receive_takes_what_arrives_in_time(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
+    let thread = Thread::spawn(double_and_report, pack(ep, 0, 4), 1).map_err(|_| "spawn")?;
+    let got = sys::recv_timeout(ep, None, 5000);
+    thread.reap();
+    release(&[ep])?;
+    ensure(got == Ok((8, 0)), "the message did not arrive in time")
+}
+
+/// Revoking the last capability to an endpoint ends the wait of a thread
+/// parked in a blocking receive on it, with `BadCap`, instead of leaving it
+/// parked on an endpoint nothing names (seL4's cancel-all-IPC).
+fn revoking_an_endpoint_ends_its_waits(_: &BootInfo) -> Result<(), &'static str> {
+    let inbox = object(ObjectType::Endpoint)?;
+    let report = object(ObjectType::Endpoint)?;
+    let reply = object(ObjectType::Reply)?;
+    let waiter = spawn_parked(receive_and_report_error, pack(inbox, report, reply), report)?;
+    release(&[inbox])?;
+    let ended = sys::recv_timeout(report, None, 2000);
+    waiter.reap();
+    release(&[report, reply])?;
+    ensure(ended != Err(IpcSyscallError::TimedOut), "the revoke left the waiter parked")?;
+    ensure(ended == Ok((IpcSyscallError::BadCap as u64, 0)), "the waiter did not end with BadCap")
+}
+
+/// A call goes to the receiver that has waited longest, even when a newer
+/// receiver parked in a table entry that a third thread freed before it.
+fn calls_reach_the_longest_waiting_receiver(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
+    let (inbox, report) = (object(ObjectType::Endpoint)?, object(ObjectType::Endpoint)?);
+    let bystander_reply = object(ObjectType::Reply)?;
+    let (first_reply, second_reply) = (object(ObjectType::Reply)?, object(ObjectType::Reply)?);
+    // a bystander parks first, then the oldest receiver behind it.
+    let bystander = spawn_parked(receive_and_report, pack(inbox, report, bystander_reply), report)?;
+    let first = spawn_parked(answer_with_reply_slot, pack(ep, report, first_reply), report)?;
+    // waking the bystander frees its entry, which the newer receiver takes.
+    let woke = sys::send_blocking(inbox, 3).and_then(|()| sys::recv_blocking(report));
+    let second = spawn_parked(answer_with_reply_slot, pack(ep, report, second_reply), report)?;
+    let answers = (sys::call(ep, 0), sys::call(ep, 0));
+    for thread in [bystander, first, second] {
+        thread.reap();
+    }
+    release(&[ep, inbox, report, bystander_reply, first_reply, second_reply])?;
+    ensure(woke == Ok((3, 0)), "the bystander did not take its message")?;
+    ensure(answers.0 == Ok(first_reply), "the call skipped the receiver that waited longest")?;
+    ensure(answers.1 == Ok(second_reply), "the second call did not reach the newer receiver")
 }

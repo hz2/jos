@@ -76,6 +76,7 @@ CNode, or VSpace loses its last capability.
 | 10 | `recv_reply` | endpoint slot, reply slot | word, badge in `rdx`; flagged errors |
 | 11 | `reply` | reply slot, word | `0` or an error |
 | 13 | `reply_recv` | endpoint slot, reply slot, word | as `recv_reply` |
+| 26 | `recv_timeout` | endpoint slot, reply slot or `NO_REPLY`, milliseconds | as `recv_reply`, or `TimedOut` |
 | 5 | `invoke` | slot, method, argument | method result; flagged errors |
 
 Sending needs `WRITE` on the endpoint capability, receiving needs `READ`. A
@@ -84,6 +85,16 @@ IPC buffer (below). `call` blocks until a server that received with
 `recv_reply` answers through the reply object; a call that meets a plain
 receive fails with `NoReply`. `reply_recv` answers the bound caller, if any,
 then receives, which is a whole server loop iteration in one call.
+
+`recv_timeout` is a blocking receive that gives up with `TimedOut` once the
+time is up, counted in whole timer ticks (54.9 ms each) and rounded up. With
+a reply slot it receives as `recv_reply` does; with `NO_REPLY` (`u64::MAX`)
+as `ipc_recv_blocking`. A receiver that timed out has left the endpoint, so a
+later message waits for the next receive instead.
+
+When the last capability to an endpoint is revoked, every thread parked on it
+resumes with `BadCap`: receivers and callers flagged, plain blocking senders
+unflagged. A thread parked there by a fault is stopped.
 
 ### IPC buffer and capability transfer
 
@@ -210,6 +221,7 @@ else failure. Both need `WRITE`, so a copy minted without it is refused with
 | 30 | `NotMachine` | the slot does not name the machine |
 | 31 | `NoIpcBuffer` | the call passes data through the IPC buffer and the caller has none |
 | 32 | `TooLong` | a length exceeds the IPC buffer's data area |
+| 33 | `TimedOut` | a timed receive ran out of time before a message arrived |
 
 ### Retype errors (`RetypeSyscallError`)
 

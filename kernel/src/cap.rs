@@ -1941,6 +1941,12 @@ pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
                 if let Some(waker) = recv_waiter {
                     waker.wake();
                 }
+                // threads parked in blocking calls hold no capability to find
+                // stale: once none is left anywhere, their waits end here.
+                // SAFETY: single-CPU revoke path; the spaces are only read.
+                if !unsafe { still_named(obj, local) } {
+                    crate::syscall::cancel_waits_on(obj.phys_addr());
+                }
             }
             ObjectKind::Notification => {
                 // SAFETY: obj.kind == Notification (checked in the mark phase),

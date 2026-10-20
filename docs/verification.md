@@ -41,6 +41,7 @@ confirm the proof fails, revert.
 | BOOT-1 | the multiboot2 parser never leaves the info structure: on every 64-byte input, each tag the walk yields is the 8-aligned tag the format places where the previous one ended, decoded from its own header, and lies inside the first `total_size` bytes; the walk stops only at an end tag, a tag smaller than its header, or a tag running past `total_size`, yields fewer than `total_size / 8` tags, and stays stopped; memory map entries (every 56-byte payload) and module addresses and command lines (every 24-byte payload) are exactly the bytes the format places inside their own tag | Kani | `multiboot2.rs` |
 | BOOT-2 | the usable memory list holds exactly the free pages (inside an available range, below the identity-map limit, touching no reserved range) as sorted, page-aligned, maximal runs; with too little room it still holds only free pages, sorted with gaps, and reports the bytes it dropped (one available and one reserved range below 4 GiB, any limit) | Kani | `boot_regions.rs` |
 | ELF-1 | the ELF loader's parser never panics or reads outside the image (every 120-byte image with its program header table where linkers put it; every dynamic section inside 64 bytes, for any two segments and any base); every relocation it accepts writes eight bytes inside a writable segment, at the base plus `r_offset`, and stores the base plus `r_addend`; it refuses exactly the images with a writable and executable segment (any flags) and exactly the segments that share a page (any addresses and sizes) | Kani | `elf.rs` |
+| BLOCK-1 | the tables of threads parked in blocking IPC behave as a list in park order over every five-step sequence of parks and takes on a two-entry table: a park fails exactly when the thread is parked already or the table is full; a take by endpoint, by expired deadline, or by thread returns the first matching waiter in park order (so a newcomer in a reused entry still queues last) or nothing, and each waiter leaves exactly once | Kani | `wait_table.rs` |
 | IPC-1 | deadlock-freedom under receive-with-timeout | DST | `jos-core/tests/dst_recv_timeout.rs` |
 | ARITH-1 | Verus build plumbing works without breaking test, Miri, or Kani | Verus | `proof.rs` |
 
@@ -77,8 +78,6 @@ panics on kernel-produced bytes. Kani.
 
 ## Backlog
 
-- **BLOCK-1**: a pure model of the blocking-IPC direct-handoff tables so the
-  syscall path gets the same coverage as the async path.
 - **LOCK-1**: the lock-order graph (WITNESS-style checker) rejects every cycle.
 - **CAP-SPEC**: a Verus specification of the whole capability state machine
   that the kernel is proven to implement (the seL4-style goal).

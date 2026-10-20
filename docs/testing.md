@@ -77,6 +77,14 @@ checked nothing under KVM (its mutation still passed); it now waits on the TSC.
 A test that waits for something to happen or not happen should measure time,
 not iterations, and its negative control should fail under both accelerators.
 
+A ring-3 check that needs another thread parked before it acts must not guess
+with a delay either: a timer tick can land between the thread's last report and
+its blocking call, so the check would act first. The root task's `spawn_parked`
+starts the thread with a `call` that the thread answers and parks on in the same
+`reply_recv`, so the call returns only once the thread is parked.
+`nonblocking_send_reaches_a_parked_receiver` failed one machine of the matrix
+before it waited this way.
+
 ## Background notes (blog_os era)
 
 

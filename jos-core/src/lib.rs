@@ -58,3 +58,4 @@ pub mod sched_policy;
 pub mod timer;
 pub mod trace;
 pub mod untyped;
+pub mod wait_table;

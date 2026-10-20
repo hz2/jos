@@ -21,6 +21,7 @@ half, look at the other.
 | concept | model | kernel glue |
 |---|---|---|
 | endpoint rendezvous | `endpoint.rs` | `cap.rs` (async path), `syscall/ipc.rs` (blocking path) |
+| threads parked in blocking IPC, timeouts | `wait_table.rs` | `syscall/ipc.rs` (`BLOCKED_SENDS`, `BLOCKED_RECVS`, `expire_timed_waits`, `cancel_waits_on`) |
 | call and reply | `reply.rs` | `syscall/ipc.rs` |
 | IPC buffer, capability transfer | `ipc_buffer.rs` | `syscall/ipc.rs`, `cap.rs` (`transfer_cap`) |
 | notifications | `notification.rs` | `cap.rs` |

@@ -112,6 +112,24 @@ impl<const N: usize> RunQueue<N> {
         Some(id)
     }
 
+    /// Removes index `id` from wherever it sits in the queue, returning `true`
+    /// if it was queued. The other indices keep their order.
+    pub fn remove(&mut self, id: usize) -> bool {
+        if !self.is_queued(id) {
+            return false;
+        }
+        // rotate once through the fifo, dropping id and re-pushing the rest.
+        for _ in 0..self.fifo.len() {
+            let Some(front) = self.fifo.pop() else { break };
+            if front != id {
+                // the pop just made room, so the push cannot fail.
+                let _ = self.fifo.push(front);
+            }
+        }
+        self.queued[id] = false;
+        true
+    }
+
     /// Number of indices flagged as queued. Used by the tests and proofs to
     /// check the count invariant (`queued_count` == len) directly.
     #[cfg(any(test, kani))]
@@ -221,6 +239,22 @@ mod tests {
     }
 
     #[test]
+    fn remove_keeps_the_others_in_order() {
+        let mut q: RunQueue<8> = RunQueue::new();
+        for id in [4_usize, 1, 7, 0] {
+            q.enqueue(id);
+        }
+        assert!(q.remove(7));
+        assert!(!q.is_queued(7));
+        // removing what is not queued changes nothing.
+        assert!(!q.remove(7));
+        assert!(!q.remove(99));
+        assert_eq!(q.len(), 3);
+        assert_eq!([q.dequeue(), q.dequeue(), q.dequeue()], [Some(4), Some(1), Some(0)]);
+        assert!(q.is_empty());
+    }
+
+    #[test]
     fn count_matches_len_through_a_mixed_sequence() {
         let mut q: RunQueue<6> = RunQueue::new();
         let ops = [1_usize, 1, 3, 5, 3, 0];
@@ -320,15 +354,42 @@ mod kani_proofs {
     fn count_equals_len_and_len_bounded() {
         let mut q: RunQueue<N> = RunQueue::new();
         for _ in 0..N {
-            let do_enqueue: bool = kani::any();
-            if do_enqueue {
-                let id: usize = kani::any();
-                let _ = q.enqueue(id);
-            } else {
-                let _ = q.dequeue();
+            let op: u8 = kani::any();
+            let id: usize = kani::any();
+            match op % 3 {
+                0 => {
+                    let _ = q.enqueue(id);
+                }
+                1 => {
+                    let _ = q.dequeue();
+                }
+                _ => {
+                    let _ = q.remove(id);
+                }
             }
             assert_eq!(q.queued_count(), q.len());
             assert!(q.len() <= q.capacity());
         }
+    }
+
+    /// Removing a queued index takes out exactly that index: it is no longer
+    /// queued, and the others still come out in the order they went in.
+    #[kani::proof]
+    #[kani::unwind(5)] // N + 1, also covers remove's rotation
+    fn remove_takes_out_exactly_one() {
+        let mut q: RunQueue<N> = RunQueue::new();
+        let a: usize = kani::any();
+        let b: usize = kani::any();
+        let c: usize = kani::any();
+        kani::assume(a < N && b < N && c < N && a != b && b != c && a != c);
+        q.enqueue(a);
+        q.enqueue(b);
+        q.enqueue(c);
+        assert!(q.remove(b));
+        assert!(!q.is_queued(b));
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.dequeue(), Some(a));
+        assert_eq!(q.dequeue(), Some(c));
+        assert!(q.is_empty());
     }
 }

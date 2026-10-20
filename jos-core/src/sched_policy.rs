@@ -30,6 +30,10 @@ pub trait SchedPolicy {
 
     /// Returns `true` if `id` is currently in the ready set.
     fn is_ready(&self, id: usize) -> bool;
+
+    /// Takes `id` out of the ready set, returning `true` if it was there. Used
+    /// when a thread stops for good.
+    fn remove(&mut self, id: usize) -> bool;
 }
 
 /// Round-robin policy backed by the dedup-FIFO [`RunQueue`].
@@ -69,6 +73,10 @@ impl<const N: usize> SchedPolicy for RoundRobin<N> {
 
     fn is_ready(&self, id: usize) -> bool {
         self.queue.is_queued(id)
+    }
+
+    fn remove(&mut self, id: usize) -> bool {
+        self.queue.remove(id)
     }
 }
 
@@ -148,6 +156,17 @@ mod tests {
         let mut p: RoundRobin<4> = RoundRobin::new();
         p.enqueue(1);
         p.enqueue(1);
+        assert_eq!(p.dequeue(), Some(1));
+        assert_eq!(p.dequeue(), None);
+    }
+
+    #[test]
+    fn removed_thread_is_never_served() {
+        let mut p: RoundRobin<4> = RoundRobin::new();
+        p.enqueue(0);
+        p.enqueue(1);
+        assert!(p.remove(0));
+        assert!(!p.is_ready(0));
         assert_eq!(p.dequeue(), Some(1));
         assert_eq!(p.dequeue(), None);
     }

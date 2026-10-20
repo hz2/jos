@@ -35,7 +35,7 @@ confirm the proof fails, revert.
 | EP-1 | endpoint rendezvous: sender and receiver never both parked; parking is self-guarding; messages are neither fabricated nor corrupted | Kani | `endpoint.rs` |
 | NTFN-1 | notification state machine invariants | Kani | `notification.rs` |
 | CLOCK-1 | `KernelClock` is monotone; deadlines are never in the past | Kani | `clock.rs` |
-| SCHED-1 | round robin serves all N threads in N steps (starvation-freedom) | Kani | `sched_policy.rs`, `run_queue.rs` |
+| SCHED-1 | round robin serves all N threads in N steps (starvation-freedom); removing a thread takes out exactly that one and keeps the others in order, and the queue invariant holds across enqueue, dequeue, and remove | Kani | `sched_policy.rs`, `run_queue.rs` |
 | IPC-1 | deadlock-freedom under receive-with-timeout | DST | `jos-core/tests/dst_recv_timeout.rs` |
 | ARITH-1 | Verus build plumbing works without breaking test, Miri, or Kani | Verus | `proof.rs` |
 

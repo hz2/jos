@@ -50,8 +50,12 @@ Check items off in the same commit that finishes them.
       the deepest syscall path uses 4.9 KiB of the 12 KiB stack
 - [ ] `mint` into a slot the caller names (today the kernel picks the lowest
       free one, which libjos has to claim after the fact)
-- [ ] a ring-3 test suite in the root task: one fresh thread per test with the
-      runner as its fault handler, nested KTAP, `root test [filter]`
+- [x] a ring-3 test runner in the root task: each check in a fresh thread with
+      the runner as its fault handler and a 30 s deadline, so a check that
+      faults, panics, or hangs costs only its own line; `root test [filter]`,
+      `root list`
+- [ ] nested KTAP, once the root task's suite runs inside a larger plan (a
+      process per suite, or the spec fuzzer)
 - [ ] userspace process spawning: boot modules mapped read-only into the root
       task and loaded with the same `jos_core::elf` planner
 - [x] `jig`, the host harness (`tools/jig`): every kernel test and the root

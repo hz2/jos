@@ -29,6 +29,13 @@ pub const STACK_PAGES: u64 = 4;
 const MAX_FRAMES: usize = 17;
 const _: () = assert!(MAX_FRAMES as u64 == THREAD_STACK_PAGES + 1);
 
+/// Returns whether the calling thread is one [`Thread::spawn`] started: its
+/// stack, and so the IPC buffer found from it, lies in a thread block.
+#[must_use]
+pub fn is_spawned() -> bool {
+    (THREAD_BLOCKS_START..THREAD_BLOCKS_END).contains(&crate::console::ipc_buffer())
+}
+
 /// The next unused thread block.
 static NEXT_BLOCK: AtomicU64 = AtomicU64::new(THREAD_BLOCKS_START);
 

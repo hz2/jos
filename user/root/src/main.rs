@@ -6,14 +6,22 @@
 //! covering the free RAM. From here on the kernel only enforces; this program
 //! decides.
 //!
-//! Its command line picks a mode. `hello` (the default) and `test` run the
-//! first-light checks below, which exercise the capability model end to end
-//! from ring 3, report them in KTAP, and halt the machine with the result.
+//! Its command line picks a mode. `hello` (the default) and `test [filter]`
+//! run the first-light checks below, or those whose name contains `filter`,
+//! which exercise the capability model end to end from ring 3, report them in
+//! KTAP, and halt the machine with the result; `list` names them.
+//!
+//! Each check runs in a fresh thread whose faults go to the runner, under a
+//! deadline: a check that faults, panics (a spawned thread's panic is a
+//! fault), or hangs is reported `not ok` with what happened, and the rest of
+//! the suite still runs.
 #![no_std]
 #![no_main]
 #![warn(clippy::pedantic)]
 
-use libjos::abi::{BootInfo, IpcSyscallError, layout, map_flags, root_slot};
+use core::sync::atomic::{AtomicPtr, Ordering};
+
+use libjos::abi::{BootInfo, FaultKind, IpcSyscallError, layout, map_flags, root_slot};
 use libjos::jos_core::cap_rights::Rights;
 use libjos::jos_core::untyped::ObjectType;
 use libjos::mem::{self, Error};
@@ -58,20 +66,61 @@ const READY: u64 = 0x5EAD;
 /// What a thread sends when its work is done.
 const DONE: u64 = 0xD0E;
 
+/// What a check thread sends when its check passed.
+const PASSED: u64 = 0x9A55;
+
+/// What a check thread sends when its check failed, once it has said why.
+const FAILED: u64 = 0xFA11;
+
+/// The badge of the runner's endpoint as check threads report on it.
+const REPORT_BADGE: u64 = 0xC4EC;
+
+/// The badge of the runner's endpoint as check threads' faults reach it.
+const FAULT_BADGE: u64 = 0xF417;
+
+/// How long a check may run before the runner stops it.
+const CHECK_TIMEOUT_MS: u64 = 30_000;
+
+/// Pages of stack a check thread gets.
+const CHECK_STACK_PAGES: u64 = 8;
+
+/// The boot information, for the check threads: `main` stores it before it
+/// starts any.
+static BOOT: AtomicPtr<BootInfo> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Runs the mode the command line names.
 fn main(boot: &'static BootInfo) -> ! {
+    BOOT.store(core::ptr::from_ref(boot).cast_mut(), Ordering::Release);
     describe(boot);
-    let mode = boot.cmdline().split(|&b| b == b' ').next().unwrap_or(b"");
+    let mut words = boot.cmdline().split(|&b| b == b' ').filter(|w| !w.is_empty());
+    let mode = words.next().unwrap_or(b"");
+    let filter = words.next().unwrap_or(b"");
     match mode {
         b"" | b"hello" | b"test" => {
-            let failed = first_light(boot);
+            let failed = run_checks(filter);
             rt::halt(u64::from(failed != 0))
         }
+        b"list" => {
+            // as KTAP with every check skipped, so a harness reads the list too.
+            ktap::header(CHECKS.len());
+            for (index, (name, _)) in CHECKS.iter().enumerate() {
+                println!("ok {} {} # SKIP listed", index + 1, name);
+            }
+            rt::halt(0)
+        }
         _ => {
-            println!("# root: unknown mode; expected hello or test");
+            println!("# root: unknown mode; expected hello, test [filter], or list");
             rt::halt(2)
         }
     }
+}
+
+/// Returns the boot information `main` stored.
+fn boot_info() -> &'static BootInfo {
+    let boot = BOOT.load(Ordering::Acquire);
+    // SAFETY: main stored a `&'static BootInfo` here before starting any
+    // thread that calls this, and it is never written again.
+    unsafe { &*boot }
 }
 
 /// Prints what the kernel handed over, as KTAP diagnostics.
@@ -99,21 +148,127 @@ fn describe(boot: &BootInfo) {
     }
 }
 
-/// Runs every check, reports each in KTAP, and returns how many failed.
-fn first_light(boot: &BootInfo) -> usize {
-    ktap::header(CHECKS.len());
-    let mut failed = 0;
-    for (index, (name, check)) in CHECKS.iter().enumerate() {
-        ktap::run(name);
-        let result = check(boot);
-        if let Err(why) = result {
-            println!("# {}: {}", name, why);
-            failed += 1;
+/// Runs every check whose name contains `filter`, each in a thread of its own,
+/// reports each in KTAP, and returns how many failed.
+fn run_checks(filter: &[u8]) -> usize {
+    let picked = || CHECKS.iter().enumerate().filter(|(_, (name, _))| contains(name.as_bytes(), filter));
+    let count = picked().count();
+    ktap::header(count);
+    let runner = match Runner::new() {
+        Ok(runner) => runner,
+        Err(why) => {
+            println!("# root: cannot set up the runner: {}", why);
+            return count.max(1);
         }
-        ktap::report(index + 1, name, result.is_ok());
+    };
+    let mut failed = 0;
+    for (n, (index, (name, _))) in picked().enumerate() {
+        ktap::run(name);
+        let passed = runner.run(index, name);
+        failed += usize::from(!passed);
+        ktap::report(n + 1, name, passed);
     }
-    println!("# root: {} of {} checks passed", CHECKS.len() - failed, CHECKS.len());
+    runner.free();
+    println!("# root: {} of {} checks passed", count - failed, count);
     failed
+}
+
+/// Returns whether `needle` occurs in `haystack`; the empty needle always does.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Runs check field 0 (an index into [`CHECKS`]) and reports on field 1:
+/// [`PASSED`], or [`FAILED`] once it has printed why.
+extern "C" fn run_check(arg: u64) {
+    let (index, report) = (field(arg, 0), field(arg, 1));
+    let Some((name, check)) = usize::try_from(index).ok().and_then(|i| CHECKS.get(i)) else {
+        return;
+    };
+    let word = match check(boot_info()) {
+        Ok(()) => PASSED,
+        Err(why) => {
+            println!("# {}: {}", name, why);
+            FAILED
+        }
+    };
+    let _ = sys::send_blocking(report, word);
+}
+
+/// The endpoint check threads report and fault on, and what receiving from it
+/// needs.
+struct Runner {
+    /// The endpoint the runner receives on.
+    inbox: Slot,
+    /// A copy of it, badged [`REPORT_BADGE`], that check threads report on.
+    reports: Slot,
+    /// A copy of it, badged [`FAULT_BADGE`], that check threads' faults go to.
+    faults: Slot,
+    /// The reply object a fault binds to the thread that faulted.
+    reply: Slot,
+}
+
+impl Runner {
+    /// Retypes the endpoint and reply object and mints the two copies.
+    fn new() -> Result<Self, &'static str> {
+        let inbox = object(ObjectType::Endpoint)?;
+        let reports = mem::mint(inbox, Rights::ALL, REPORT_BADGE).map_err(|_| "mint")?;
+        let faults = mem::mint(inbox, Rights::ALL, FAULT_BADGE).map_err(|_| "mint")?;
+        let reply = object(ObjectType::Reply)?;
+        Ok(Self { inbox, reports, faults, reply })
+    }
+
+    /// Runs check `index` in a fresh thread and waits for it to report, fault,
+    /// or run out of time; says why unless it passed.
+    fn run(&self, index: usize, name: &str) -> bool {
+        let arg = pack(index as u64, self.reports, 0);
+        let Ok(thread) = Thread::spawn_with(run_check, arg, CHECK_STACK_PAGES, Some(self.faults)) else {
+            println!("# {}: the runner could not start a thread for it", name);
+            return false;
+        };
+        let outcome = sys::recv_timeout(self.inbox, Some(self.reply), CHECK_TIMEOUT_MS);
+        let passed = match outcome {
+            Ok((PASSED, REPORT_BADGE)) => true,
+            Ok((FAILED, REPORT_BADGE)) => false,
+            Ok((vector, FAULT_BADGE)) => {
+                let [_, address, rip, error] = sys::received_words();
+                match FaultKind::from_vector(vector) {
+                    Some(kind) => println!(
+                        "# {}: faulted: {:?} at rip {:#x}, address {:#x}, error {:#x}",
+                        name, kind, rip, address, error
+                    ),
+                    None => println!("# {}: faulted: vector {} at rip {:#x}", name, vector, rip),
+                }
+                false
+            }
+            Ok((word, badge)) => {
+                println!("# {}: unexpected message {:#x} with badge {:#x}", name, word, badge);
+                false
+            }
+            Err(IpcSyscallError::TimedOut) => {
+                println!("# {}: no result after {} ms", name, CHECK_TIMEOUT_MS);
+                false
+            }
+            Err(e) => {
+                println!("# {}: the runner's receive failed: {:?}", name, e);
+                false
+            }
+        };
+        thread.reap();
+        // a fault leaves the reply bound to the thread just stopped, and
+        // answering it frees it; a report that raced the deadline is dropped.
+        if matches!(outcome, Ok((_, FAULT_BADGE))) {
+            let _ = sys::reply(self.reply, 0);
+        }
+        while sys::recv(self.inbox).is_ok() {}
+        passed
+    }
+
+    /// Frees the runner's objects, the copies before the endpoint, so their
+    /// slots are freed too.
+    fn free(self) {
+        let _ = release(&[self.reports, self.faults, self.inbox, self.reply]);
+    }
 }
 
 /// Turns a condition into a check result.
@@ -158,7 +313,11 @@ fn boot_info_is_consistent(boot: &BootInfo) -> Result<(), &'static str> {
     let first_free = root_slot::FIRST_UNTYPED + boot.untyped_count;
     ensure(boot.empty.start == first_free, "empty slots do not follow the untyped")?;
     ensure(boot.empty.end == boot.cnode_slots, "empty slots do not run to the end")?;
-    ensure(libjos::console::ipc_buffer() == boot.ipc_buffer, "the stack does not find the ipc buffer")
+    // the check runs in a thread of its own, which finds its own buffer, in its
+    // thread block, from its stack.
+    let buffer = libjos::console::ipc_buffer();
+    ensure(libjos::thread::is_spawned(), "the check is not running in a spawned thread")?;
+    ensure(buffer % layout::THREAD_BLOCK == layout::THREAD_IPC_BUFFER, "the stack does not find the ipc buffer")
 }
 
 /// The arithmetic probe crosses the boundary both ways.

@@ -62,7 +62,18 @@ pub fn halt(code: u64) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    crate::println!("panic: {}", info);
+    // one diagnostic line: the default form puts the message on a line of its own.
+    match info.location() {
+        Some(at) => crate::println!("# panic at {}:{}: {}", at.file(), at.line(), info.message()),
+        None => crate::println!("# panic: {}", info.message()),
+    }
+    // a spawned thread stops itself with a fault, so whoever handles its faults
+    // hears of it while the rest of the program runs on; the root task's first
+    // thread has no fault handler, and stops the machine.
+    if crate::thread::is_spawned() {
+        // SAFETY: ud2 raises an invalid-opcode fault and touches nothing else.
+        unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
+    }
     halt(PANICKED)
 }
 

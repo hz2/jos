@@ -19,7 +19,7 @@ defined once for the kernel and for userspace.
 | `console` | `print!` / `println!` through a Console capability: the bytes go into the calling thread's IPC-buffer data area and only their length crosses the boundary |
 | `mem` | a slot allocator over the empty slots the kernel reported, retyping from the first untyped region with room, mapping that installs missing page tables, and `mint` that claims the slot the kernel chose |
 | `thread` | `Thread::spawn` / `spawn_with` (optionally with a fault handler): a TCB, stack, and IPC buffer retyped and mapped into a fresh thread block; the thread exits when its function returns, and `reap` revokes all of it |
-| `rt` | `root_entry!` (the naked `_start` and runtime setup), `halt`, and the panic handler (prints, then halts the machine through the Machine capability) |
+| `rt` | `root_entry!` (the naked `_start` and runtime setup), `halt`, and the panic handler (prints one KTAP diagnostic, then a spawned thread faults with `ud2` for its fault handler to hear of, and the root task's first thread halts the machine) |
 | `ktap` | the KTAP lines the host harness parses: header, `# run name`, `ok N name` / `not ok N name` |
 
 ## Thread blocks
@@ -45,13 +45,37 @@ second GiB of user space.
 
 The kernel loads `user/root` from the boot module named `root` and starts it
 with the capabilities listed in `docs/syscalls.md` ("The root task's starting
-state"). Its command line picks a mode; `hello` and `test` run the first-light
-checks in `user/root/src/main.rs`, report them in KTAP, and halt the machine
-with the result, which is what `scripts/check.sh boot` runs. The checks cover
-the boot information, IPC, badges, revocation, mapping and W^X, attenuated
-console and machine capabilities, threads and thread-id reuse, stale replies,
-both directions of the parked-thread handoff, endpoint order, and fault
-delivery including userspace demand paging.
+state"). Its command line picks a mode:
+
+- `hello` (the default) and `test [filter]` run the first-light checks in
+  `user/root/src/main.rs`, or those whose name contains `filter`, report them
+  in KTAP, and halt the machine with the result; `scripts/check.sh boot` and
+  `matrix` run `test`, and `jig boot --args "test timed"` runs a subset;
+- `list` reports every check as a skipped KTAP test, so a harness can read the
+  names.
+
+The checks cover the boot information, IPC, badges, revocation, mapping and
+W^X, attenuated console and machine capabilities, threads and thread-id reuse,
+stale replies, both directions of the parked-thread handoff, endpoint order,
+fault delivery including userspace demand paging, timed receives, and revoking
+an endpoint with threads blocked on it.
+
+### How a check runs
+
+The runner starts each check in a fresh thread whose fault handler is the
+runner's own endpoint, then waits on that endpoint with `recv_timeout`. Three
+things can come back:
+
+- the check's report, badged as a report: `ok`, or `not ok` after the check
+  printed why;
+- a fault, badged as a fault: `not ok` with the fault's kind, instruction,
+  address, and error code. A panic in a spawned thread is a fault too: the
+  libjos panic handler prints the message and executes `ud2`, so only the
+  root task's first thread halts the machine on a panic;
+- nothing within 30 s: `not ok`, the check is stopped.
+
+Either way the runner reaps the thread and drops any late report before the
+next check starts, so one broken check costs only its own line.
 
 ## Adding a check
 
@@ -71,6 +95,7 @@ fn endpoint_carries_a_word(_: &BootInfo) -> Result<(), &'static str> {
 Clean up before asserting, so a failing check does not leak slots into the
 next one. A check that needs a second thread starts it with `Thread::spawn`
 and passes slots in its argument (`pack`/`field`); to make it wait for a thread
-to block, have the thread report `READY` first, or `spin_past_a_tick()`. Then
+to block, start it with `spawn_parked`, whose call returns only once the thread
+is parked (see `docs/testing.md`). Then
 prove the check is not vacuous: break the kernel property it covers, run
 `scripts/check.sh boot`, see exactly that check report `not ok`, revert.

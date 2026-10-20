@@ -10,6 +10,7 @@ defined once for the kernel and for userspace.
 | `user/libjos` | the runtime every program links |
 | `user/root` | the root task: the first program, loaded by the kernel |
 | `user/hello` | a small program the root task starts as a process, to check what a process can and cannot do |
+| `user/fuzz` | the syscall fuzzer, started as a sandboxed process (see `docs/testing.md`) |
 
 ## libjos
 
@@ -53,13 +54,15 @@ state"). Its command line picks a mode:
   `user/root/src/main.rs`, or those whose name contains `filter`, report them
   in KTAP, and halt the machine with the result; `scripts/check.sh boot` and
   `matrix` run `test`, and `jig boot --args "test timed"` runs a subset;
+- `fuzz FIRST COUNT` runs the syscall fuzzer once per seed, each as a KTAP
+  test;
 - `list` reports every check as a skipped KTAP test, so a harness can read the
   names;
 - `shell` reads commands from the console: `help`, `info`, `mem`, `list`,
   `test [filter]` (the checks, run as below), `bench [rounds]` (timed call and
   reply round trips to an echo thread), `modules`, `run name [arg]` (start a
-  boot module as a process and report how it ended), `echo`, and
-  `halt [code]`. `cargo run`
+  boot module as a process and report how it ended), `fuzz [seed] [count]`,
+  `echo`, and `halt [code]`. `cargo run`
   at a terminal starts here, and `jig expect` scripts drive it in `check.sh
   shell`.
 

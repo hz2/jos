@@ -137,7 +137,7 @@ The runner takes a few more knobs from the environment:
 | `JOS_QEMU_MACHINE` | machine type (default `q35`; `pc` also boots) |
 | `JOS_QEMU_TIMEOUT` | seconds before a wedged guest fails (default `120`, or none at a terminal; `0` for none) |
 | `JOS_QEMU_RR` | `record` or `replay`: deterministic record/replay into `JOS_QEMU_RR_FILE` (TCG only) |
-| `JOS_MODULES` | boot modules, `;`-separated `path [args]`; grub loads each with `module2`, and the kernel finds one by the first word of its args. Unset for the main kernel binary, it means the root task and `hello`; set it empty for none |
+| `JOS_MODULES` | boot modules, `;`-separated `path [args]`; grub loads each with `module2`, and the kernel finds one by the first word of its args. Unset for the main kernel binary, it means the root task, `hello`, and `fuzz`; set it empty for none |
 | `JOS_ROOT_ARGS` | the root task's arguments when `JOS_MODULES` is unset (default `shell` at a terminal, `hello` otherwise; also `test [filter]`, `list`) |
 | `JOS_KEEP_ISO` | keep the per-run ISO tree and image instead of deleting them |
 

@@ -15,8 +15,9 @@
 #                   on a small machine matrix (kvm included when usable)
 #   matrix          the same across the full machine matrix
 #   shell           the root task's shell driven by every jig expect script
+#   fuzz [first] [n] the syscall fuzzer: n seeds from first (default 1 and 64)
 #   fast            style + clippy + test (pre-commit)
-#   ci              fast + miri + kani + qemu + qemu-kvm + matrix + shell (pre-push to main, ci)
+#   ci              fast + miri + kani + qemu + qemu-kvm + matrix + shell + fuzz (pre-push to main, ci)
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -72,18 +73,19 @@ boot() {
 }
 matrix() { jig boot --matrix; }
 shell() { jig expect tools/jig/expect/*.expect; }
+fuzz() { jig boot --args "fuzz ${1:-1} ${2:-64}"; }
 fast() { style; clippy; test; }
-ci() { fast; miri; kani; qemu; qemu-kvm; matrix; shell; }
+ci() { fast; miri; kani; qemu; qemu-kvm; matrix; shell; fuzz; }
 
 if [ $# -eq 0 ]; then
-    sed -n '5,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '5,21p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
 gate=$1
 shift
 case "$gate" in
-    style|clippy|test|miri|kani|verus|qemu|qemu-kvm|boot|matrix|shell|fast|ci)
+    style|clippy|test|miri|kani|verus|qemu|qemu-kvm|boot|matrix|shell|fuzz|fast|ci)
         echo "[check] $gate $*"
         "$gate" "$@"
         ;;

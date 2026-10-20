@@ -70,6 +70,10 @@ Check items off in the same commit that finishes them.
 - [x] `jig expect`: scripted serial sessions that type at the root task's
       shell and wait for its output, in `check.sh shell` and ci (`cargo run`
       at a terminal is the interactive boot)
+- [x] a syscall robustness fuzzer (`user/fuzz`, a sandboxed process): swarm
+      mixes, schema-guided and hostile arguments, every answer checked against
+      the documented result set; `check.sh fuzz` in ci. It found the bit-63
+      ambiguity, now refused (`BadWord`, `BadBadge`)
 - [ ] an executable spec of the syscall API in jos-core, run against the live
       kernel from ring 3 (differential fuzzing) and against the core on the host
 - [x] console input: COM1 interrupts (IRQ4) fill a kernel buffer that

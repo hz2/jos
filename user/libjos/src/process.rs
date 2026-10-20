@@ -58,6 +58,17 @@ impl From<IpcSyscallError> for SpawnError {
     }
 }
 
+/// A capability [`Process::spawn_with`] copies into the new process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grant {
+    /// Its slot in this program's capability space.
+    pub from: Slot,
+    /// The slot it lands in, in the process's.
+    pub to: Slot,
+    /// The rights the copy keeps.
+    pub rights: Rights,
+}
+
 /// A process this program started, and the capabilities it is built from.
 pub struct Process {
     /// Its thread, once retyped.
@@ -84,9 +95,21 @@ impl Process {
     /// Why the image cannot be loaded or a step of building the process was
     /// refused; whatever was built by then is revoked again.
     pub fn spawn(image: &[u8], parent: Slot, faults: Slot, arg: u64) -> Result<Self, SpawnError> {
+        Self::spawn_with(image, parent, faults, arg, &[])
+    }
+
+    /// Like [`spawn`](Self::spawn), and copies each of `grants` into the
+    /// process's capability space too, attenuated to its rights, at a slot
+    /// past the three every process gets.
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn`](Self::spawn), and [`IpcSyscallError::SlotOccupied`] for a
+    /// grant aimed at a slot already filled.
+    pub fn spawn_with(image: &[u8], parent: Slot, faults: Slot, arg: u64, grants: &[Grant]) -> Result<Self, SpawnError> {
         let plan = LoadPlan::parse(image, ROOT_IMAGE_BASE, (ROOT_IMAGE_BASE, ROOT_IMAGE_LIMIT)).map_err(SpawnError::Image)?;
         let mut process = Self { tcb: None, cnode: None, vspace: None, objects: [0; MAX_OBJECTS], count: 0 };
-        match process.build(&plan, image, parent, faults, arg) {
+        match process.build(&plan, image, parent, faults, arg, grants) {
             Ok(()) => Ok(process),
             Err(e) => {
                 process.release();
@@ -102,7 +125,15 @@ impl Process {
 
     /// Builds the address space, the capability space, and the thread, and
     /// starts it.
-    fn build(&mut self, plan: &LoadPlan, image: &[u8], parent: Slot, faults: Slot, arg: u64) -> Result<(), SpawnError> {
+    fn build(
+        &mut self,
+        plan: &LoadPlan,
+        image: &[u8],
+        parent: Slot,
+        faults: Slot,
+        arg: u64,
+        grants: &[Grant],
+    ) -> Result<(), SpawnError> {
         let vspace = mem::retype(ObjectType::VSpace)?;
         self.vspace = Some(vspace);
         let cnode = mem::retype(ObjectType::CNode { size_bits: CNODE_SIZE_BITS })?;
@@ -145,6 +176,9 @@ impl Process {
         sys::cnode_copy(cnode, console, process_slot::CONSOLE, Rights::WRITE)?;
         sys::cnode_copy(cnode, parent, process_slot::PARENT, Rights::WRITE)?;
         sys::cnode_copy(cnode, faults, process_slot::FAULTS, Rights::WRITE)?;
+        for grant in grants {
+            sys::cnode_copy(cnode, grant.from, grant.to, grant.rights)?;
+        }
         let tcb = mem::retype(ObjectType::Tcb)?;
         self.tcb = Some(tcb);
         sys::tcb_configure(tcb, cnode, vspace)?;

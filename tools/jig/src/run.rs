@@ -189,7 +189,12 @@ pub fn root_image(repo: &Path, target: &Path, args: &str) -> Result<Image, Strin
     Ok(Image {
         name: "boot".into(),
         kernel: target.join("x86_64-jos/debug/jos"),
-        modules: Some(format!("{} root {args};{} hello", bin.join("root").display(), bin.join("hello").display())),
+        modules: Some(format!(
+            "{} root {args};{} hello;{} fuzz",
+            bin.join("root").display(),
+            bin.join("hello").display(),
+            bin.join("fuzz").display()
+        )),
         reproduce: format!("JOS_ROOT_ARGS='{args}' scripts/check.sh boot"),
     })
 }

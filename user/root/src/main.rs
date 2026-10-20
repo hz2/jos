@@ -28,7 +28,7 @@ use libjos::jos_core::line::LineEditor;
 use libjos::jos_core::untyped::ObjectType;
 use libjos::mem::{self, Error};
 use libjos::sys::{self, Slot};
-use libjos::process::Process;
+use libjos::process::{Grant, Process};
 use libjos::thread::Thread;
 use libjos::{console, ktap, println, rt};
 
@@ -38,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 30] = [
+const CHECKS: [(&str, Check); 31] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -69,6 +69,7 @@ const CHECKS: [(&str, Check); 30] = [
     ("signals_coalesce_until_collected", signals_coalesce_until_collected),
     ("a_timed_wait_runs_out", a_timed_wait_runs_out),
     ("revoking_a_notification_ends_its_waits", revoking_a_notification_ends_its_waits),
+    ("the_kernel_answers_a_syscall_storm", the_kernel_answers_a_syscall_storm),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -105,10 +106,15 @@ fn main(boot: &'static BootInfo) -> ! {
     describe(boot);
     let mut words = boot.cmdline().split(|&b| b == b' ').filter(|w| !w.is_empty());
     let mode = words.next().unwrap_or(b"");
-    let filter = words.next().unwrap_or(b"");
     match mode {
         b"" | b"hello" | b"test" => {
-            let failed = run_checks(filter);
+            let failed = run_checks(words.next().unwrap_or(b""));
+            rt::halt(u64::from(failed != 0))
+        }
+        b"fuzz" => {
+            let mut number = |default| words.next().and_then(|w| core::str::from_utf8(w).ok()?.parse().ok()).unwrap_or(default);
+            let (first, count) = (number(1), number(16));
+            let failed = fuzz_seeds(first, count);
             rt::halt(u64::from(failed != 0))
         }
         b"shell" => shell(boot),
@@ -121,7 +127,7 @@ fn main(boot: &'static BootInfo) -> ! {
             rt::halt(0)
         }
         _ => {
-            println!("# root: unknown mode; expected hello, test [filter], list, or shell");
+            println!("# root: unknown mode; expected hello, test [filter], fuzz [first] [count], list, or shell");
             rt::halt(2)
         }
     }
@@ -138,6 +144,7 @@ commands:
   bench [rounds]   time call and reply round trips to another thread
   modules          the boot modules
   run name [arg]   start a boot module as a process, and wait for it
+  fuzz [seed] [n]  throw n seeds of random syscalls at the kernel from a process
   echo text        print text
   halt [code]      stop the machine; code 0 reports success";
 
@@ -197,6 +204,13 @@ fn run_command(boot: &BootInfo, line: &str) {
             }
         }
         "run" => run_command_process(rest),
+        "fuzz" => {
+            let mut numbers = rest.split_ascii_whitespace().map(|w| w.parse().ok());
+            let first = numbers.next().flatten().unwrap_or(1);
+            let count = numbers.next().flatten().unwrap_or(1);
+            let failed = fuzz_seeds(first, count);
+            println!("{}", if failed == 0 { "the kernel answered every call as documented" } else { "some seeds failed" });
+        }
         "echo" => println!("{}", rest),
         "halt" => rt::halt(rest.parse().unwrap_or(0)),
         _ => println!("unknown command {}; try help", command),
@@ -963,13 +977,19 @@ fn run_hello(arg: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
 /// code, or a fault's vector), its badge ([`PROCESS_BADGE`] or
 /// [`PROCESS_FAULT_BADGE`]), and the rest of a fault message.
 fn run_module(name: &[u8], arg: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
+    run_module_with(name, arg, &[], PROCESS_TIMEOUT_MS)
+}
+
+/// Like [`run_module`], also handing the process `grants`, and waiting
+/// `timeout_ms` for it.
+fn run_module_with(name: &[u8], arg: u64, grants: &[Grant], timeout_ms: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
     let image = module_image(name)?;
     let inbox = object(ObjectType::Endpoint)?;
     let parent = mem::mint(inbox, Rights::ALL, PROCESS_BADGE).map_err(|_| "mint")?;
     let faults = mem::mint(inbox, Rights::ALL, PROCESS_FAULT_BADGE).map_err(|_| "mint")?;
-    let spawned = Process::spawn(image, parent, faults, arg);
+    let spawned = Process::spawn_with(image, parent, faults, arg, grants);
     let got = spawned.as_ref().map_err(|_| "spawn").and_then(|_| {
-        sys::recv_timeout(inbox, None, PROCESS_TIMEOUT_MS).map_err(|_| "the process neither exited nor faulted")
+        sys::recv_timeout(inbox, None, timeout_ms).map_err(|_| "the process neither exited nor faulted")
     });
     let words = sys::received_words();
     if let Ok(process) = spawned {
@@ -1092,4 +1112,56 @@ fn revoking_a_notification_ends_its_waits(_: &BootInfo) -> Result<(), &'static s
     release(&[report])?;
     ensure(got != Err(IpcSyscallError::TimedOut), "the revoke left the waiter blocked")?;
     ensure(got == Ok((WAIT_FAILED + IpcSyscallError::BadCap as u64, 0)), "the waiter did not end with BadCap")
+}
+
+/// The slot the fuzzer finds its untyped region in (`fuzz::UNTYPED`).
+const FUZZ_UNTYPED: u64 = 4;
+
+/// How long a fuzzer run may take.
+const FUZZ_TIMEOUT_MS: u64 = 60_000;
+
+/// Runs the `fuzz` module with `seed`, handing it a copy of the untyped
+/// region with the most room left to retype from.
+fn run_fuzz(seed: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
+    let untyped = boot_info().untyped().iter().max_by_key(|u| u.size - u.used).ok_or("no untyped memory")?;
+    let grant = Grant { from: untyped.slot, to: FUZZ_UNTYPED, rights: Rights::ALL };
+    run_module_with(b"fuzz", seed, &[grant], FUZZ_TIMEOUT_MS)
+}
+
+/// Runs the fuzzer once per seed from `first`, `count` seeds in all, and
+/// reports each as a KTAP test; returns how many failed.
+fn fuzz_seeds(first: u64, count: u64) -> u64 {
+    ktap::header(usize::try_from(count).unwrap_or(0));
+    let mut failed = 0;
+    for (n, seed) in (first..first.saturating_add(count)).enumerate() {
+        println!("# run fuzz_seed_{}", seed);
+        let passed = match run_fuzz(seed) {
+            Ok(((0, PROCESS_BADGE), _)) => true,
+            Ok(((undocumented, PROCESS_BADGE), _)) => {
+                println!("# fuzz_seed_{}: {} undocumented answers", seed, undocumented);
+                false
+            }
+            Ok(((vector, _), [_, address, rip, _])) => {
+                println!("# fuzz_seed_{}: the fuzzer faulted: vector {} at rip {:#x}, address {:#x}", seed, vector, rip, address);
+                false
+            }
+            Err(why) => {
+                println!("# fuzz_seed_{}: {}", seed, why);
+                false
+            }
+        };
+        failed += u64::from(!passed);
+        println!("{} {} fuzz_seed_{}", if passed { "ok" } else { "not ok" }, n + 1, seed);
+    }
+    failed
+}
+
+/// Seed 1 of the fuzzer: thousands of random syscalls with hostile
+/// arguments, from a process that holds only what it made, all answered as
+/// the ABI documents, with the kernel still standing (`fuzz [first] [count]`
+/// sweeps more seeds).
+fn the_kernel_answers_a_syscall_storm(_: &BootInfo) -> Result<(), &'static str> {
+    let ((undocumented, badge), _) = run_fuzz(1)?;
+    ensure(badge == PROCESS_BADGE, "the fuzzer faulted")?;
+    ensure(undocumented == 0, "the kernel gave answers the ABI does not document")
 }

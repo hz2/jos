@@ -14,6 +14,7 @@
 | boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push to main (skipped without `/dev/kvm`) |
 | first light | the real kernel boots the real root task (`user/root`) in test mode; its ring-3 checks print KTAP and halt the machine with the result | `check.sh boot` (4 machines), `check.sh matrix` (36) | matrix: pre-push to main, CI |
 | interactive | the root task's shell over the serial console, typed at by `jig expect` scripts (`tools/jig/expect/*.expect`) | `check.sh shell` | pre-push to main, CI |
+| robustness fuzzing | `user/fuzz`, a process holding almost nothing, throws seeded random syscalls at the kernel; every answer must be one the ABI documents | `check.sh fuzz` (64 seeds) | pre-push to main, CI |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
@@ -132,3 +133,32 @@ before it waited this way.
   the compiler does not optimize away writes to the VGA buffer.
 - [`format_args`](https://doc.rust-lang.org/nightly/std/macro.format_args.html)
   builds the `fmt::Arguments` that `print!` hands to the writer.
+
+## The syscall fuzzer
+
+`user/fuzz` runs as a process the root task starts with nothing but its
+console, its parent and fault endpoints, and a copy of an untyped region, so
+whatever it does reaches only objects it made itself. Its argument is a seed.
+For each of 2000 steps it picks a syscall by a swarm mix (per-seed weights,
+`jos_core::rng::OpMix::swarm`, so some seeds hammer a few calls and leave
+others out) and arguments by a schema: mostly a slot it believes holds a
+capability, a free slot, a valid object type, a user address, or a short wait,
+and one time in eight a hostile word (zero, an edge of the range, anything).
+It tracks the slots its retypes and mints fill, so later calls reach mapping,
+thread configuration, revocation, and IPC on real objects; it retypes at most
+24 objects a run, since untyped memory is not reclaimed yet. It skips only the
+calls that would legitimately end or wedge it (`exit`, `thread_exit`, the
+blocking IPC calls, moving its own IPC buffer) and keeps every wait under
+20 ms.
+
+Two oracles: the kernel must survive, and every answer must be one the ABI
+documents for that call (0 or an error code, a value or a flagged error code,
+`ENOSYS` for no such call). The fuzzer prints each undocumented answer as a
+KTAP diagnostic and exits with their count. `root fuzz FIRST COUNT` runs a
+sweep as one KTAP test per seed (`jig boot --args "fuzz 1 64"`,
+`scripts/check.sh fuzz`), the first-light checks run seed 1, and the shell
+has `fuzz [seed] [count]`.
+
+It found a real ambiguity on its first sweep: a message word with bit 63 set
+reaches its receiver in `rax`, where that bit flags an error, so the kernel
+now refuses to send one (`BadWord`) or to mint such a badge (`BadBadge`).

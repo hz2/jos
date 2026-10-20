@@ -45,3 +45,6 @@ jobs:
 
       - name: the shell, driven by jig expect scripts (qemu)
         run: scripts/check.sh shell
+
+      - name: the syscall fuzzer, 64 seeds (qemu)
+        run: scripts/check.sh fuzz

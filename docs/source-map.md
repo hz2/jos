@@ -93,6 +93,7 @@ half, look at the other.
 | KTAP output of kernel tests (runner, panic handler, single-check tests) | `kernel/src/ktap.rs`, `kernel/src/lib.rs` |
 | the host harness: parallel boots, KTAP parsing, reports, the machine matrix | `tools/jig/src/` (`run.rs` boots, `ktap.rs` parses, `main.rs` reports) |
 | scripted shell sessions | `tools/jig/src/expect.rs`, scripts in `tools/jig/expect/` |
+| the syscall fuzzer | `user/fuzz/src/main.rs`; the root task's `fuzz` mode and `run_fuzz` in `user/root/src/main.rs` |
 | the root task booting end to end | `scripts/check.sh boot`, `scripts/check.sh matrix` |
 | in-kernel trace ring | `kernel/src/trace.rs` |
 | gates and runner | `scripts/check.sh`, `scripts/run-qemu.sh`, `.githooks/` |

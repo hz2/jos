@@ -1,0 +1,15 @@
+[package]
+name = "fuzz"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+# a process the root task starts to throw seeded random syscalls at the
+# kernel, from the `fuzz` boot module.
+[dependencies]
+libjos = { path = "../libjos" }
+
+[[bin]]
+name = "fuzz"
+test = false
+bench = false

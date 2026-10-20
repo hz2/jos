@@ -41,7 +41,7 @@ if [ -z "${JOS_MODULES+set}" ] && [ "$(basename "$KERNEL")" = jos ]; then
     (cd "$REPO/user" && CARGO_TARGET_DIR="$USER_TARGET" cargo build -q)
     if [ -t 0 ]; then DEFAULT_ARGS=shell; else DEFAULT_ARGS=hello; fi
     BIN="$USER_TARGET/x86_64-unknown-none/debug"
-    MODULES="$BIN/root root ${JOS_ROOT_ARGS:-$DEFAULT_ARGS};$BIN/hello hello"
+    MODULES="$BIN/root root ${JOS_ROOT_ARGS:-$DEFAULT_ARGS};$BIN/hello hello;$BIN/fuzz fuzz"
 fi
 
 # a session at a terminal lasts as long as the person wants it to.

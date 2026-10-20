@@ -62,11 +62,18 @@ Check items off in the same commit that finishes them.
       task report KTAP; parallel QEMU runs, JUnit, log tails and reproduce
       commands, `--repeat`, and a 36-machine boot matrix (cpu, memory, smp,
       machine) in `ci`
-- [ ] `jig run` (an interactive boot) and `jig expect` (scripted serial
-      sessions, for the shell)
+- [x] `jig expect`: scripted serial sessions that type at the root task's
+      shell and wait for its output, in `check.sh shell` and ci (`cargo run`
+      at a terminal is the interactive boot)
 - [ ] an executable spec of the syscall API in jos-core, run against the live
       kernel from ring 3 (differential fuzzing) and against the core on the host
-- [ ] notification syscalls, console input (COM1 IRQ4), and the `jsh` shell
+- [x] console input: COM1 interrupts (IRQ4) fill a kernel buffer that
+      `console_read` (27) takes from, waiting with an optional deadline; a
+      verified line editor (LINE-1) in jos-core
+- [x] the root task's `shell`: help, info, mem, list, test [filter], bench,
+      echo, halt; `cargo run` at a terminal boots into it
+- [ ] notification syscalls (signal, wait, poll), then console input as a
+      notification instead of a blocking read
 - [ ] gate the ambient `exit` probe (1) behind a test feature now that the
       Machine capability exists
 

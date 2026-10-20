@@ -42,3 +42,6 @@ jobs:
 
       - name: root task across the machine matrix (qemu)
         run: scripts/check.sh matrix
+
+      - name: the shell, driven by jig expect scripts (qemu)
+        run: scripts/check.sh shell

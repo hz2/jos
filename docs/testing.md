@@ -13,6 +13,7 @@
 | boot / integration | `kernel/tests/*.rs`, one QEMU image each, booted in parallel by jig | `check.sh qemu` | pre-push to main, CI |
 | boot under KVM | the same tests under hardware virtualization | `check.sh qemu-kvm` | pre-push to main (skipped without `/dev/kvm`) |
 | first light | the real kernel boots the real root task (`user/root`) in test mode; its ring-3 checks print KTAP and halt the machine with the result | `check.sh boot` (4 machines), `check.sh matrix` (36) | matrix: pre-push to main, CI |
+| interactive | the root task's shell over the serial console, typed at by `jig expect` scripts (`tools/jig/expect/*.expect`) | `check.sh shell` | pre-push to main, CI |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
@@ -41,6 +42,7 @@ test panic handler turns a panic into diagnostics and a `not ok`.
 ```text
 jig test [FILTER...] [--exact] [--jobs N] [--repeat N] [--junit FILE] [machine flags]
 jig boot [--args ARGS] [--matrix | --matrix-small] [--jobs N] [--junit FILE] [machine flags]
+jig expect SCRIPT... [machine flags]
 jig ktap FILE
 machine flags: --accel tcg|kvm --cpu MODEL --mem SIZE --smp N --machine TYPE --timeout SECS
 ```
@@ -63,6 +65,12 @@ machine flags: --accel tcg|kvm --cpu MODEL --mem SIZE --smp N --machine TYPE --t
 - `--junit FILE` writes JUnit XML: a suite per boot, a case per KTAP test, and
   for a boot cut short a failed case named after the test it was running.
 - `ktap FILE` reads a saved log.
+- `expect SCRIPT...` boots the root task's shell with its console on a pipe and
+  runs each script: `> text` types a line (with `\b`, `\u`, `\c`, `\e` for
+  backspace, Ctrl-U, Ctrl-C, and escape), `< text` waits up to 30 s for the
+  text, counting from where the previous wait matched. A script passes when
+  every wait matched and the machine then halted with success; a failure names
+  the script line and what it waited for, and shows the end of the session.
 
 Run jig inside the dev shell (`nix develop`), where qemu and grub live, or
 through `check.sh`, which enters it: `qemu`, `qemu-kvm`, `boot` (the small

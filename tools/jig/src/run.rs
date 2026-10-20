@@ -44,7 +44,7 @@ pub struct Machine {
 
 impl Machine {
     /// The runner variables this machine sets.
-    fn env(&self) -> Vec<(&'static str, String)> {
+    pub(crate) fn env(&self) -> Vec<(&'static str, String)> {
         let mut env = Vec::new();
         let fields = [
             ("JOS_QEMU_ACCEL", &self.accel),

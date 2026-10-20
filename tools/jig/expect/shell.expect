@@ -1,0 +1,35 @@
+# the root task's shell, typed at over the serial console: the prompt, the
+# commands, line editing, a test run from inside the shell, and halting with
+# success.
+< jos shell; type help for the commands
+< jos>
+> help
+< bench [rounds]
+< jos>
+> echo hello from the console
+< hello from the console
+# two backspaces take "xd" back out before the rest is typed.
+> echo fixd\b\bxed
+< fixed
+# ctrl-u throws the whole line away.
+> rubbish\uecho cleared
+< cleared
+# ctrl-c abandons a line without running it.
+> echo never\c
+< ^C
+# an arrow key's escape sequence adds nothing to the line.
+> \e[Aecho arrows
+< arrows
+> mem
+< capability slots free
+> list
+< calls_reach_the_longest_waiting_receiver
+> test timed
+< ok 2 a_timed_receive_takes_what_arrives_in_time
+< all passed
+> bench 200
+< 200 call/reply round trips
+> nosuchcommand
+< unknown command nosuchcommand; try help
+> halt 0
+< jos: machine halted by userspace (code 0x0)

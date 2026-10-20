@@ -3,6 +3,7 @@
 //! ```text
 //! jig test [FILTER...] [--exact] [--jobs N] [--repeat N] [--junit FILE] [machine flags]
 //! jig boot [--args "test"] [--matrix | --matrix-small] [--jobs N] [--junit FILE] [machine flags]
+//! jig expect SCRIPT... [machine flags]
 //! jig ktap FILE
 //! machine flags: --accel tcg|kvm --cpu MODEL --mem SIZE --smp N --machine TYPE --timeout SECS
 //! ```
@@ -11,10 +12,13 @@
 //! filter) in parallel, `boot` the real kernel with the root task (across a
 //! machine matrix if asked), and both parse each guest's KTAP and print a line
 //! per boot, then a summary; a failure gets the end of its log and a command
-//! that reproduces it. Logs are kept under `<target>/jig/`. `ktap` parses a
-//! saved log. The exit code is 0 only if every boot passed.
+//! that reproduces it. Logs are kept under `<target>/jig/`. `expect` drives the
+//! root task's shell with a script of lines to type and text to wait for (see
+//! the `expect` module). `ktap` parses a saved log. The exit code is 0 only if
+//! everything passed.
 #![warn(clippy::pedantic)]
 
+mod expect;
 mod ktap;
 mod run;
 
@@ -54,6 +58,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("test") => parse_options(&args[1..]).map_or_else(|e| usage(&e), |o| test(&o)),
         Some("boot") => parse_options(&args[1..]).map_or_else(|e| usage(&e), |o| boot(&o)),
+        Some("expect") => parse_options(&args[1..]).map_or_else(|e| usage(&e), |o| expect_scripts(&o)),
         Some("ktap") if args.len() == 2 => ktap_file(Path::new(&args[1])),
         _ => usage(""),
     };
@@ -67,6 +72,7 @@ fn usage(problem: &str) -> i32 {
     }
     eprintln!("usage: jig test [FILTER...] [--exact] [--jobs N] [--repeat N] [--junit FILE] [machine flags]");
     eprintln!("       jig boot [--args ARGS] [--matrix | --matrix-small] [--jobs N] [--junit FILE] [machine flags]");
+    eprintln!("       jig expect SCRIPT... [machine flags]");
     eprintln!("       jig ktap FILE");
     eprintln!("machine flags: --accel tcg|kvm --cpu MODEL --mem SIZE --smp N --machine TYPE --timeout SECS");
     2
@@ -187,6 +193,59 @@ fn boot(options: &Options) -> i32 {
     };
     let jobs = machines.into_iter().map(|machine| (image.clone(), machine, 0)).collect();
     run_all(&repo, &target, jobs, options)
+}
+
+/// How long `expect` waits for each line of output it expects.
+const EXPECT_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `jig expect SCRIPT...`: boots the root task's shell once per script and
+/// runs the script against it, one after another.
+fn expect_scripts(options: &Options) -> i32 {
+    if options.filters.is_empty() {
+        return usage("expect needs a script");
+    }
+    if !tools_present() {
+        return 1;
+    }
+    let repo = repo_root();
+    let target = target_dir(&repo);
+    eprintln!("jig: building the kernel and the root task");
+    let image = match run::root_image(&repo, &target, "shell") {
+        Ok(image) => image,
+        Err(e) => {
+            eprintln!("{e}\njig: the build failed");
+            return 1;
+        }
+    };
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let mut failed = 0;
+    for path in &options.filters {
+        let steps = match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|s| expect::parse(&s)) {
+            Ok(steps) => steps,
+            Err(e) => {
+                println!("jig: {path}: {e}");
+                failed += 1;
+                continue;
+            }
+        };
+        let session = expect::run(&repo, &image, &options.machine, &steps, EXPECT_STEP_TIMEOUT);
+        let (word, paint) = if session.passed() { ("PASS", "32") } else { ("FAIL", "31") };
+        let word = if color { format!("\x1b[{paint}m{word}\x1b[0m") } else { word.to_string() };
+        println!("{word} {path:<40} {:>3} steps {:>6.1}s  {}", steps.len(), session.duration.as_secs_f64(), options.machine.describe());
+        if !session.passed() {
+            failed += 1;
+            match &session.failure {
+                Some((line, why)) => println!("{path}:{line}: {why}"),
+                None => println!("{path}: the machine did not stop with success (runner exit {:?})", session.code),
+            }
+            println!("last lines of the session:");
+            for line in tail(&session.transcript) {
+                println!("    {line}");
+            }
+            println!("reproduce: {}cargo run -q -p jig -- expect {path}", options.machine.env_prefix());
+        }
+    }
+    i32::from(failed != 0)
 }
 
 /// The machines `boot --matrix` covers: cpu models with and without SMEP and

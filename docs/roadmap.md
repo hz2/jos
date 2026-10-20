@@ -84,6 +84,8 @@ speak IPC.
       away, over a verified table of parked threads (BLOCK-1)
 - [x] a ring-3 test suite in the root task, each check isolated in its own
       thread with a deadline
+- [x] console input (IRQ4, `console_read`) and an interactive shell in the
+      root task, scripted end to end by `jig expect`
 - [ ] process spawning from userspace
 - [x] `jig`, the host-side harness: parallel QEMU boots read as KTAP, JUnit,
       reproduce commands, a machine matrix

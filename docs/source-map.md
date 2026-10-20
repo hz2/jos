@@ -65,6 +65,8 @@ half, look at the other.
 | syscall numbers, error codes, boot information, user layout (the ABI) | `jos-core/src/abi.rs` |
 | `syscall` entry stub, dispatcher | `kernel/src/syscall/mod.rs` |
 | console and machine syscalls | `kernel/src/syscall/platform.rs` |
+| console input: the receive interrupt and its buffer | `kernel/src/console.rs`, `kernel/src/interrupts.rs` (`com1_interrupt_handler`); readers wait in `syscall/ipc.rs` (`CONSOLE_READERS`) |
+| line editing | `jos-core/src/line.rs`; libjos `console::read_line` drives it |
 | first entry to ring 3 | `kernel/src/usermode.rs` (`enter_context` for the root task) |
 | serial and VGA output | `kernel/src/serial.rs`, `kernel/src/vga_buffer.rs` |
 
@@ -75,7 +77,7 @@ half, look at the other.
 | syscall stubs and typed wrappers | `user/libjos/src/syscall.rs`, `user/libjos/src/sys.rs` |
 | slots, retype and map helpers, threads | `user/libjos/src/mem.rs`, `user/libjos/src/thread.rs` |
 | console output, entry point, panic handler, KTAP | `user/libjos/src/console.rs`, `rt.rs`, `ktap.rs` |
-| the root task | `user/root/src/main.rs` |
+| the root task: checks, the isolating runner, the shell | `user/root/src/main.rs` |
 | target and build-std config | `user/.cargo/config.toml` |
 
 ## Verification and testing
@@ -88,6 +90,7 @@ half, look at the other.
 | QEMU integration tests | `kernel/tests/*.rs`; multi-thread ones share `kernel/tests/common/threads.rs` |
 | KTAP output of kernel tests (runner, panic handler, single-check tests) | `kernel/src/ktap.rs`, `kernel/src/lib.rs` |
 | the host harness: parallel boots, KTAP parsing, reports, the machine matrix | `tools/jig/src/` (`run.rs` boots, `ktap.rs` parses, `main.rs` reports) |
+| scripted shell sessions | `tools/jig/src/expect.rs`, scripts in `tools/jig/expect/` |
 | the root task booting end to end | `scripts/check.sh boot`, `scripts/check.sh matrix` |
 | in-kernel trace ring | `kernel/src/trace.rs` |
 | gates and runner | `scripts/check.sh`, `scripts/run-qemu.sh`, `.githooks/` |

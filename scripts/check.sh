@@ -14,8 +14,9 @@
 #   boot            the real kernel booting the real root task in test mode,
 #                   on a small machine matrix (kvm included when usable)
 #   matrix          the same across the full machine matrix
+#   shell           the root task's shell driven by every jig expect script
 #   fast            style + clippy + test (pre-commit)
-#   ci              fast + miri + kani + qemu + qemu-kvm + matrix (pre-push to main, ci)
+#   ci              fast + miri + kani + qemu + qemu-kvm + matrix + shell (pre-push to main, ci)
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -70,18 +71,19 @@ boot() {
     jig boot --matrix-small
 }
 matrix() { jig boot --matrix; }
+shell() { jig expect tools/jig/expect/*.expect; }
 fast() { style; clippy; test; }
-ci() { fast; miri; kani; qemu; qemu-kvm; matrix; }
+ci() { fast; miri; kani; qemu; qemu-kvm; matrix; shell; }
 
 if [ $# -eq 0 ]; then
-    sed -n '5,19p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '5,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
 gate=$1
 shift
 case "$gate" in
-    style|clippy|test|miri|kani|verus|qemu|qemu-kvm|boot|matrix|fast|ci)
+    style|clippy|test|miri|kani|verus|qemu|qemu-kvm|boot|matrix|shell|fast|ci)
         echo "[check] $gate $*"
         "$gate" "$@"
         ;;

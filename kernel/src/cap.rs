@@ -1094,6 +1094,17 @@ impl UntypedRegion {
         // these helpers return Option (full region -> None); the syscall path
         // also needs to distinguish a misalignment, so check alignment up front
         // and map None to NoRoom.
+        //
+        // a CNode of a non-kernel size, or a sub-Untyped, has no concrete Rust
+        // object type to place: say so first, since no alignment would help.
+        let supported = match ty {
+            ObjectType::CNode { size_bits } => size_bits == KERNEL_CNODE_SIZE_BITS,
+            ObjectType::Untyped { .. } => false,
+            _ => true,
+        };
+        if !supported {
+            return Err(RetypeError::BadType);
+        }
         let (_, align) = jos_core::untyped::object_layout(ty);
         if !(self.bytes.as_ptr() as usize).is_multiple_of(align) {
             // the region base is too misaligned for this object (for example a
@@ -1111,11 +1122,8 @@ impl UntypedRegion {
             ObjectType::CNode { size_bits } if size_bits == KERNEL_CNODE_SIZE_BITS => {
                 self.retype_cnode()
             }
-            // a CNode of a non-kernel size, or a sub-Untyped, has no concrete
-            // Rust object type to place: not supported via the syscall yet.
-            ObjectType::CNode { .. } | ObjectType::Untyped { .. } => {
-                return Err(RetypeError::BadType)
-            }
+            // refused above.
+            ObjectType::CNode { .. } | ObjectType::Untyped { .. } => return Err(RetypeError::BadType),
         };
         carved.ok_or(RetypeError::NoRoom)
     }

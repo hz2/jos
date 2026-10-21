@@ -266,6 +266,13 @@ served oldest first, each with what it asked for.
 | 7 | `BadAlign` | the region is too misaligned for the object |
 | 8 | `BadType` | the type cannot be carved by syscall |
 
+The checks run in this order, so the first that fails is the answer: the type
+word decodes (`BadArgs`), the destination is in range (`DestOutOfRange`), the
+source is a live untyped capability (`BadCap`, `NotUntyped`), the destination
+is free (`DestOccupied`), the type can be made at all (`BadType`, so a CNode
+of another size or an untyped region is refused whatever the alignment), the
+region is aligned for it (`BadAlign`), and it has room (`NoRoom`).
+
 ### Mint errors (`MintSyscallError`, flagged)
 
 | code | name | meaning |

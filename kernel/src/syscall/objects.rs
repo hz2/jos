@@ -52,6 +52,13 @@ pub(super) fn sys_retype(untyped_slot: u64, type_word: u64, dest_slot: u64) -> u
     if dslot >= CSPACE_SLOTS {
         return err(RetypeSyscallError::DestOutOfRange);
     }
+    // a CNode needs a registry entry: free those of CNodes nothing reaches,
+    // before any reference into a capability space is taken.
+    if matches!(ty, jos_core::untyped::ObjectType::CNode { .. }) && !cap::registry_has_room() {
+        // SAFETY: single-CPU syscall path with interrupts disabled, holding no
+        // reference into a capability space or a thread.
+        unsafe { cap::collect_cnodes() };
+    }
 
     let Some(space) = current_cspace_mut() else {
         return err(RetypeSyscallError::BadCap);

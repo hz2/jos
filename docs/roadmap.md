@@ -9,13 +9,16 @@ proof targets that travel with each milestone.
 ## Where we are (2026-10)
 
 jos boots on x86_64 under QEMU into a Rust root task loaded from an ELF boot
-module, which runs in ring 3 with every initial capability and checks the
-capability model end to end (`scripts/check.sh boot`), threads and faults
-included: a faulting thread is stopped alone or answered by a userspace
-handler, which can page memory in on demand. What is missing for a userspace
-that hosts servers and tests is process spawning from userspace, a ring-3 test
-runner with per-test isolation, and the host-side harness; that is the gap
-this roadmap closes next.
+module. The root task runs in ring 3 with every initial capability, starts
+isolated processes from the other boot modules, and tests the kernel from
+userspace: a ring-3 suite with each check in its own thread under a deadline,
+a robustness fuzzer and a differential fuzzer against an executable spec, and
+an interactive shell, all driven by the host harness `jig` across a
+36-machine matrix. Faults are survivable (fault endpoints, demand paging from
+userspace), and capability spaces come and go (a CNode nothing reaches is
+released). What a long-running userspace still lacks is memory that comes
+back (MEM-2), processes that cost the root task few slots, and the hardware
+foundation of M3 (FPU state, the APIC).
 
 | Phase | Scope | State |
 |-------|-------|-------|
@@ -23,7 +26,7 @@ this roadmap closes next.
 | 1 | async executor, keyboard, PIC timer, IRQ handling | done |
 | 2 | untyped memory, retype, CSpace/CNode, rights, revoke, endpoints, notifications | done |
 | 3 | ring 3, SYSCALL/SYSRET, per-thread kernel stacks + CSpaces, preemptive round robin, W^X | done |
-| 4 | real IPC, userspace crate + ELF + root task, drivers | in progress (~40%) |
+| 4 | real IPC, userspace crate + ELF + root task, drivers | in progress (~60%) |
 | 5 | formal verification (Kani across jos-core, Verus spec of the cap state machine) | in progress |
 | 6 | SMP, scheduling contexts, WASM sandbox, agent namespaces, PQ crypto caps | future |
 
@@ -93,6 +96,11 @@ speak IPC.
       reproduce commands, a machine matrix
 - [x] a syscall robustness fuzzer run as a sandboxed process
 - [x] differential testing against an executable spec (non-blocking calls)
+- [x] CNodes nothing can reach are released and their registry entries reused
+      under new ids, so processes can come and go; revocation stays exact
+      across released spaces (CAP-3)
+- [ ] processes that cost the root task few slots (a `delete` or `move`), then
+      untyped reclamation (MEM-2) so their memory comes back too
 
 ### M3. Hardware foundation
 

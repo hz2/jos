@@ -11,7 +11,7 @@ half, look at the other.
 |---|---|---|
 | rights, attenuation | `cap_rights.rs` | |
 | generation-counted slots | `cap_table.rs` | |
-| capability spaces, derivation tree, copy, revoke | `cap_space.rs` | `cap.rs` (registry, `revoke_and_wake`) |
+| capability spaces, derivation tree, copy, revoke, relinking a released space | `cap_space.rs` | `cap.rs` (registry, `revoke_and_wake`, `collect_cnodes`) |
 | untyped memory and retype sizes | `untyped.rs`, `placement.rs` | `cap.rs` (`UntypedRegion`) |
 | kernel objects (endpoint, notification, reply, TCB, CNode, frame) | `endpoint.rs`, `notification.rs`, `reply.rs` | `cap.rs` |
 | capability syscalls | | `syscall/objects.rs` |

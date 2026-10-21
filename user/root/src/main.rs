@@ -38,12 +38,13 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 34] = [
+const CHECKS: [(&str, Check); 35] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
     ("badge_arrives_with_the_message", badge_arrives_with_the_message),
     ("revoke_reaches_every_copy", revoke_reaches_every_copy),
+    ("revocation_reaches_a_copy_in_every_cnode", revocation_reaches_a_copy_in_every_cnode),
     ("fresh_page_maps_and_holds_data", fresh_page_maps_and_holds_data),
     ("writable_and_executable_is_refused", writable_and_executable_is_refused),
     ("console_without_write_is_refused", console_without_write_is_refused),
@@ -501,6 +502,32 @@ fn revoke_reaches_every_copy(_: &BootInfo) -> Result<(), &'static str> {
     mem::free_slot(ep);
     ensure(sys::recv(copy) == Err(IpcSyscallError::BadCap), "copy survived")?;
     ensure(sys::recv(ep) == Err(IpcSyscallError::BadCap), "original survived")
+}
+
+/// How many `CNode`s [`revocation_reaches_a_copy_in_every_cnode`] makes: more
+/// than the kernel can register at once.
+const MANY_CNODES: usize = 200;
+
+/// `CNode`s made and dropped one after another, more of them than the kernel
+/// can register at once, are each registered while they live: revoking a
+/// capability reaches the copy of it in the newest one too.
+fn revocation_reaches_a_copy_in_every_cnode(_: &BootInfo) -> Result<(), &'static str> {
+    let ep = object(ObjectType::Endpoint)?;
+    let mut reached = Ok(());
+    for _ in 0..MANY_CNODES {
+        let cnode = object(ObjectType::CNode { size_bits: libjos::abi::CNODE_SIZE_BITS })?;
+        let copy = mem::mint(ep, Rights::ALL, 0).map_err(|_| "mint")?;
+        sys::cnode_copy(cnode, copy, 0, Rights::ALL).map_err(|_| "copy into the cnode")?;
+        let removed = sys::revoke(copy);
+        mem::free_slot(copy);
+        release(&[cnode])?;
+        if removed != Ok(2) {
+            reached = Err("a revoke missed the copy in a new cnode");
+            break;
+        }
+    }
+    release(&[ep])?;
+    reached
 }
 
 /// A page built from untyped maps into the root's own address space and

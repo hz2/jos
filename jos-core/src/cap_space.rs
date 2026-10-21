@@ -38,8 +38,38 @@ pub use crate::cap_table::InsertAtError;
 
 /// Identifies a capability space, so a derivation link can point into any of
 /// them. The kernel gives every space a distinct id when it registers it.
+///
+/// A registered space's id names its registry entry (the low 8 bits, plus one)
+/// and that entry's generation (the rest), so once a space is released and its
+/// entry reused, a link left behind to the old space reaches nothing. Id 0
+/// means unregistered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpaceId(pub u32);
+
+impl SpaceId {
+    /// How many registry entries an id can name.
+    pub const MAX_ENTRIES: usize = 255;
+
+    /// Returns the id of registry entry `entry` in its `generation`th use
+    /// (taken modulo 2^24), or `None` if `entry` is out of range.
+    #[must_use]
+    pub const fn new(entry: usize, generation: u32) -> Option<Self> {
+        if entry >= Self::MAX_ENTRIES {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        Some(Self((generation << 8) | (entry as u32 + 1)))
+    }
+
+    /// Returns the registry entry this id names, or `None` for id 0.
+    #[must_use]
+    pub const fn entry(self) -> Option<usize> {
+        match self.0 & 0xff {
+            0 => None,
+            e => Some(e as usize - 1),
+        }
+    }
+}
 
 /// A link to one capability in some capability space: the space plus the
 /// generation-checked [`CapRef`] inside it. Parent links are `CapLink`s, so the
@@ -217,6 +247,12 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
         self.table.get(cap_ref)
     }
 
+    /// Calls `f` with the [`CapRef`] and contents of every live capability,
+    /// in ascending slot order.
+    pub fn for_each(&self, f: impl FnMut(CapRef, &Capability<O>)) {
+        self.table.for_each(f);
+    }
+
     /// Returns `true` if any live capability in this space satisfies `pred`.
     #[must_use]
     pub fn any(&self, mut pred: impl FnMut(&Capability<O>) -> bool) -> bool {
@@ -354,33 +390,34 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
     /// After this returns, neither `cap_ref` nor any descendant names a live
     /// capability. Returns the number of capabilities removed.
     ///
-    /// It first marks the whole subtree (while all `parent` links are intact),
-    /// then sweeps the marked refs out. Marking before removing matters: once a
-    /// capability is removed its `parent` link is no longer reachable, so we
-    /// cannot follow chains through already-removed nodes. The scan is O(N) per
-    /// layer of the tree; capability spaces are small, and a plain scan keeps
-    /// the logic verifiable.
+    /// The deepest capabilities of the subtree go first, one depth at a time:
+    /// none of them has a child left, so every parent link the rest of the
+    /// subtree needs to prove its membership stays intact until its own turn,
+    /// and no scratch storage is needed. That is O(N * depth^2) for a subtree
+    /// `depth` deep; capability spaces are small and derivation trees shallow.
     pub fn revoke(&mut self, cap_ref: CapRef) -> usize {
-        // mark phase: collect cap_ref plus every capability that descends from
-        // it, with all links still live. fixed-size scratch sized to the table.
-        let mut marked: [Option<CapRef>; N] = [None; N];
-        let mut count = 0;
-        self.table.for_each(|r, _| {
-            if self.descends_from(r, cap_ref) {
-                marked[count] = Some(r);
-                count += 1;
-            }
-        });
-
-        // sweep phase: remove every marked ref. order does not matter now that
-        // membership is already decided.
         let mut removed = 0;
-        for &r in marked[..count].iter().flatten() {
-            if self.table.remove(r).is_some() {
-                removed += 1;
+        while let Some(deepest) = self.deepest_below(cap_ref) {
+            for slot in 0..N {
+                let Some(r) = self.table.ref_at(slot) else { continue };
+                if self.depth_below(r, cap_ref) == Some(deepest) && self.table.remove(r).is_some() {
+                    removed += 1;
+                }
             }
         }
         removed
+    }
+
+    /// Returns the depth of the deepest capability in the subtree rooted at
+    /// `root`, or `None` if `root` is not live.
+    fn deepest_below(&self, root: CapRef) -> Option<usize> {
+        let mut deepest = None;
+        self.table.for_each(|r, _| {
+            if let Some(depth) = self.depth_below(r, root) {
+                deepest = deepest.max(Some(depth));
+            }
+        });
+        deepest
     }
 
     /// Calls `f` with the [`CapRef`] and a shared reference to every capability
@@ -395,31 +432,31 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
     /// and act afterward.
     pub fn for_each_in_subtree(&self, root: CapRef, mut f: impl FnMut(CapRef, &Capability<O>)) {
         self.table.for_each(|r, cap| {
-            if self.descends_from(r, root) {
+            if self.depth_below(r, root).is_some() {
                 f(r, cap);
             }
         });
     }
 
-    /// Returns `true` if `cap_ref` is `ancestor`, or is transitively derived
-    /// from `ancestor` by following `parent` links.
+    /// Returns how many parent links lead from `cap_ref` up to `ancestor`
+    /// (0 if they are the same), or `None` if `cap_ref` does not descend from
+    /// `ancestor` within this space.
     #[must_use]
-    fn descends_from(&self, cap_ref: CapRef, ancestor: CapRef) -> bool {
-        if cap_ref == ancestor {
-            return true;
-        }
+    fn depth_below(&self, cap_ref: CapRef, ancestor: CapRef) -> Option<usize> {
         let mut current = cap_ref;
-        // bound the walk by the slot count so a corrupted cycle cannot hang.
-        for _ in 0..N {
-            match self.table.get(current).and_then(|cap| cap.parent) {
+        // a parent is always older than its child, so the walk ends; the bound
+        // only guards a corrupted table.
+        for depth in 0..=N {
+            if current == ancestor {
+                return Some(depth);
+            }
+            match self.table.get(current)?.parent? {
                 // a link into another space leaves this space's tree.
-                Some(p) if p.space != self.id => return false,
-                Some(p) if p.cap == ancestor => return true,
-                Some(p) => current = p.cap,
-                None => return false,
+                p if p.space != self.id => return None,
+                p => current = p.cap,
             }
         }
-        false
+        None
     }
 }
 
@@ -442,42 +479,66 @@ pub enum CopyError {
     SameSpace,
 }
 
-/// Returns the capability `link` names among `spaces`, if it is live.
-fn resolve<'a, O: Copy, const N: usize>(
-    spaces: &'a [&mut CapSpace<O, N>],
-    link: CapLink,
-) -> Option<&'a Capability<O>> {
-    spaces.iter().find(|s| s.id == link.space)?.lookup(link.cap)
+// the functions below work on the spaces a link can reach, lent as a slice
+// indexed by registry entry: entry `i`, if present, is the space whose id
+// names entry `i`. the kernel lends its registry this way, empty entries and
+// all, so a link resolves in constant time.
+
+/// Returns the space `id` names among `spaces`, if it is there and still
+/// carries that id.
+fn space_of<'a, O: Copy, const N: usize>(
+    spaces: &'a [Option<&mut CapSpace<O, N>>],
+    id: SpaceId,
+) -> Option<&'a CapSpace<O, N>> {
+    let space = spaces.get(id.entry()?)?.as_deref()?;
+    (space.id == id).then_some(space)
 }
 
-/// Returns `true` if `link` is `ancestor`, or descends from it through parent
-/// links that may cross between `spaces`.
-fn descends_across<O: Copy, const N: usize>(
-    spaces: &[&mut CapSpace<O, N>],
+/// Returns the parent link of the live capability `link` names.
+fn parent_of<O: Copy, const N: usize>(spaces: &[Option<&mut CapSpace<O, N>>], link: CapLink) -> Option<CapLink> {
+    space_of(spaces, link.space)?.lookup(link.cap)?.parent
+}
+
+/// Returns how many parent links lead from `link` up to `ancestor` (0 if they
+/// are the same), following links between `spaces`, or `None` if `link` does
+/// not descend from `ancestor`.
+fn depth_across<O: Copy, const N: usize>(
+    spaces: &[Option<&mut CapSpace<O, N>>],
     link: CapLink,
     ancestor: CapLink,
-) -> bool {
+) -> Option<usize> {
     let mut current = link;
-    // bound the walk by the total slot count so a corrupted cycle cannot hang.
-    for _ in 0..=spaces.len() * N {
+    // a parent is always older than its child, so the walk ends; the bound
+    // only guards a corrupted table.
+    for depth in 0..=spaces.len() * N {
         if current == ancestor {
-            return true;
+            return Some(depth);
         }
-        match resolve(spaces, current).and_then(|cap| cap.parent) {
-            Some(parent) => current = parent,
-            None => return false,
-        }
+        current = parent_of(spaces, current)?;
     }
-    false
+    None
 }
 
-/// Returns `true` if any capability in `spaces` names `link` as its parent.
-fn has_child<O: Copy, const N: usize>(spaces: &[&mut CapSpace<O, N>], link: CapLink) -> bool {
-    let mut found = false;
-    for space in spaces {
-        space.table.for_each(|_, cap| found |= cap.parent == Some(link));
+/// Calls `f` with the link and contents of every live capability in `spaces`.
+fn for_each_live<O: Copy, const N: usize>(
+    spaces: &[Option<&mut CapSpace<O, N>>],
+    mut f: impl FnMut(CapLink, &Capability<O>),
+) {
+    for space in spaces.iter().flatten() {
+        space.table.for_each(|cap, c| f(CapLink { space: space.id, cap }, c));
     }
-    found
+}
+
+/// Returns the depth of the deepest live capability in the subtree rooted at
+/// `root`, or `None` if no live capability is in it.
+fn deepest_across<O: Copy, const N: usize>(spaces: &[Option<&mut CapSpace<O, N>>], root: CapLink) -> Option<usize> {
+    let mut deepest = None;
+    for_each_live(spaces, |link, _| {
+        if let Some(depth) = depth_across(spaces, link, root) {
+            deepest = deepest.max(Some(depth));
+        }
+    });
+    deepest
 }
 
 /// Calls `f` with every live capability in the subtree rooted at `root` (the
@@ -487,53 +548,104 @@ fn has_child<O: Copy, const N: usize>(spaces: &[&mut CapSpace<O, N>], link: CapL
 /// act on those capabilities' objects first (for example, waking IPC waiters
 /// parked on an endpoint about to be revoked).
 pub fn for_each_descendant_across<O: Copy, const N: usize>(
-    spaces: &[&mut CapSpace<O, N>],
+    spaces: &[Option<&mut CapSpace<O, N>>],
     root: CapLink,
     mut f: impl FnMut(CapLink, &Capability<O>),
 ) {
-    for space in spaces {
-        space.table.for_each(|cap_ref, cap| {
-            let link = CapLink { space: space.id, cap: cap_ref };
-            if descends_across(spaces, link, root) {
-                f(link, cap);
-            }
-        });
-    }
+    for_each_live(spaces, |link, cap| {
+        if depth_across(spaces, link, root).is_some() {
+            f(link, cap);
+        }
+    });
 }
 
-/// Revokes `root` and everything derived from it, in every space in `spaces`,
-/// and returns how many capabilities were removed.
+/// Revokes `root` and everything derived from it, in every space in `spaces`
+/// (indexed by registry entry), and returns how many capabilities were
+/// removed.
 ///
-/// It removes the subtree leaves first: each step finds a capability in the
-/// subtree that no other capability names as its parent and removes it. Every
-/// link it follows to decide membership therefore stays intact until the
-/// capability holding it is itself removed, with no scratch storage needed.
+/// Like [`CapSpace::revoke`], it removes the deepest capabilities of the
+/// subtree first, one depth at a time, so every link that proves the rest of
+/// the subtree's membership stays intact until its own turn, with no scratch
+/// storage. Links resolve in constant time, so this costs O(spaces * N *
+/// depth^2).
 pub fn revoke_across<O: Copy, const N: usize>(
-    spaces: &mut [&mut CapSpace<O, N>],
+    spaces: &mut [Option<&mut CapSpace<O, N>>],
     root: CapLink,
 ) -> usize {
     let mut removed = 0;
-    while let Some(leaf) = find_leaf(spaces, root) {
-        if let Some(space) = spaces.iter_mut().find(|s| s.id == leaf.space) {
-            space.table.remove(leaf.cap);
+    while let Some(deepest) = deepest_across(spaces, root) {
+        for entry in 0..spaces.len() {
+            for slot in 0..N {
+                let Some(space) = spaces[entry].as_deref() else { break };
+                let Some(cap) = space.ref_at(slot) else { continue };
+                let link = CapLink { space: space.id, cap };
+                // a capability as deep as the deepest has no child left, and
+                // the links above it are not this deep, so they stay intact.
+                if depth_across(spaces, link, root) == Some(deepest) {
+                    if let Some(space) = spaces[entry].as_deref_mut() {
+                        space.table.remove(cap);
+                    }
+                    removed += 1;
+                }
+            }
         }
-        removed += 1;
     }
     removed
 }
 
-/// Returns a capability in the subtree rooted at `root` that has no children.
-fn find_leaf<O: Copy, const N: usize>(spaces: &[&mut CapSpace<O, N>], root: CapLink) -> Option<CapLink> {
-    let mut found = None;
-    for space in spaces {
-        space.table.for_each(|cap_ref, _| {
-            let link = CapLink { space: space.id, cap: cap_ref };
-            if found.is_none() && descends_across(spaces, link, root) && !has_child(spaces, link) {
-                found = Some(link);
+/// Prepares the space at registry entry `entry` to be released: every
+/// capability in another space whose parent is in it is relinked to its
+/// nearest ancestor outside it, or becomes an original if it has none, so
+/// revoking that ancestor still reaches it once the space is gone (an `seL4`
+/// delete splices a capability out of the derivation tree the same way).
+/// Returns how many links changed.
+///
+/// The space at `entry` is left as it is: dropping its capabilities is the
+/// caller's job, and no link from outside points into it any more.
+pub fn relink_out_of<O: Copy, const N: usize>(spaces: &mut [Option<&mut CapSpace<O, N>>], entry: usize) -> usize {
+    let Some(leaving) = spaces.get(entry).and_then(|s| s.as_deref()).map(|s| s.id) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for other in 0..spaces.len() {
+        if other == entry {
+            continue;
+        }
+        for slot in 0..N {
+            let Some(space) = spaces[other].as_deref() else { break };
+            let Some(cap) = space.ref_at(slot) else { continue };
+            let Some(parent) = space.lookup(cap).and_then(|c| c.parent) else { continue };
+            if parent.space != leaving {
+                continue;
             }
-        });
+            // the leaving space is not changed here, so every chain through
+            // it stays intact while the links into it are rewritten.
+            let outside = nearest_outside(spaces, parent, leaving);
+            if let Some(c) = spaces[other].as_deref_mut().and_then(|s| s.table.get_mut(cap)) {
+                c.parent = outside;
+            }
+            changed += 1;
+        }
     }
-    found
+    changed
+}
+
+/// Returns the first link on the parent chain from `link` (inclusive) that
+/// lies outside the space `leaving`, or `None` if the chain ends inside it.
+fn nearest_outside<O: Copy, const N: usize>(
+    spaces: &[Option<&mut CapSpace<O, N>>],
+    link: CapLink,
+    leaving: SpaceId,
+) -> Option<CapLink> {
+    let mut current = link;
+    // at most N links lie inside one space.
+    for _ in 0..=N {
+        if current.space != leaving {
+            return Some(current);
+        }
+        current = parent_of(spaces, current)?;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -716,7 +828,7 @@ mod tests {
         b.copy_into(in_b, &mut a, 3, Rights::READ).unwrap();
         // an unrelated original in b survives.
         let other = b.insert(9, Rights::all()).unwrap();
-        let removed = revoke_across(&mut [&mut a, &mut b], CapLink { space: SpaceId(1), cap: root });
+        let removed = revoke_across(&mut [Some(&mut a), Some(&mut b)], CapLink { space: SpaceId(1), cap: root });
         assert_eq!(removed, 4);
         assert!(a.is_empty());
         assert_eq!(b.len(), 1);
@@ -729,10 +841,94 @@ mod tests {
         let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
         let src = a.insert(7, Rights::all()).unwrap();
         let copy = a.copy_into(src, &mut b, 0, Rights::all()).unwrap();
-        let removed = revoke_across(&mut [&mut a, &mut b], CapLink { space: SpaceId(2), cap: copy });
+        let removed = revoke_across(&mut [Some(&mut a), Some(&mut b)], CapLink { space: SpaceId(2), cap: copy });
         assert_eq!(removed, 1);
         assert!(a.lookup(src).is_some());
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn space_ids_name_an_entry_and_its_generation() {
+        assert_eq!(SpaceId::new(0, 0), Some(SpaceId(1)));
+        assert_eq!(SpaceId::new(3, 7).and_then(SpaceId::entry), Some(3));
+        assert_ne!(SpaceId::new(3, 7), SpaceId::new(3, 8));
+        assert_eq!(SpaceId::new(SpaceId::MAX_ENTRIES, 0), None);
+        assert_eq!(SpaceId(0).entry(), None);
+    }
+
+    #[test]
+    fn a_link_into_a_released_space_reaches_nothing() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
+        let x = b.insert(7, Rights::all()).unwrap();
+        let copy = b.copy_into(x, &mut a, 0, Rights::all()).unwrap();
+        // b's entry is reused by a new space without relinking, so the copy's
+        // link still names the old one, at a ref the newcomer also holds.
+        let mut b2: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId::new(1, 1).unwrap());
+        let y = b2.insert(9, Rights::all()).unwrap();
+        assert_eq!(x, y);
+        let space = b2.id();
+        let removed = revoke_across(&mut [Some(&mut a), Some(&mut b2)], CapLink { space, cap: y });
+        assert_eq!(removed, 1);
+        assert!(a.lookup(copy).is_some());
+    }
+
+    #[test]
+    fn a_released_space_leaves_its_descendants_revocable() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
+        let mut c: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(3));
+        let root = a.insert(7, Rights::all()).unwrap();
+        let first = a.copy_into(root, &mut b, 0, Rights::all()).unwrap();
+        let second = b.mint(first, Rights::READ_WRITE).unwrap();
+        let deep = b.copy_into(second, &mut c, 0, Rights::all()).unwrap();
+        let shallow = b.copy_into(first, &mut c, 1, Rights::all()).unwrap();
+        let mut spaces = [Some(&mut a), Some(&mut b), Some(&mut c)];
+        assert_eq!(relink_out_of(&mut spaces, 1), 2);
+        // b is gone; revoking the root still reaches what came through it.
+        spaces[1] = None;
+        assert_eq!(revoke_across(&mut spaces, CapLink { space: SpaceId(1), cap: root }), 3);
+        assert!(c.lookup(deep).is_none());
+        assert!(c.lookup(shallow).is_none());
+    }
+
+    #[test]
+    fn relinking_with_no_outside_ancestor_makes_an_original() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
+        let x = b.insert(7, Rights::all()).unwrap();
+        let copy = b.copy_into(x, &mut a, 2, Rights::READ).unwrap();
+        // a's own links stay as they were.
+        let child = a.mint(copy, Rights::READ).unwrap();
+        assert_eq!(relink_out_of(&mut [Some(&mut a), Some(&mut b)], 1), 1);
+        assert_eq!(a.lookup(copy).unwrap().parent, None);
+        assert_eq!(a.lookup(child).unwrap().parent, Some(CapLink { space: SpaceId(1), cap: copy }));
+    }
+
+    #[test]
+    fn revoke_removes_a_chain_as_deep_as_the_space() {
+        let mut space: CapSpace<Obj, 8> = CapSpace::new();
+        let root = space.insert(1, Rights::all()).unwrap();
+        let mut last = root;
+        for _ in 0..7 {
+            last = space.mint(last, Rights::all()).unwrap();
+        }
+        assert_eq!(space.revoke(root), 8);
+        assert!(space.is_empty());
+    }
+
+    #[test]
+    fn revoke_across_removes_a_chain_that_zigzags_between_spaces() {
+        let mut a: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<Obj, 4> = CapSpace::with_id(SpaceId(2));
+        let root = a.insert(1, Rights::all()).unwrap();
+        let mut last = root;
+        for slot in 0..3 {
+            let in_b = a.copy_into(last, &mut b, slot, Rights::all()).unwrap();
+            last = b.copy_into(in_b, &mut a, slot + 1, Rights::all()).unwrap();
+        }
+        assert_eq!(revoke_across(&mut [Some(&mut a), Some(&mut b)], CapLink { space: SpaceId(1), cap: root }), 7);
+        assert!(a.is_empty() && b.is_empty());
     }
 
     #[test]
@@ -931,10 +1127,177 @@ mod kani_proofs {
         let copy = a.copy_into(root, &mut b, 0, Rights::from_bits_truncate(kani::any())).unwrap();
         let _ = b.mint(copy, Rights::from_bits_truncate(kani::any()));
         let other = b.insert_at(2, kani::any(), Rights::all()).unwrap();
-        revoke_across(&mut [&mut a, &mut b], CapLink { space: SpaceId(1), cap: root });
+        revoke_across(&mut [Some(&mut a), Some(&mut b)], CapLink { space: SpaceId(1), cap: root });
         assert!(a.is_empty());
         assert!(b.len() == 1);
         assert!(b.lookup(other).is_some());
+    }
+
+    /// Revoking any capability removes exactly its subtree and nothing else.
+    /// The harness derives three capabilities from two originals, each from
+    /// any live one, by a mint or by a copy into either space, and keeps its
+    /// own record of every parent, so the expected set does not come from the
+    /// code under test.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn revoke_across_removes_exactly_the_subtree() {
+        const N: usize = 3;
+        let mut a: CapSpace<u32, N> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<u32, N> = CapSpace::with_id(SpaceId(2));
+        // node k is slot k % N of space k / N (a, then b).
+        let mut live = [false; 2 * N];
+        let mut parent: [Option<usize>; 2 * N] = [None; 2 * N];
+        a.insert_at(0, 1, Rights::all()).unwrap();
+        b.insert_at(0, 2, Rights::all()).unwrap();
+        live[0] = true;
+        live[N] = true;
+        for _ in 0..3 {
+            let from: usize = kani::any();
+            kani::assume(from < 2 * N && live[from]);
+            let mask = Rights::from_bits_truncate(kani::any());
+            let into_b: bool = kani::any();
+            let slot: usize = kani::any();
+            kani::assume(slot < N);
+            let made = match (from / N == 1, into_b) {
+                (false, false) => a.mint(a.ref_at(from % N).unwrap(), mask).ok().map(|r| r.slot()),
+                (true, true) => b.mint(b.ref_at(from % N).unwrap(), mask).ok().map(|r| r.slot() + N),
+                (false, true) => a.copy_into(a.ref_at(from % N).unwrap(), &mut b, slot, mask).ok().map(|_| slot + N),
+                (true, false) => b.copy_into(b.ref_at(from % N).unwrap(), &mut a, slot, mask).ok().map(|_| slot),
+            };
+            if let Some(to) = made {
+                live[to] = true;
+                parent[to] = Some(from);
+            }
+        }
+        let victim: usize = kani::any();
+        kani::assume(victim < 2 * N && live[victim]);
+        // the expected subtree, from the harness's own record.
+        let mut doomed = [false; 2 * N];
+        let mut expected = 0;
+        for k in 0..2 * N {
+            let mut at = Some(k);
+            for _ in 0..2 * N {
+                match at {
+                    Some(j) if j == victim => {
+                        doomed[k] = live[k];
+                        break;
+                    }
+                    Some(j) => at = parent[j],
+                    None => break,
+                }
+            }
+            expected += usize::from(doomed[k]);
+        }
+        let (space, cap) = if victim / N == 1 {
+            (SpaceId(2), b.ref_at(victim % N).unwrap())
+        } else {
+            (SpaceId(1), a.ref_at(victim % N).unwrap())
+        };
+        let removed = revoke_across(&mut [Some(&mut a), Some(&mut b)], CapLink { space, cap });
+        assert!(removed == expected);
+        for k in 0..2 * N {
+            let present = if k / N == 1 { b.ref_at(k % N) } else { a.ref_at(k % N) }.is_some();
+            assert!(present == (live[k] && !doomed[k]));
+        }
+    }
+
+    /// Revoking in one space removes exactly the subtree, for any shape three
+    /// mints from any live capability can build; the harness keeps its own
+    /// record of every parent.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn revoke_removes_exactly_the_subtree() {
+        const N: usize = 4;
+        let mut space: CapSpace<u32, N> = CapSpace::new();
+        let mut live = [false; N];
+        let mut parent: [Option<usize>; N] = [None; N];
+        space.insert(1, Rights::all()).unwrap();
+        live[0] = true;
+        for _ in 0..3 {
+            let from: usize = kani::any();
+            kani::assume(from < N && live[from]);
+            let mask = Rights::from_bits_truncate(kani::any());
+            if let Ok(r) = space.mint(space.ref_at(from).unwrap(), mask) {
+                live[r.slot()] = true;
+                parent[r.slot()] = Some(from);
+            }
+        }
+        let victim: usize = kani::any();
+        kani::assume(victim < N && live[victim]);
+        let mut doomed = [false; N];
+        let mut expected = 0;
+        for k in 0..N {
+            let mut at = Some(k);
+            for _ in 0..N {
+                match at {
+                    Some(j) if j == victim => {
+                        doomed[k] = live[k];
+                        break;
+                    }
+                    Some(j) => at = parent[j],
+                    None => break,
+                }
+            }
+            expected += usize::from(doomed[k]);
+        }
+        let removed = space.revoke(space.ref_at(victim).unwrap());
+        assert!(removed == expected);
+        for k in 0..N {
+            assert!(space.ref_at(k).is_some() == (live[k] && !doomed[k]));
+        }
+    }
+
+    /// Releasing a space keeps what was derived through it revocable: once
+    /// relinked, nothing outside the space links into it, and revoking the
+    /// original with the space gone still removes every capability derived
+    /// through it, and nothing else.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn relinked_descendants_stay_revocable() {
+        let mut a: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(2));
+        let mut c: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(3));
+        let root = a.insert(kani::any(), Rights::all()).unwrap();
+        let in_b = a.copy_into(root, &mut b, 0, Rights::from_bits_truncate(kani::any())).unwrap();
+        // the copy into c comes through one capability of b or two.
+        let through = if kani::any() { b.mint(in_b, Rights::from_bits_truncate(kani::any())).unwrap() } else { in_b };
+        let in_c = b.copy_into(through, &mut c, 0, Rights::from_bits_truncate(kani::any())).unwrap();
+        let other = c.insert_at(1, kani::any(), Rights::all()).unwrap();
+        let mut spaces = [Some(&mut a), Some(&mut b), Some(&mut c)];
+        assert!(relink_out_of(&mut spaces, 1) == 1);
+        spaces[1] = None;
+        let removed = revoke_across(&mut spaces, CapLink { space: SpaceId(1), cap: root });
+        assert!(removed == 2);
+        assert!(c.lookup(in_c).is_none());
+        assert!(c.lookup(other).is_some());
+    }
+
+    /// Every derivation names the object its source names, so all of a
+    /// subtree is about one object (the kernel acts on a revoked subtree's
+    /// object once).
+    #[kani::proof]
+    fn derivation_keeps_the_object() {
+        let mut a: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(1));
+        let mut b: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(2));
+        let object: u32 = kani::any();
+        let src = a.insert(object, Rights::from_bits_truncate(kani::any())).unwrap();
+        let mask = Rights::from_bits_truncate(kani::any());
+        match kani::any::<u8>() % 3 {
+            0 => {
+                let r = a.mint(src, mask).unwrap();
+                assert!(a.lookup(r).unwrap().object == object);
+            }
+            1 => {
+                if let Ok(r) = a.mint_badged(src, mask, Badge(kani::any())) {
+                    assert!(a.lookup(r).unwrap().object == object);
+                }
+            }
+            _ => {
+                if let Ok(r) = a.copy_into(src, &mut b, kani::any(), mask) {
+                    assert!(b.lookup(r).unwrap().object == object);
+                }
+            }
+        }
     }
 
     /// Badging is still a mint: it never grants a right the source lacked.

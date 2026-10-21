@@ -39,8 +39,11 @@ Check items off in the same commit that finishes them.
       parked threads are served oldest first (`docs/kernel/ipc.md`)
 - [x] libjos: slot allocation, retype and map helpers, thread spawning with
       thread blocks (each thread finds its IPC buffer from its stack pointer)
-- [ ] capacity: CSpace registry slots freed with their CNode, and a bigger
-      mapping registry (`unmap_object` no longer keeps a stack scratch array)
+- [x] capacity: a CNode nothing can reach is released (reachability, so cycles
+      go too) and its registry entry reused under a new id (128 entries); what
+      was copied out of it is relinked to its nearest remaining ancestor; a
+      revoke resolves links in constant time and needs no stack scratch; a
+      bigger mapping registry (`unmap_object` keeps no stack scratch array)
 - [x] `recv_timeout` (26): a ring-3 check that waits on a message that never
       comes fails fast with `TimedOut` instead of hanging the run
 - [x] the blocking tables are a verified `jos_core::wait_table` (BLOCK-1): a
@@ -60,9 +63,9 @@ Check items off in the same commit that finishes them.
       task, `libjos::process` builds a process (own VSpace, CNode, thread)
       with the same `jos_core::elf` planner; `user/hello` and four checks; the
       shell's `run`
-- [ ] capacity for many processes: a bigger root CNode (64 slots; a process
-      costs about 21) needs `CapSpace::revoke` and `revoke_and_wake` without
-      slot-sized stack arrays, and CSpace registry slots (32) reused
+- [ ] capacity for many processes: the root CNode has 64 slots and a process
+      costs the root about 21, so a bigger root CNode, or a process that keeps
+      most of its own capabilities (a `delete` or `move` to hand them over)
 - [x] `jig`, the host harness (`tools/jig`): every kernel test and the root
       task report KTAP; parallel QEMU runs, JUnit, log tails and reproduce
       commands, `--repeat`, and a 36-machine boot matrix (cpu, memory, smp,
@@ -135,8 +138,8 @@ Check items off in the same commit that finishes them.
 - [ ] capability transfer on `Reply` (replies carry words only today)
 - [x] `Revoke` (21): revoke a capability and everything derived from it,
       in every capability space, from userspace
-- [ ] `revoke_across` rescans every space per removed capability; fine at 64
-      slots, worth an index once spaces grow
+- [x] `revoke_across` resolves a link in constant time and scans the spaces once
+      per depth of the subtree, no longer once per removed capability
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)
 
 ## Hardening (small, do alongside)

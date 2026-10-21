@@ -62,7 +62,10 @@ another space's CNode (which needs `WRITE`). Both stay in the derivation tree,
 so `revoke` on the source removes them, in every space. Revoking also wakes
 threads blocked on a revoked endpoint, fails a call waiting on a revoked reply
 object, unmaps revoked frames and page tables, and stops a thread whose TCB,
-CNode, or VSpace loses its last capability.
+CNode, or VSpace loses its last capability. A CNode nothing can reach any more
+is released: its capabilities are dropped (an object they alone named is
+handled as if revoked), and what was copied out of it stays revocable through
+its nearest remaining ancestor (`docs/capabilities.md`).
 
 ### IPC
 
@@ -260,7 +263,7 @@ served oldest first, each with what it asked for.
 | 1 | `BadCap` | the untyped slot is out of range or empty |
 | 2 | `NotUntyped` | the capability is not an untyped region |
 | 3 | `BadArgs` | unknown type or malformed size bits |
-| 4 | `NoRoom` | the region has no room for the object |
+| 4 | `NoRoom` | the region has no room for the object, or no capability space can be registered for a CNode |
 | 5 | `DestOccupied` | the destination slot is taken |
 | 6 | `DestOutOfRange` | the destination slot is out of range |
 | 7 | `BadAlign` | the region is too misaligned for the object |
@@ -271,7 +274,10 @@ word decodes (`BadArgs`), the destination is in range (`DestOutOfRange`), the
 source is a live untyped capability (`BadCap`, `NotUntyped`), the destination
 is free (`DestOccupied`), the type can be made at all (`BadType`, so a CNode
 of another size or an untyped region is refused whatever the alignment), the
-region is aligned for it (`BadAlign`), and it has room (`NoRoom`).
+region is aligned for it (`BadAlign`), and it has room (`NoRoom`). A CNode also
+needs a free entry in the kernel's registry of capability spaces; when there is
+none, the kernel first releases the CNodes nothing reaches, and answers
+`NoRoom`, carving nothing, if that frees none.
 
 ### Mint errors (`MintSyscallError`, flagged)
 

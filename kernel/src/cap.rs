@@ -22,7 +22,7 @@ use core::task::{Context, Poll, Waker};
 
 use crate::clock;
 use jos_core::cap_rights::Rights;
-use jos_core::cap_space::{CapLink, CapSpace, SpaceId, for_each_descendant_across, revoke_across};
+use jos_core::cap_space::{CapLink, CapSpace, SpaceId, relink_out_of, revoke_across};
 use jos_core::cap_table::CapRef;
 use jos_core::clock::Instant;
 use jos_core::timer::TimerId;
@@ -56,55 +56,92 @@ pub const CSPACE_SLOTS: usize = 64;
 pub type KernelCapSpace = CapSpace<ObjectId, CSPACE_SLOTS>;
 
 /// The most capability spaces the kernel tracks for copying and cross-space
-/// revocation.
-pub const MAX_CSPACES: usize = 32;
+/// revocation at once. A `CNode`'s entry is freed for the next one when
+/// nothing can reach the `CNode` any more (see [`collect_cnodes`]).
+pub const MAX_CSPACES: usize = 128;
 
-/// Every registered capability space; entry `i` has id `i + 1` (id 0 means
-/// unregistered, which keeps revocation local to that space).
+const _: () = assert!(MAX_CSPACES <= SpaceId::MAX_ENTRIES, "a SpaceId names at most 255 entries");
+
+/// Every registered capability space, by registry entry (a space's
+/// [`SpaceId`] names its entry); null marks a free entry. An unregistered
+/// space (id 0) keeps revocation local to itself.
 static mut CSPACES: [*mut KernelCapSpace; MAX_CSPACES] = [core::ptr::null_mut(); MAX_CSPACES];
-/// How many entries of [`CSPACES`] are in use.
-static mut CSPACE_COUNT: usize = 0;
+/// How many spaces each entry has held: a reused entry gives its new space a
+/// fresh id, so a link left behind to the old space reaches nothing.
+static mut CSPACE_GENERATIONS: [u32; MAX_CSPACES] = [0; MAX_CSPACES];
+/// Whether each entry's space lives in a `CNode` object, and so is released
+/// once nothing reaches it; the others are the kernel's own, never released.
+static mut CSPACE_IS_CNODE: [bool; MAX_CSPACES] = [false; MAX_CSPACES];
 
 /// Registers `space` so capabilities can be copied into it and revoked across
 /// spaces, giving it a unique [`SpaceId`]. Returns `None` if the registry is
 /// full or `space` already holds capabilities (their links would carry the old
-/// id).
+/// id). For the kernel's own spaces; a `CNode` registers when it is retyped.
 ///
 /// # Safety
 ///
 /// `space` must stay live for the kernel's lifetime, and the caller must run
 /// single-CPU with interrupts disabled (or during boot).
 pub unsafe fn register_cspace(space: *mut KernelCapSpace) -> Option<SpaceId> {
+    // SAFETY: per this function's contract.
+    unsafe { register(space, false) }
+}
+
+/// Registers `space` in the lowest free entry; `cnode` marks a space that
+/// lives in a `CNode` object.
+///
+/// # Safety
+///
+/// As [`register_cspace`].
+unsafe fn register(space: *mut KernelCapSpace, cnode: bool) -> Option<SpaceId> {
     // SAFETY: per this function's contract, nothing else touches the registry
     // or `space` concurrently.
     unsafe {
-        if CSPACE_COUNT >= MAX_CSPACES {
-            return None;
-        }
-        let id = SpaceId(u32::try_from(CSPACE_COUNT + 1).ok()?);
+        let entry = (*core::ptr::addr_of!(CSPACES)).iter().position(|s| s.is_null())?;
+        let id = SpaceId::new(entry, CSPACE_GENERATIONS[entry])?;
         if !(*space).set_id(id) {
             return None;
         }
-        CSPACES[CSPACE_COUNT] = space;
-        CSPACE_COUNT += 1;
+        CSPACES[entry] = space;
+        CSPACE_IS_CNODE[entry] = cnode;
         Some(id)
     }
 }
 
-/// Runs `f` with every registered capability space.
+/// Returns `true` if the registry has a free entry.
+pub fn registry_has_room() -> bool {
+    // SAFETY: reads the table of pointers; single-CPU.
+    unsafe { (*core::ptr::addr_of!(CSPACES)).iter().any(|s| s.is_null()) }
+}
+
+/// Returns the registered space `id` names, if it is still registered.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled.
+unsafe fn registered(id: SpaceId) -> Option<*mut KernelCapSpace> {
+    // SAFETY: per this function's contract; a non-null entry is a live space.
+    unsafe {
+        let space = *(*core::ptr::addr_of!(CSPACES)).get(id.entry()?)?;
+        (!space.is_null() && (*space).id() == id).then_some(space)
+    }
+}
+
+/// Runs `f` with every registered capability space, as a slice indexed by
+/// registry entry with `None` for a free one.
 ///
 /// # Safety
 ///
 /// Single-CPU with interrupts disabled, and the caller must hold no other
 /// reference into a registered space while `f` runs (or never use it again).
-unsafe fn with_registered_spaces<R>(f: impl FnOnce(&mut [&mut KernelCapSpace]) -> R) -> R {
-    // SAFETY: every registered entry is a non-null, aligned pointer to a space
-    // that lives for the kernel lifetime, and `*mut T` and `&mut T` share a
-    // layout, so the first CSPACE_COUNT entries form a valid slice of `&mut`.
-    // distinct registrations name distinct spaces, so the `&mut`s do not alias.
+unsafe fn with_registered_spaces<R>(f: impl FnOnce(&mut [Option<&mut KernelCapSpace>]) -> R) -> R {
+    // SAFETY: `Option<&mut T>` has the layout of `*mut T` with null as `None`,
+    // every non-null entry is an aligned pointer to a space that lives for the
+    // kernel lifetime, and distinct entries name distinct spaces, so the table
+    // is a valid slice of non-aliasing `Option<&mut>`.
     unsafe {
-        let ptr = core::ptr::addr_of_mut!(CSPACES).cast::<&mut KernelCapSpace>();
-        f(core::slice::from_raw_parts_mut(ptr, CSPACE_COUNT))
+        let ptr = core::ptr::addr_of_mut!(CSPACES).cast::<Option<&mut KernelCapSpace>>();
+        f(core::slice::from_raw_parts_mut(ptr, MAX_CSPACES))
     }
 }
 
@@ -119,13 +156,11 @@ unsafe fn with_registered_spaces<R>(f: impl FnOnce(&mut [&mut KernelCapSpace]) -
 /// `dest` must point to a live capability space, and the caller must run
 /// single-CPU with interrupts disabled and hold no reference into `dest`.
 pub unsafe fn transfer_cap(source: CapLink, dest: *mut KernelCapSpace, slot: usize) -> bool {
-    // SAFETY: per this function's contract; the registered entries live for the
+    // SAFETY: per this function's contract; registered spaces live for the
     // kernel lifetime, and the source is distinct from dest (checked), so the
     // shared and exclusive references below do not alias.
     unsafe {
-        let all: &[*mut KernelCapSpace; MAX_CSPACES] = &*core::ptr::addr_of!(CSPACES);
-        let registered = &all[..CSPACE_COUNT];
-        let Some(&src) = registered.iter().find(|&&s| (*s).id() == source.space) else {
+        let Some(src) = registered(source.space) else {
             return false;
         };
         if core::ptr::eq(src, dest) {
@@ -150,7 +185,132 @@ unsafe fn still_named(object: ObjectId, local: Option<&KernelCapSpace>) -> bool 
     // kernel lifetime and are only read here.
     unsafe {
         let all: &[*mut KernelCapSpace; MAX_CSPACES] = &*core::ptr::addr_of!(CSPACES);
-        all[..CSPACE_COUNT].iter().any(|&s| (*s).any(|c| c.object == object))
+        all.iter().any(|&s| !s.is_null() && (*s).any(|c| c.object == object))
+    }
+}
+
+/// Releases every `CNode` that nothing can reach any more, and returns how
+/// many it released.
+///
+/// A space is reached by a registered thread that runs in it, by being one of
+/// the kernel's own registered spaces, or through a capability in a reached
+/// space: to a `CNode`, or to a thread not yet retired, which keeps the space
+/// it was configured with. Nothing can name a `CNode` that is not reached, so
+/// its capabilities are dropped (what was derived from them elsewhere is
+/// relinked past them first) and its entry is free for the next one. This
+/// collects `CNode`s that name each other in a cycle too, which a count of
+/// capabilities would keep forever.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled, and no reference into a registered
+/// space may be live.
+pub unsafe fn collect_cnodes() -> usize {
+    let mut released = 0;
+    loop {
+        // SAFETY: per this function's contract.
+        let reached = unsafe { reached_spaces() };
+        let mut any = false;
+        for (entry, &reached) in reached.iter().enumerate() {
+            // SAFETY: per this function's contract; one flag read.
+            if !reached && unsafe { CSPACE_IS_CNODE[entry] } {
+                // SAFETY: per this function's contract, and the entry holds a
+                // CNode that nothing reaches.
+                unsafe { release_cnode(entry) };
+                released += 1;
+                any = true;
+            }
+        }
+        // dropping capabilities can retire a thread, and leave more behind.
+        if !any {
+            return released;
+        }
+    }
+}
+
+/// Returns which registry entries are reached (see [`collect_cnodes`]).
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled, and no exclusive reference into a
+/// registered space or a thread may be live.
+unsafe fn reached_spaces() -> [bool; MAX_CSPACES] {
+    let mut reached = [false; MAX_CSPACES];
+    let mut scanned = [false; MAX_CSPACES];
+    // SAFETY: per this function's contract; entries and threads are only read.
+    unsafe {
+        for (entry, mark) in reached.iter_mut().enumerate() {
+            *mark = !CSPACES[entry].is_null() && !CSPACE_IS_CNODE[entry];
+        }
+        crate::sched::for_each_thread(|_, tcb| {
+            reach(&mut reached, (*tcb).cspace_ptr);
+        });
+        // each reached space is scanned once; a scan can reach more.
+        while let Some(entry) = (0..MAX_CSPACES).find(|&e| reached[e] && !scanned[e]) {
+            scanned[entry] = true;
+            (*CSPACES[entry]).for_each(|_, cap| match cap.object.kind() {
+                ObjectKind::CNode => {
+                    reach(&mut reached, core::ptr::with_exposed_provenance_mut(cap.object.addr));
+                }
+                ObjectKind::Tcb => {
+                    let tcb = core::ptr::with_exposed_provenance::<Tcb>(cap.object.addr);
+                    if (*tcb).state != TcbState::Retired {
+                        reach(&mut reached, (*tcb).cspace_ptr);
+                    }
+                }
+                _ => {}
+            });
+        }
+    }
+    reached
+}
+
+/// Marks the registry entry of `space` reached, if it is registered.
+///
+/// # Safety
+///
+/// `space` must be null or point to a live capability space; single-CPU.
+unsafe fn reach(reached: &mut [bool; MAX_CSPACES], space: *mut KernelCapSpace) {
+    if space.is_null() {
+        return;
+    }
+    // SAFETY: per this function's contract.
+    let id = unsafe { (*space).id() };
+    // SAFETY: single-CPU, per this function's contract.
+    if unsafe { registered(id) }.is_some_and(|s| core::ptr::eq(s, space))
+        && let Some(entry) = id.entry()
+    {
+        reached[entry] = true;
+    }
+}
+
+/// Releases the `CNode` at registry entry `entry`: what was derived from its
+/// capabilities elsewhere is relinked past them, its entry is freed, and each
+/// of its capabilities is dropped, its object handled as [`capability_gone`]
+/// handles a drop.
+///
+/// # Safety
+///
+/// As [`collect_cnodes`], and the entry must hold a `CNode` nothing reaches.
+unsafe fn release_cnode(entry: usize) {
+    // SAFETY: per this function's contract; the space stays live (its memory is
+    // never reused), and once unregistered it is reached only through `space`.
+    unsafe {
+        let space = CSPACES[entry];
+        with_registered_spaces(|spaces| relink_out_of(spaces, entry));
+        CSPACES[entry] = core::ptr::null_mut();
+        CSPACE_IS_CNODE[entry] = false;
+        CSPACE_GENERATIONS[entry] = CSPACE_GENERATIONS[entry].wrapping_add(1);
+        // out of the registry, so the liveness checks below see only the rest.
+        for slot in 0..CSPACE_SLOTS {
+            let Some(cap_ref) = (*space).ref_at(slot) else { continue };
+            if let Some(cap) = (*space).remove(cap_ref) {
+                capability_gone(cap.object, None, false);
+            }
+        }
+        // an empty space takes id 0 again: a thread left pointing at it holds
+        // nothing and links to nothing.
+        let _ = (*space).set_id(SpaceId(0));
     }
 }
 
@@ -1209,7 +1369,10 @@ impl UntypedRegion {
     }
 
     /// Carves a fresh empty [`KernelCNode`] (capability space) out of this
-    /// region and returns its handle. Returns `None` if the region has no room.
+    /// region, registered so capabilities can be copied into it and revoked
+    /// across spaces, and returns its handle. Returns `None` if the region has
+    /// no room, or the registry has no free entry (nothing is carved then;
+    /// [`collect_cnodes`] frees the entries of `CNode`s nothing reaches).
     ///
     /// A CNode is [`CNODE_ALIGN`] (4096) aligned, so this only succeeds when the
     /// region's base is page-aligned; a merely 64-aligned region cannot hold a
@@ -1217,6 +1380,10 @@ impl UntypedRegion {
     ///
     /// [`retype_page_table`]: Self::retype_page_table
     pub fn retype_cnode(&mut self) -> Option<ObjectId> {
+        // an unregistered CNode would keep revocation from reaching copies in it.
+        if !registry_has_room() {
+            return None;
+        }
         // reserve the page zeroed, then build the capability space in place: a
         // KernelCNode is 4 KiB, too big to build by value on a syscall stack.
         let ty = ObjectType::CNode { size_bits: KERNEL_CNODE_SIZE_BITS };
@@ -1226,11 +1393,10 @@ impl UntypedRegion {
         // KernelCNode, and nothing else refers to it yet. repr(C) puts `space`
         // first, and the padding after it is already zero.
         unsafe { KernelCapSpace::init_in_place(core::ptr::addr_of_mut!((*ptr).space)) };
-        // register it so capabilities can be copied in and revoked across spaces;
-        // if the registry is full the space just keeps local-only revocation.
         // SAFETY: the space lives in the static untyped region for the kernel's
-        // lifetime; retype runs single-CPU with interrupts disabled.
-        let _ = unsafe { register_cspace(core::ptr::addr_of_mut!((*ptr).space)) };
+        // lifetime; retype runs single-CPU with interrupts disabled. the space is
+        // empty and the registry has room, so this succeeds.
+        unsafe { register(core::ptr::addr_of_mut!((*ptr).space), true) }?;
         Some(id)
     }
 
@@ -1902,141 +2068,139 @@ pub fn wait(space: &KernelCapSpace, cap_ref: CapRef) -> CapWait<'_> {
 /// `resolve_endpoint` finds the now-stale capability, and it resolves to
 /// [`IpcError::InvalidCap]` rather than re-parking.
 ///
-/// The wake is done AFTER `revoke` has bumped the generations, so when the
-/// woken task re-validates it genuinely sees the capability as gone. Because
-/// the marked set is collected (via `for_each_in_subtree`) before `revoke`
-/// clears the slots, the endpoint objects are still reachable to wake.
+/// Every capability in a subtree names the object the root names (a
+/// derivation keeps the object, the `derivation_keeps_the_object` proof), so
+/// that one object is acted on, after the revoke has bumped the generations:
+/// a woken task re-validating its capability genuinely sees it gone.
 pub fn revoke_and_wake(space: &mut KernelCapSpace, cap_ref: CapRef) -> usize {
-    // mark phase: collect the objects in the revoke subtree that need action
-    // (endpoints, notifications, and replies may hold a blocked waiter to wake;
-    // frames and page tables must be unmapped) while the parent links are still
-    // intact. fixed-size scratch, no heap; MAX_BLOCKERS bounds what is acted on.
-    const MAX_BLOCKERS: usize = 2 * CSPACE_SLOTS;
-    let mut blockers: [Option<ObjectId>; MAX_BLOCKERS] = [None; MAX_BLOCKERS];
-    let mut count = 0;
-    let mut collect = |object: ObjectId| {
-        let acted_on = matches!(
-            object.kind(),
-            ObjectKind::Endpoint
-                | ObjectKind::Notification
-                | ObjectKind::Reply
-                | ObjectKind::Frame
-                | ObjectKind::PageTable
-                | ObjectKind::Tcb
-                | ObjectKind::CNode
-                | ObjectKind::VSpace
-        );
-        if acted_on && count < MAX_BLOCKERS {
-            blockers[count] = Some(object);
-            count += 1;
-        }
+    let Some(object) = space.lookup(cap_ref).map(|cap| cap.object) else {
+        return 0;
     };
-
     // revoke: removes the capability entries and bumps their generations, so any
     // outstanding ref (including one a blocked future holds) is now stale. a
     // registered space revokes across every registered space, so copies in other
     // threads' CNodes go too; an unregistered one (id 0) stays local.
     let is_local = space.id() == SpaceId(0);
     let removed = if is_local {
-        space.for_each_in_subtree(cap_ref, |_r, cap| collect(cap.object));
         space.revoke(cap_ref)
     } else {
         let root = CapLink { space: space.id(), cap: cap_ref };
         // SAFETY: single-CPU with interrupts disabled on every revoke path, and
         // `space` is not used again below, so the registry's references are the
         // only live ones into the registered spaces.
-        unsafe {
-            with_registered_spaces(|spaces| {
-                for_each_descendant_across(spaces, root, |_link, cap| collect(cap.object));
-                revoke_across(spaces, root)
-            })
-        }
+        unsafe { with_registered_spaces(|spaces| revoke_across(spaces, root)) }
     };
     // an unregistered space is not in the registry, so it is searched on its own
     // for capabilities that survived the revoke.
     let local = if is_local { Some(&*space) } else { None };
+    capability_gone(object, local, true);
+    // a thread, CNode or VSpace that went can leave CNodes nothing reaches. only
+    // a registered space's revoke collects them: an unregistered space can name
+    // a CNode the registry does not see.
+    if !is_local && matches!(object.kind(), ObjectKind::Tcb | ObjectKind::CNode | ObjectKind::VSpace) {
+        // SAFETY: single-CPU revoke path, and `space` is not used again.
+        unsafe { collect_cnodes() };
+    }
+    removed
+}
 
+/// Acts on `object` once capabilities to it are gone, `revoked` by a revoke or
+/// dropped with a released `CNode` (see [`collect_cnodes`]).
+///
+/// A revoke always wakes what waits on the object, and takes its mappings and
+/// a reply's caller with it; a drop leaves an object another capability still
+/// names as it is. Once no capability to the object is left anywhere (`local`
+/// is an unregistered space to search as well), the blocked waits and the
+/// threads that depend on it end.
+fn capability_gone(object: ObjectId, local: Option<&KernelCapSpace>, revoked: bool) {
+    let acted_on = matches!(
+        object.kind(),
+        ObjectKind::Endpoint
+            | ObjectKind::Notification
+            | ObjectKind::Reply
+            | ObjectKind::Frame
+            | ObjectKind::PageTable
+            | ObjectKind::Tcb
+            | ObjectKind::CNode
+            | ObjectKind::VSpace
+    );
+    if !acted_on {
+        return;
+    }
+    // SAFETY: single-CPU revoke path; the spaces are only read.
+    let named = unsafe { still_named(object, local) };
+    if named && !revoked {
+        return;
+    }
     // wake phase: take and fire each parked waiter, AFTER releasing the object
     // lock (the wake transport is lock-free, but keep the wake off the locked
     // path as the cap_send/cap_recv primitives do). a woken future re-polls,
     // sees the stale cap, and returns InvalidCap.
-    // index, not into_iter: moving the array costs whole frames in debug builds
-    for slot in &blockers[..count] {
-        let Some(obj) = *slot else { continue };
-        match obj.kind() {
-            ObjectKind::Endpoint => {
-                // SAFETY: obj.kind == Endpoint (checked in the mark phase), the
-                // object outlives the kernel (static untyped region), single-CPU
-                // interrupts-disabled context so no aliasing live &mut exists.
-                let endpoint = unsafe { obj.as_endpoint() };
-                let (send_waiter, recv_waiter) = {
-                    let mut inner = endpoint.inner.lock();
-                    // clear_parked clears the model's parked flags and hands back
-                    // the matching wakers, keeping the invariant intact on revoke.
-                    inner.clear_parked()
-                };
-                if let Some(waker) = send_waiter {
-                    waker.wake();
-                }
-                if let Some(waker) = recv_waiter {
-                    waker.wake();
-                }
-                // threads parked in blocking calls hold no capability to find
-                // stale: once none is left anywhere, their waits end here.
-                // SAFETY: single-CPU revoke path; the spaces are only read.
-                if !unsafe { still_named(obj, local) } {
-                    crate::syscall::cancel_waits_on(obj.phys_addr());
-                }
+    match object.kind() {
+        ObjectKind::Endpoint => {
+            // SAFETY: object.kind == Endpoint (matched), the object outlives the
+            // kernel (static untyped region), single-CPU interrupts-disabled
+            // context so no aliasing live &mut exists.
+            let endpoint = unsafe { object.as_endpoint() };
+            let (send_waiter, recv_waiter) = {
+                let mut inner = endpoint.inner.lock();
+                // clear_parked clears the model's parked flags and hands back
+                // the matching wakers, keeping the invariant intact on revoke.
+                inner.clear_parked()
+            };
+            if let Some(waker) = send_waiter {
+                waker.wake();
             }
-            ObjectKind::Notification => {
-                // SAFETY: obj.kind == Notification (checked in the mark phase),
-                // the object outlives the kernel, single-CPU interrupts-disabled
-                // context so no aliasing live &mut exists.
-                let notification = unsafe { obj.as_notification() };
-                let waiter = notification.inner.lock().clear_parked();
-                if let Some(waker) = waiter {
-                    waker.wake();
-                }
-                // as for an endpoint: threads blocked in wait end with it.
-                // SAFETY: single-CPU revoke path; the spaces are only read.
-                if !unsafe { still_named(obj, local) } {
-                    crate::syscall::cancel_waits_on(obj.phys_addr());
-                }
+            if let Some(waker) = recv_waiter {
+                waker.wake();
             }
-            ObjectKind::Reply => {
-                // a caller blocked on a revoked reply could never be answered:
-                // fail its call instead of leaving it parked forever.
-                let caller = reply_object(obj).and_then(|r| r.inner.lock().cancel());
-                if let Some(tid) = caller.and_then(crate::sched::thread_of) {
-                    crate::syscall::abort_call(tid);
-                }
+            // threads parked in blocking calls hold no capability to find
+            // stale: once none is left anywhere, their waits end here.
+            if !named {
+                crate::syscall::cancel_waits_on(object.phys_addr());
             }
-            ObjectKind::Frame => {
-                // a thread must not keep using a buffer it no longer has the
-                // capability for: unregister it everywhere.
-                crate::syscall::forget_ipc_buffer(obj.phys_addr());
-                // and the frame must stop being reachable through its mapping.
-                let _ = crate::mapping::unmap_object(obj.phys_addr());
-            }
-            ObjectKind::PageTable => {
-                // unmap the table and everything mapped beneath it.
-                let _ = crate::mapping::unmap_object(obj.phys_addr());
-            }
-            // a thread stops for good once its TCB, or the CNode or VSpace it
-            // runs in, has no capability left anywhere; revoking only a copy
-            // leaves it running.
-            ObjectKind::Tcb | ObjectKind::CNode | ObjectKind::VSpace
-                // SAFETY: single-CPU revoke path; the spaces are only read.
-                if !unsafe { still_named(obj, local) } =>
-            {
-                crate::syscall::retire_threads(|tcb| runs_on(tcb, obj));
-            }
-            // only the kinds matched above are collected in the mark phase.
-            _ => {}
         }
+        ObjectKind::Notification => {
+            // SAFETY: object.kind == Notification (matched), the object outlives
+            // the kernel, single-CPU interrupts-disabled context so no aliasing
+            // live &mut exists.
+            let notification = unsafe { object.as_notification() };
+            let waiter = notification.inner.lock().clear_parked();
+            if let Some(waker) = waiter {
+                waker.wake();
+            }
+            // as for an endpoint: threads blocked in wait end with it.
+            if !named {
+                crate::syscall::cancel_waits_on(object.phys_addr());
+            }
+        }
+        ObjectKind::Reply => {
+            // a caller blocked on a revoked reply could never be answered:
+            // fail its call instead of leaving it parked forever.
+            let caller = reply_object(object).and_then(|r| r.inner.lock().cancel());
+            if let Some(tid) = caller.and_then(crate::sched::thread_of) {
+                crate::syscall::abort_call(tid);
+            }
+        }
+        ObjectKind::Frame => {
+            // a thread must not keep using a buffer it no longer has the
+            // capability for: unregister it everywhere.
+            crate::syscall::forget_ipc_buffer(object.phys_addr());
+            // and the frame must stop being reachable through its mapping.
+            let _ = crate::mapping::unmap_object(object.phys_addr());
+        }
+        ObjectKind::PageTable => {
+            // unmap the table and everything mapped beneath it.
+            let _ = crate::mapping::unmap_object(object.phys_addr());
+        }
+        // a thread stops for good once its TCB, or the CNode or VSpace it runs
+        // in, has no capability left anywhere; revoking only a copy leaves it
+        // running.
+        ObjectKind::Tcb | ObjectKind::CNode | ObjectKind::VSpace if !named => {
+            crate::syscall::retire_threads(|tcb| runs_on(tcb, object));
+        }
+        _ => {}
     }
-
-    removed
 }
 
 // --------------------------------------------------------------------------

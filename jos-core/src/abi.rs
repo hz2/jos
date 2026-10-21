@@ -395,7 +395,8 @@ pub enum RetypeSyscallError {
     NotUntyped = 2,
     /// `type_word` had an unknown discriminant or malformed reserved bits.
     BadArgs = 3,
-    /// The untyped region has no room for the requested object.
+    /// The untyped region has no room for the requested object, or for a
+    /// `CNode`, the kernel cannot register another capability space.
     NoRoom = 4,
     /// The destination slot already holds a live capability.
     DestOccupied = 5,

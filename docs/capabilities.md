@@ -98,17 +98,49 @@ Every `CapRef` minted before that removal becomes permanently stale: slot
 reuse does not let old tokens reach the new occupant. This is O(1) revocation
 -- no CDT walk, no broadcast to holders.
 
-`CapSpace::revoke` extends this to subtrees: it first marks the full
-derivation subtree (following `parent` links while they are still live), then
-sweeps them out. The mark-before-sweep order is required because removing a
-node destroys its `parent` link. The scan is O(N) per tree level, which is
-acceptable for the small N a capability space uses and keeps the logic
-verifiable.
+`CapSpace::revoke` extends this to subtrees. It removes the deepest
+capabilities of the subtree first, one depth at a time: none of them has a
+child left, and the links above them are not that deep, so every `parent` link
+the rest of the subtree needs to prove its membership stays intact until its
+own turn. No scratch storage is needed, which matters on a 12 KiB syscall
+stack, and the cost is O(N * depth^2) for a subtree `depth` deep.
 
 `CapSpace::ref_at(slot)` reconstructs a live `CapRef` from a plain slot index
 against the current generation. This is how the syscall boundary works: user
 space presents a plain integer slot index, and the kernel resolves it per-call.
 A revoked-and-reused slot yields a ref for its new occupant, never a stale one.
+
+## The space registry, and CNodes nothing reaches
+
+Every `CNode` (and every space the kernel itself owns) is registered, so a
+derivation link can point into it and a revoke can reach it. A space's
+`SpaceId` names its registry entry and that entry's generation, so a link
+resolves in constant time, and once a space is released and its entry reused,
+a link left behind to the old space reaches nothing. `revoke_across` works on
+the whole registry, lent as a slice indexed by entry, at O(entries * N *
+depth^2) per revoke.
+
+A `CNode` is released once nothing can reach it (`cap::collect_cnodes`). The
+roots are the kernel's own spaces and the space of every registered thread; a
+reached space reaches the `CNode`s its capabilities name, and the spaces of
+the threads they name that are not retired. Reachability, not a count of
+capabilities, decides: two `CNode`s that are each other's only name are
+collected too. Releasing a `CNode`:
+
+1. relinks every capability elsewhere whose parent is in it to its nearest
+   ancestor outside it, or makes it an original (`relink_out_of`, the way an
+   `seL4` delete splices a capability out of the derivation tree), so revoking
+   that ancestor still reaches it;
+2. frees its entry, bumping the entry's generation;
+3. drops each of its capabilities: an object no capability names any more is
+   handled as a revoke would handle it (waits end, threads in it retire,
+   frames are unmapped), one still named elsewhere is left alone.
+
+A revoke of a thread, `CNode`, or `VSpace` from a registered space collects
+afterwards, and a `CNode` retype collects first when the registry is full. If
+the registry is still full, the retype fails with `NoRoom` and carves
+nothing: an unregistered `CNode` would be out of revocation's reach. The memory
+of a released `CNode` is not reused yet (MEM-2).
 
 ## The jos-core / kernel split and why it exists
 
@@ -117,7 +149,8 @@ jos separates its capability logic into two crates:
 - `jos-core` -- pure, `no_std`, zero hardware dependency. Contains
   `cap_rights`, `cap_table`, `cap_space`, `untyped`, `placement`, `rng`,
   `trace`, `ring_buffer`, `run_queue`, `pte`, and related modules. No `asm!`,
-  no MMIO, no raw physical pointers. 173 tests, 47 Kani harnesses, Miri-clean.
+  no MMIO, no raw physical pointers. 348 unit tests, 123 Kani harnesses,
+  Miri-clean.
 
 - `kernel` -- the binary that actually runs. `kernel/src/cap.rs` provides
   `ObjectId`, `UntypedRegion`, `Endpoint`, `PageTable`, `Tcb`, `KernelCNode`,
@@ -170,9 +203,11 @@ The async wrappers (`send`/`recv` futures) park the task's `Waker` inside the
 endpoint on `Full`/`Empty` and yield `Poll::Pending`. They re-validate the
 capability on every poll via `resolve_endpoint`, so revoking a capability while
 a task is blocked on it causes the next poll to return `IpcError::InvalidCap`
-rather than hang. `revoke_and_wake` closes the gap for already-parked futures:
-it collects endpoint objects in the revoke subtree before removing capabilities,
-then fires their wakers after the generations are bumped.
+rather than hang. `revoke_and_wake` closes the gap for already-parked futures.
+Every capability in a subtree names the object its root names (a derivation
+keeps the object, the `derivation_keeps_the_object` proof), so it reads that
+one object before removing anything, then fires its wakers after the
+generations are bumped.
 
 ## Badges
 
@@ -226,8 +261,10 @@ jos intentionally departs from seL4 in three places:
   live in the capabilities themselves rather than a separate structure, and
   removing one capability is O(1): its slot's generation bumps, so every
   outstanding ref to it goes stale at once. A subtree revoke removes the
-  subtree leaves first across every registered space; userspace asks for it
-  with the `Revoke` syscall.
+  deepest capabilities first across every registered space; userspace asks
+  for it with the `Revoke` syscall. A `CNode` is released when nothing can
+  reach it, where seL4 deletes one with its last capability, so a cycle of
+  `CNode`s goes too.
   A thread stops for good when its TCB, or the CNode or VSpace it runs in,
   loses its last capability: it leaves the run queue and any IPC wait. Because
   a TCB does not hold capabilities to its own CNode and VSpace (seL4 TCBs do),

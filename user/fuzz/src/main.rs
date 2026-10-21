@@ -1,17 +1,20 @@
 //! Throws seeded random syscalls at the kernel and checks every answer.
 //!
 //! The root task starts this from the `fuzz` boot module as a process that
-//! holds almost nothing: its console, its parent, its fault endpoint, and an
-//! untyped region at [`UNTYPED`] to retype objects from, so whatever it does
-//! can only reach what it made itself. Its argument is the seed. Each step
-//! picks a syscall by a swarm mix (per-seed weights, so some seeds hammer a
-//! few calls and leave others out) and arguments biased toward the values
-//! that reach deep paths: small slot numbers, page-aligned user addresses,
-//! and the edges of the range.
+//! holds almost nothing: its console, its parent, its fault endpoint, an
+//! untyped region at [`UNTYPED`] to retype objects from, and at [`MACHINE`] a
+//! machine capability that can only ask the kernel to check itself, so
+//! whatever it does can only reach what it made itself. Its argument is the
+//! seed. Each step picks a syscall by a swarm mix (per-seed weights, so some
+//! seeds hammer a few calls and leave others out) and arguments biased toward
+//! the values that reach deep paths: small slot numbers, page-aligned user
+//! addresses, and the edges of the range.
 //!
-//! Two oracles: the kernel must survive every call, and every answer must be
-//! one the ABI documents for that call. It exits with the number of answers
-//! that were not, after printing each as a KTAP diagnostic.
+//! Three oracles: the kernel must survive every call, every answer must be one
+//! the ABI documents for that call, and every 250 steps the kernel must still
+//! hold its own invariants (`selfcheck`). It exits with the number of answers
+//! that were not documented, plus one if an invariant broke, after printing
+//! each as a KTAP diagnostic.
 //!
 //! With [`DIFFERENTIAL`] set in the argument it runs a differential storm
 //! instead: only the calls `jos_core::spec` answers, each made on the kernel
@@ -23,7 +26,7 @@
 
 use libjos::abi::{
     CNODE_SIZE_BITS, ENOSYS, IPC_ERR_FLAG, InvokeError, IpcSyscallError, MintSyscallError, ProcessStart,
-    RetypeSyscallError, Syscall, encode_object_type, layout, pack_cnode_copy,
+    RetypeSyscallError, Syscall, encode_object_type, invariant, layout, pack_cnode_copy,
 };
 use libjos::jos_core::untyped::ObjectType;
 use libjos::jos_core::cap_rights::Rights;
@@ -39,6 +42,13 @@ pub const STEPS: u64 = 2000;
 
 /// The slot the parent puts an untyped region in.
 pub const UNTYPED: u64 = 4;
+
+/// The slot the parent puts a read-only copy of its Machine capability in, for
+/// [`Syscall::SelfCheck`]. No storm names it.
+pub const MACHINE: u64 = 5;
+
+/// How many steps a storm makes between two checks of the kernel's invariants.
+const SELFCHECK_EVERY: u64 = 250;
 
 /// The number of syscalls the mix picks among, and one past the last.
 const SYSCALLS: usize = Syscall::ALL.len() + 1;
@@ -93,6 +103,23 @@ fn answer(nr: u64) -> Option<Answer> {
         | Syscall::SelfCheck => Answer::Flagged,
         _ => Answer::Status,
     })
+}
+
+/// Asks the kernel to check its own invariants after `step` of `storm`, and
+/// names each that does not hold; returns whether all do. Without the machine
+/// capability there is nothing to ask, and nothing is reported.
+fn kernel_holds(storm: &str, step: u64) -> bool {
+    match libjos::sys::selfcheck(MACHINE) {
+        Ok(0) | Err(_) => true,
+        Ok(failed) => {
+            for (bit, name) in invariant::ALL {
+                if failed & bit != 0 {
+                    println!("# {}: step {} broke a kernel invariant: {}", storm, step, name);
+                }
+            }
+            false
+        }
+    }
 }
 
 /// Returns whether `rax` is an answer of kind `answer`.
@@ -261,7 +288,7 @@ const SPEC_CALLS: [Syscall; 9] = [
 /// Picks a slot for the differential storm: mostly one the spec says is
 /// live, sometimes any slot, sometimes one past the end.
 fn spec_slot(rng: &mut SimRng, spec: &Spec) -> u64 {
-    let live = (0..spec::SLOTS as u64).filter(|&s| spec.is_live(s) && !(1..=3).contains(&s));
+    let live = (0..spec::SLOTS as u64).filter(|&s| spec.is_live(s) && !(1..=3).contains(&s) && s != MACHINE);
     let count = live.clone().count() as u64;
     let slot = match rng.below(8) {
         0 => spec::SLOTS as u64 + rng.below(8),
@@ -269,8 +296,8 @@ fn spec_slot(rng: &mut SimRng, spec: &Spec) -> u64 {
         _ if count > 0 => live.clone().nth(index(rng.below(count))).unwrap_or(0),
         _ => rng.below(spec::SLOTS as u64),
     };
-    // never the three capabilities this process lives on.
-    if (1..=3).contains(&slot) { 0 } else { slot }
+    // never the capabilities this process lives on.
+    if (1..=3).contains(&slot) || slot == MACHINE { 0 } else { slot }
 }
 
 /// Picks a word to send: almost always a valid one, sometimes one with bit
@@ -317,13 +344,14 @@ fn spec_args(call: Syscall, rng: &mut SimRng, spec: &Spec) -> [u64; 3] {
 fn differential(seed: u64) -> u64 {
     let mut rng = SimRng::new(seed);
     let mix: OpMix<{ SPEC_CALLS.len() }> = OpMix::swarm(&mut rng);
-    // the space as the parent built it: three capabilities never named, then
-    // the untyped region.
+    // the space as the parent built it: three capabilities never named, the
+    // untyped region, and the machine, never named either.
     let mut spec = Spec::new();
     for slot in 1..=3 {
         spec.give(slot, Kind::Other, Rights::WRITE);
     }
     spec.give(index(UNTYPED), Kind::Untyped, Rights::ALL);
+    spec.give(index(MACHINE), Kind::Other, Rights::READ);
     let mut retyped = 0;
     for step in 0..STEPS {
         let call = SPEC_CALLS[mix.pick(&mut rng)];
@@ -353,6 +381,9 @@ fn differential(seed: u64) -> u64 {
             );
             return 1;
         }
+        if (step + 1) % SELFCHECK_EVERY == 0 && !kernel_holds("spec", step) {
+            return 1;
+        }
     }
     println!("# spec: seed {} made {} calls, retyped {} objects, every answer as the spec says", seed, STEPS, retyped);
     0
@@ -375,10 +406,10 @@ fn robustness(seed: u64) -> u64 {
             Some(call) => schema(call).map(|arg| argument(arg, &mut rng, &slots)),
             None => [hostile(&mut rng), hostile(&mut rng), hostile(&mut rng)],
         };
-        // never name the three capabilities this process lives on, and keep a
-        // run's retypes to its budget.
+        // never name the capabilities this process lives on, and keep a run's
+        // retypes to its budget.
         for arg in &mut args {
-            if (1..=3).contains(arg) {
+            if (1..=3).contains(arg) || *arg == MACHINE {
                 *arg = 0;
             }
         }
@@ -410,6 +441,9 @@ fn robustness(seed: u64) -> u64 {
             Some(Syscall::Mint) if rax & IPC_ERR_FLAG == 0 => slots.add(rax),
             Some(Syscall::Revoke) if rax & IPC_ERR_FLAG == 0 => slots.remove(args[0]),
             _ => {}
+        }
+        if (step + 1) % SELFCHECK_EVERY == 0 && !kernel_holds("fuzz", step) {
+            return undocumented + 1;
         }
     }
     println!(

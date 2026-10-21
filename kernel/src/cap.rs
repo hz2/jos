@@ -276,8 +276,10 @@ pub unsafe fn collect_cnodes() -> usize {
         let reached = unsafe { reached_spaces() };
         let mut any = false;
         for (entry, &reached) in reached.iter().enumerate() {
-            // SAFETY: per this function's contract; one flag read.
-            if !reached && unsafe { CSPACE_IS_CNODE[entry] } {
+            // only an entry that holds a space is released, so a stale flag on
+            // a free entry cannot keep the sweep going round.
+            // SAFETY: per this function's contract; one flag and pointer read.
+            if !reached && unsafe { CSPACE_IS_CNODE[entry] && !CSPACES[entry].is_null() } {
                 // SAFETY: per this function's contract, and the entry holds a
                 // CNode that nothing reaches.
                 unsafe { release_cnode(entry) };

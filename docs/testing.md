@@ -113,6 +113,11 @@ would, and expects exactly its bit. End to end, an `unmap` that cleared the
 page-table entry but kept the mapping record failed every check of the suite
 with `the kernel broke an invariant: mappings`, while every check's own
 assertions still passed.
+The fuzzer's storms ask every 250 steps too, through a read-only copy of the
+machine at slot 5: a release that left a freed registry entry still marked as a
+CNode was reported as `spec: step 249 broke a kernel invariant: registry`. That
+mutation first hung the kernel, the sweep releasing the same empty entry
+forever, so the sweep now releases only entries that hold a space.
 
 ## Background notes (blog_os era)
 
@@ -157,8 +162,9 @@ assertions still passed.
 ## The syscall fuzzer
 
 `user/fuzz` runs as a process the root task starts with nothing but its
-console, its parent and fault endpoints, and a copy of an untyped region, so
-whatever it does reaches only objects it made itself. Its argument is a seed.
+console, its parent and fault endpoints, a copy of an untyped region, and a
+machine capability that can only run `selfcheck`, so whatever it does reaches
+only objects it made itself. Its argument is a seed.
 For each of 2000 steps it picks a syscall by a swarm mix (per-seed weights,
 `jos_core::rng::OpMix::swarm`, so some seeds hammer a few calls and leave
 others out) and arguments by a schema: mostly a slot it believes holds a
@@ -171,10 +177,12 @@ calls that would legitimately end or wedge it (`exit`, `thread_exit`, the
 blocking IPC calls, moving its own IPC buffer) and keeps every wait under
 20 ms.
 
-Two oracles: the kernel must survive, and every answer must be one the ABI
+Three oracles: the kernel must survive, every answer must be one the ABI
 documents for that call (0 or an error code, a value or a flagged error code,
-`ENOSYS` for no such call). The fuzzer prints each undocumented answer as a
-KTAP diagnostic and exits with their count. `root fuzz FIRST COUNT` runs a
+`ENOSYS` for no such call), and every 250 steps the kernel must still hold its
+own invariants (`selfcheck`, so a broken one names the step that broke it).
+The fuzzer prints each undocumented answer and broken invariant as a KTAP
+diagnostic and exits with their count. `root fuzz FIRST COUNT` runs a
 sweep as one KTAP test per seed (`jig boot --args "fuzz 1 64"`,
 `scripts/check.sh fuzz`), the first-light checks run seed 1, and the shell
 has `fuzz [seed] [count]`.

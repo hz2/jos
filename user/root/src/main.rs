@@ -1183,6 +1183,10 @@ fn revoking_a_notification_ends_its_waits(_: &BootInfo) -> Result<(), &'static s
 /// The slot the fuzzer finds its untyped region in (`fuzz::UNTYPED`).
 const FUZZ_UNTYPED: u64 = 4;
 
+/// The slot the fuzzer finds its read-only machine capability in
+/// (`fuzz::MACHINE`), to check the kernel's invariants as it goes.
+const FUZZ_MACHINE: u64 = 5;
+
 /// The bit of the fuzzer's argument that picks its differential storm
 /// (`fuzz::DIFFERENTIAL`).
 const FUZZ_DIFFERENTIAL: u64 = 1 << 62;
@@ -1191,11 +1195,15 @@ const FUZZ_DIFFERENTIAL: u64 = 1 << 62;
 const FUZZ_TIMEOUT_MS: u64 = 60_000;
 
 /// Runs the `fuzz` module with `seed`, handing it a copy of the untyped
-/// region with the most room left to retype from.
+/// region with the most room left to retype from, and a copy of the machine
+/// that can check the kernel but not halt it.
 fn run_fuzz(seed: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
     let untyped = boot_info().untyped().iter().max_by_key(|u| u.size - u.used).ok_or("no untyped memory")?;
-    let grant = Grant { from: untyped.slot, to: FUZZ_UNTYPED, rights: Rights::ALL };
-    run_module_with(b"fuzz", seed, &[grant], FUZZ_TIMEOUT_MS)
+    let grants = [
+        Grant { from: untyped.slot, to: FUZZ_UNTYPED, rights: Rights::ALL },
+        Grant { from: root_slot::MACHINE, to: FUZZ_MACHINE, rights: Rights::READ },
+    ];
+    run_module_with(b"fuzz", seed, &grants, FUZZ_TIMEOUT_MS)
 }
 
 /// Runs the fuzzer twice per seed from `first`, `count` seeds in all, its
@@ -1212,7 +1220,7 @@ fn fuzz_seeds(first: u64, count: u64) -> u64 {
             let passed = match run_fuzz(arg) {
                 Ok(((0, PROCESS_BADGE), _)) => true,
                 Ok(((code, PROCESS_BADGE), _)) => {
-                    let what = if arg == seed { "undocumented answers" } else { "divergence from the spec" };
+                    let what = if arg == seed { "undocumented answers or broken invariants" } else { "divergence from the spec" };
                     println!("# {}_{}: {} {}", name, seed, code, what);
                     false
                 }
@@ -1241,7 +1249,7 @@ fn fuzz_seeds(first: u64, count: u64) -> u64 {
 fn the_kernel_answers_a_syscall_storm(_: &BootInfo) -> Result<(), &'static str> {
     let ((undocumented, badge), _) = run_fuzz(1)?;
     ensure(badge == PROCESS_BADGE, "the fuzzer faulted")?;
-    ensure(undocumented == 0, "the kernel gave answers the ABI does not document")
+    ensure(undocumented == 0, "undocumented answers, or a broken kernel invariant")
 }
 
 /// Seed 1 of the fuzzer's differential storm: thousands of calls made on the

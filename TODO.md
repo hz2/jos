@@ -148,7 +148,7 @@ Check items off in the same commit that finishes them.
       so an overflow faults instead of overwriting the TCB header
 - [ ] guard pages for the test harness' static kernel stacks (`KSTACKS` in
       `kernel/tests/common/threads.rs`), which are not TCB objects
-- [ ] NMI / #MC on IST stacks
+- [x] NMI / #MC on IST stacks; ring 3 cannot raise an NMI
 - [ ] give the blocking-IPC tables (`BLOCKED_SENDS` / `BLOCKED_RECVS`) a pure
       model in jos-core so the direct-handoff path is covered by Kani like the
       async path is

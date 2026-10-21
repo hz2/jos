@@ -60,7 +60,7 @@ half, look at the other.
 | the root task: building and starting it | `kernel/src/rootserver.rs`, called from `kernel/src/main.rs` |
 | SMEP, SMAP, NX | `kernel/src/arch/x86_64/mod.rs` |
 | GDT, TSS, IST stacks | `kernel/src/gdt.rs` |
-| IDT, PIC, timer and keyboard IRQs | `kernel/src/interrupts.rs` |
+| IDT, PIC, timer, keyboard, and COM1 IRQs; the NMI and machine check | `kernel/src/interrupts.rs` |
 | exception stubs, fault delivery | `kernel/src/exceptions.rs`, `kernel/src/syscall/ipc.rs` (`deliver_fault`) |
 | syscall numbers, error codes, boot information, user layout (the ABI) | `jos-core/src/abi.rs` |
 | `syscall` entry stub, dispatcher | `kernel/src/syscall/mod.rs` |

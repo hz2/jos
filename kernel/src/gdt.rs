@@ -42,6 +42,31 @@ use x86_64::structures::tss::TaskStateSegment;
 /// IST index used for the double-fault handler's dedicated stack.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
+/// IST index of the non-maskable interrupt's stack. An NMI can arrive while
+/// the syscall exit path already has the user's stack pointer loaded, a few
+/// instructions before `sysretq`; with no stack switch the cpu would push its
+/// frame onto the user's stack.
+pub const NMI_IST_INDEX: u16 = 1;
+
+/// IST index of the machine check's stack, for the same reason.
+pub const MACHINE_CHECK_IST_INDEX: u16 = 2;
+
+/// Size of the NMI and machine-check stacks: their handlers do almost nothing.
+const SMALL_STACK_SIZE: usize = 4096 * 2;
+
+/// The NMI's stack.
+static mut NMI_STACK: [u8; SMALL_STACK_SIZE] = [0; SMALL_STACK_SIZE];
+
+/// The machine check's stack.
+static mut MACHINE_CHECK_STACK: [u8; SMALL_STACK_SIZE] = [0; SMALL_STACK_SIZE];
+
+/// Returns the range `[bottom, top)` of the NMI's stack, for tests.
+#[must_use]
+pub fn nmi_stack_range() -> (u64, u64) {
+    let bottom = VirtAddr::from_ptr(core::ptr::addr_of!(NMI_STACK)).as_u64();
+    (bottom, bottom + SMALL_STACK_SIZE as u64)
+}
+
 // size of the double-fault stack. 5 pages (20 KiB) is plenty for the handler;
 // it never needs to be large because the handler does minimal work.
 const STACK_SIZE: usize = 4096 * 5;
@@ -137,6 +162,10 @@ pub fn init_gdt() {
             // ist entry points at the TOP of the stack (it grows downward).
             stack_start + STACK_SIZE as u64
         };
+        tss.interrupt_stack_table[NMI_IST_INDEX as usize] =
+            VirtAddr::from_ptr(core::ptr::addr_of!(NMI_STACK)) + SMALL_STACK_SIZE as u64;
+        tss.interrupt_stack_table[MACHINE_CHECK_IST_INDEX as usize] =
+            VirtAddr::from_ptr(core::ptr::addr_of!(MACHINE_CHECK_STACK)) + SMALL_STACK_SIZE as u64;
         // rsp0: the stack the cpu loads on a ring-3 -> ring-0 transition. points
         // at the top of PRIVILEGE_STACK (grows downward), same as the IST entry.
         tss.privilege_stack_table[0] = {

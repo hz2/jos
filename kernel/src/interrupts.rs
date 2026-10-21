@@ -31,7 +31,7 @@
 //!
 //! The IDT is also the future syscall/IPC trap path of the capability kernel.
 
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU64, AtomicUsize};
 
 use pic8259::ChainedPics;
 use spin::Mutex;
@@ -108,6 +108,15 @@ pub fn init_idt() {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+        // the NMI and the machine check get stacks of their own too: either can
+        // arrive between the syscall exit restoring the user stack pointer and
+        // sysretq, where the current stack is the user's.
+        idt.non_maskable_interrupt
+            .set_handler_fn(nmi_handler)
+            .set_stack_index(crate::gdt::NMI_IST_INDEX);
+        idt.machine_check
+            .set_handler_fn(machine_check_handler)
+            .set_stack_index(crate::gdt::MACHINE_CHECK_IST_INDEX);
         // hardware interrupt handlers (post 07).
         // timer uses the naked preemption stub (sched module) so it can save
         // all GPRs and context-switch between ring-3 threads.
@@ -202,6 +211,38 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
     }
     // SAFETY: exit swap; restores user GS before the implicit iretq.
     unsafe { conditional_swapgs(cs); }
+}
+
+/// How many non-maskable interrupts have arrived.
+pub static NMI_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// The stack pointer the last NMI handler ran on, for tests to check that it
+/// was the NMI's own stack.
+pub static NMI_LAST_RSP: AtomicU64 = AtomicU64::new(0);
+
+/// Non-maskable interrupt (vector 2), on its own IST stack. An NMI can land
+/// anywhere: mid-print with the serial lock held, or in the syscall exit path
+/// with the user's GS already loaded. So the handler takes no lock, touches no
+/// GS-relative state, and only counts the interrupt and notes its stack.
+extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
+    let rsp: u64;
+    // SAFETY: reads the stack pointer and nothing else.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    NMI_LAST_RSP.store(rsp, core::sync::atomic::Ordering::Relaxed);
+    NMI_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Machine check (vector 18), on its own IST stack: the hardware reports an
+/// error it could not correct, so nothing the kernel holds can be trusted.
+/// The handler reports failure to a test harness and stops the cpu, taking
+/// no lock that the interrupted code might hold.
+extern "x86-interrupt" fn machine_check_handler(_stack_frame: InterruptStackFrame) -> ! {
+    if let Some(mut serial) = crate::serial::SERIAL1.try_lock() {
+        use core::fmt::Write;
+        let _ = serial.write_str("jos: machine check\n");
+    }
+    crate::exit_qemu(crate::QemuExitCode::Failed);
+    crate::hlt_loop()
 }
 
 /// COM1 (IRQ4, vector 36): the UART received bytes. The handler moves them

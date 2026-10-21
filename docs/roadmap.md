@@ -99,7 +99,7 @@ speak IPC.
 - [ ] save/restore FPU/SSE state (eager FXSAVE first, XSAVE later)
 - [ ] ACPI/MADT parsing (`acpi` crate); LAPIC timer with TSC-deadline; IOAPIC
       routing; retire the 8259 PIC and PIT
-- [ ] NMI and #MC on their own IST stacks (closes the user-stack window between
+- [x] NMI and #MC on their own IST stacks (closes the user-stack window between
       `pop rsp` and `sysretq` in `syscall_entry`)
 - [ ] `clac` on every interrupt entry once SMAP windows can span preemption
 - [ ] keep `KernelClock` as the seam so the clock proofs hold

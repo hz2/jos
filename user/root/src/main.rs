@@ -38,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 33] = [
+const CHECKS: [(&str, Check); 34] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -72,6 +72,7 @@ const CHECKS: [(&str, Check); 33] = [
     ("the_kernel_answers_a_syscall_storm", the_kernel_answers_a_syscall_storm),
     ("the_kernel_answers_as_its_spec_does", the_kernel_answers_as_its_spec_does),
     ("the_ambient_exit_is_gone", the_ambient_exit_is_gone),
+    ("userspace_cannot_raise_an_nmi", userspace_cannot_raise_an_nmi),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -1194,4 +1195,28 @@ fn the_ambient_exit_is_gone(_: &BootInfo) -> Result<(), &'static str> {
     // ending it as a pass.
     let (rax, _) = libjos::syscall::syscall1(libjos::abi::Syscall::Exit as u64, 0x11);
     ensure(rax == libjos::abi::ENOSYS, "the ambient exit probe still answers")
+}
+
+/// The vector of a general protection fault.
+const GENERAL_PROTECTION: u64 = 13;
+
+/// Executes `int 2`, then reports on field 0, which it should never reach.
+extern "C" fn raise_nmi(arg: u64) {
+    // SAFETY: from ring 3 the NMI gate refuses the instruction with a general
+    // protection fault, which goes to this thread's fault handler; nothing
+    // else is touched.
+    unsafe { core::arch::asm!("int 2") };
+    let _ = sys::send_blocking(field(arg, 0), 1);
+}
+
+/// Ring 3 cannot raise an NMI: the gate admits only the kernel, so `int 2`
+/// faults with a general protection error that names the gate.
+fn userspace_cannot_raise_an_nmi(_: &BootInfo) -> Result<(), &'static str> {
+    let report = object(ObjectType::Endpoint)?;
+    let caught = Caught::fault_of(raise_nmi, report)?;
+    let words = caught.words;
+    caught.clean_up(&[report])?;
+    ensure(words[0] == GENERAL_PROTECTION, "not a general protection fault")?;
+    // bit 1 says the error names an interrupt gate; the index above it is the vector.
+    ensure(words[3] == (2 << 3) | 0b10, "the error does not name the NMI gate")
 }

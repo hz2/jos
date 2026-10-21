@@ -320,8 +320,8 @@ along a derivation chain, which is proved globally (CAP-1).
 
 - **MSRs**: LSTAR (syscall entry), STAR (segment selectors), SFMASK (RFLAGS bits
   cleared on syscall), KernelGsBase (per-CPU pointer), EFER (SCE, NXE).
-- **TSS**: holds `rsp0` for ring-3 interrupts and the IST stacks (double fault
-  today; NMI and #MC next).
+- **TSS**: holds `rsp0` for ring-3 interrupts and the IST stacks: the double
+  fault, the NMI, and the machine check each run on one of their own.
 - **APIC**: per-core local APIC (timer, IPIs) plus the IOAPIC for device IRQs.
   jos still uses the 8259 PIC and PIT; moving to the APIC comes with SMP.
 - **RFLAGS**: IF gates maskable interrupts (ring 3 runs with IF=1 so the timer

@@ -15,7 +15,19 @@ only when the exception came from ring 3 (the saved CS says), saves all 15
 general registers as an `ExceptionFrame`, clears DF, and calls
 `exception_handler`. Handled vectors: 0 to 7 (less NMI), 10 to 14, 16, 17, 19,
 20, 21. The double fault keeps its own handler on its IST stack; NMI and
-machine checks are not a thread's doing.
+machine checks are not a thread's doing, and get IST stacks of their own too.
+
+The NMI and the machine check need their own stacks because they are not
+maskable: either can arrive between the syscall exit path loading the user's
+stack pointer and its `sysretq`, where a frame pushed on the current stack
+would land on the user's. The NMI handler takes no lock and touches no
+GS-relative state (it may have interrupted a print, or the exit path after its
+`swapgs`): it counts the interrupt and returns. A machine check means the
+hardware lost data it could not correct, so its handler reports failure and
+stops. The NMI gate admits only ring 0, so `int 2` from a thread is a general
+protection fault naming the gate (`userspace_cannot_raise_an_nmi`), and
+`kernel/tests/nmi_stack.rs` checks that the handler runs on its stack, which it
+does not without the IST entry.
 
 ```
 cpu pushes ss, rsp, rflags, cs, rip [, error]

@@ -74,8 +74,12 @@ Check items off in the same commit that finishes them.
       mixes, schema-guided and hostile arguments, every answer checked against
       the documented result set; `check.sh fuzz` in ci. It found the bit-63
       ambiguity, now refused (`BadWord`, `BadBadge`)
-- [ ] an executable spec of the syscall API in jos-core, run against the live
-      kernel from ring 3 (differential fuzzing) and against the core on the host
+- [x] an executable spec (`jos_core::spec`) of one thread's non-blocking calls
+      (slots, rights, badges, mint and revoke, retype, endpoints,
+      notifications), run against the live kernel by the fuzzer's
+      differential storm; it found a `BadAlign` that should be `BadType`
+- [ ] grow the spec: other capability spaces (`cnode_copy`), mapping, threads,
+      and blocking IPC, so the differential storm covers them too
 - [x] console input: COM1 interrupts (IRQ4) fill a kernel buffer that
       `console_read` (27) takes from, waiting with an optional deadline; a
       verified line editor (LINE-1) in jos-core

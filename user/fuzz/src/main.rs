@@ -12,6 +12,11 @@
 //! Two oracles: the kernel must survive every call, and every answer must be
 //! one the ABI documents for that call. It exits with the number of answers
 //! that were not, after printing each as a KTAP diagnostic.
+//!
+//! With [`DIFFERENTIAL`] set in the argument it runs a differential storm
+//! instead: only the calls `jos_core::spec` answers, each made on the kernel
+//! and on the spec, and it exits with 1 at the first answer that differs,
+//! after printing both.
 #![no_std]
 #![no_main]
 #![warn(clippy::pedantic)]
@@ -21,7 +26,9 @@ use libjos::abi::{
     RetypeSyscallError, Syscall, encode_object_type, layout, pack_cnode_copy,
 };
 use libjos::jos_core::untyped::ObjectType;
+use libjos::jos_core::cap_rights::Rights;
 use libjos::jos_core::rng::{KernelRng, OpMix, SimRng};
+use libjos::jos_core::spec::{self, Kind, Spec};
 use libjos::println;
 use libjos::syscall::syscall3;
 
@@ -219,9 +226,136 @@ fn argument(arg: Arg, rng: &mut SimRng, slots: &Slots) -> u64 {
     }
 }
 
-/// Runs the storm and returns how many answers were undocumented.
+/// Runs the storm the argument asks for: the differential one when it has
+/// [`DIFFERENTIAL`] set, the robustness one otherwise.
 fn main(start: &ProcessStart) -> u64 {
-    let mut rng = SimRng::new(start.arg);
+    if start.arg & DIFFERENTIAL != 0 {
+        differential(start.arg & !DIFFERENTIAL)
+    } else {
+        robustness(start.arg)
+    }
+}
+
+/// The bit of the argument that picks the differential storm; the rest is
+/// the seed.
+pub const DIFFERENTIAL: u64 = 1 << 62;
+
+/// The calls the differential storm makes: the ones the spec answers.
+const SPEC_CALLS: [Syscall; 9] = [
+    Syscall::Add,
+    Syscall::Retype,
+    Syscall::Mint,
+    Syscall::Revoke,
+    Syscall::IpcSend,
+    Syscall::IpcRecv,
+    Syscall::Invoke,
+    Syscall::Signal,
+    Syscall::Wait,
+];
+
+/// Picks a slot for the differential storm: mostly one the spec says is
+/// live, sometimes any slot, sometimes one past the end.
+fn spec_slot(rng: &mut SimRng, spec: &Spec) -> u64 {
+    let live = (0..spec::SLOTS as u64).filter(|&s| spec.is_live(s) && !(1..=3).contains(&s));
+    let count = live.clone().count() as u64;
+    let slot = match rng.below(8) {
+        0 => spec::SLOTS as u64 + rng.below(8),
+        1 | 2 => rng.below(spec::SLOTS as u64),
+        _ if count > 0 => live.clone().nth(index(rng.below(count))).unwrap_or(0),
+        _ => rng.below(spec::SLOTS as u64),
+    };
+    // never the three capabilities this process lives on.
+    if (1..=3).contains(&slot) { 0 } else { slot }
+}
+
+/// Picks a word to send: almost always a valid one, sometimes one with bit
+/// 63 set, which every send must refuse.
+fn spec_word(rng: &mut SimRng) -> u64 {
+    match rng.below(16) {
+        0 => IPC_ERR_FLAG | rng.next_u64(),
+        1 => 0,
+        _ => rng.next_u64() & !IPC_ERR_FLAG,
+    }
+}
+
+/// Picks the arguments of `call` for the differential storm.
+fn spec_args(call: Syscall, rng: &mut SimRng, spec: &Spec) -> [u64; 3] {
+    let slot = spec_slot(rng, spec);
+    match call {
+        Syscall::Add => [rng.next_u64(), rng.next_u64(), 0],
+        Syscall::Retype => {
+            let type_word = match rng.below(10) {
+                0 => rng.next_u64(),
+                1 => encode_object_type(ObjectType::CNode { size_bits: u8::try_from(rng.below(32)).unwrap_or(0) }),
+                _ => encode_object_type(TYPES[index(rng.below(TYPES.len() as u64))]),
+            };
+            let untyped = if rng.below(4) == 0 { slot } else { UNTYPED };
+            [untyped, type_word, spec_slot(rng, spec)]
+        }
+        Syscall::Mint => {
+            let badge = match rng.below(8) {
+                0..=3 => 0,
+                4 => IPC_ERR_FLAG | rng.next_u64(),
+                _ => rng.below(1 << 16),
+            };
+            [slot, rng.below(256), badge]
+        }
+        Syscall::IpcSend => [slot, spec_word(rng), 0],
+        Syscall::Invoke => [slot, rng.below(3), spec_word(rng)],
+        // a slot alone: revoke, recv, signal, and wait, whose 0 ms make it a poll.
+        _ => [slot, 0, 0],
+    }
+}
+
+/// Runs the same calls on the kernel and on the spec, and returns 1 at the
+/// first answer that differs, after printing it, or 0 if none did.
+fn differential(seed: u64) -> u64 {
+    let mut rng = SimRng::new(seed);
+    let mix: OpMix<{ SPEC_CALLS.len() }> = OpMix::swarm(&mut rng);
+    // the space as the parent built it: three capabilities never named, then
+    // the untyped region.
+    let mut spec = Spec::new();
+    for slot in 1..=3 {
+        spec.give(slot, Kind::Other, Rights::WRITE);
+    }
+    spec.give(index(UNTYPED), Kind::Untyped, Rights::ALL);
+    let mut retyped = 0;
+    for step in 0..STEPS {
+        let call = SPEC_CALLS[mix.pick(&mut rng)];
+        let args = spec_args(call, &mut rng, &spec);
+        if (call == Syscall::Retype && retyped == MAX_OBJECTS) || (call == Syscall::Revoke && args[0] == UNTYPED) {
+            continue;
+        }
+        let (rax, rdx) = syscall3(call as u64, args[0], args[1], args[2]);
+        let expected = match call {
+            Syscall::Add => Spec::add(args[0], args[1]),
+            Syscall::Retype => spec.retype(args[0], args[1], args[2], rax == RetypeSyscallError::NoRoom as u64),
+            Syscall::Mint => spec.mint(args[0], args[1], args[2]),
+            Syscall::Revoke => spec.revoke(args[0]),
+            Syscall::IpcSend => spec.send(args[0], args[1]),
+            Syscall::IpcRecv => spec.recv(args[0]),
+            Syscall::Invoke => spec.invoke(args[0], args[1], args[2]),
+            Syscall::Signal => spec.signal(args[0]),
+            _ => spec.poll(args[0]),
+        };
+        if call == Syscall::Retype && rax == 0 {
+            retyped += 1;
+        }
+        if expected.rax != rax || expected.rdx.is_some_and(|want| want != rdx) {
+            println!(
+                "# spec: step {} {:?} {:x?}: the kernel answered {:#x} (rdx {:#x}), the spec {:#x} (rdx {:x?})",
+                step, call, args, rax, rdx, expected.rax, expected.rdx
+            );
+            return 1;
+        }
+    }
+    println!("# spec: seed {} made {} calls, retyped {} objects, every answer as the spec says", seed, STEPS, retyped);
+    0
+}
+
+/// Runs the robustness storm and returns how many answers were undocumented.
+fn robustness(seed: u64) -> u64 {
+    let mut rng = SimRng::new(seed);
     let mix: OpMix<SYSCALLS> = OpMix::swarm(&mut rng);
     let mut slots = Slots { live: [0; 64], count: 0, retyped: 0 };
     slots.add(UNTYPED);
@@ -275,7 +409,7 @@ fn main(start: &ProcessStart) -> u64 {
     }
     println!(
         "# fuzz: seed {} made {} calls, retyped {} objects, {} undocumented answers",
-        start.arg, STEPS, slots.retyped, undocumented
+        seed, STEPS, slots.retyped, undocumented
     );
     undocumented
 }

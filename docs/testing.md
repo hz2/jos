@@ -15,6 +15,7 @@
 | first light | the real kernel boots the real root task (`user/root`) in test mode; its ring-3 checks print KTAP and halt the machine with the result | `check.sh boot` (4 machines), `check.sh matrix` (36) | matrix: pre-push to main, CI |
 | interactive | the root task's shell over the serial console, typed at by `jig expect` scripts (`tools/jig/expect/*.expect`) | `check.sh shell` | pre-push to main, CI |
 | robustness fuzzing | `user/fuzz`, a process holding almost nothing, throws seeded random syscalls at the kernel; every answer must be one the ABI documents | `check.sh fuzz` (64 seeds) | pre-push to main, CI |
+| differential fuzzing | the same storm made on the kernel and on `jos_core::spec`, every answer compared | `check.sh fuzz` (64 seeds) | pre-push to main, CI |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
@@ -162,3 +163,30 @@ has `fuzz [seed] [count]`.
 It found a real ambiguity on its first sweep: a message word with bit 63 set
 reaches its receiver in `rax`, where that bit flags an error, so the kernel
 now refuses to send one (`BadWord`) or to mint such a badge (`BadBadge`).
+
+### The differential storm
+
+The robustness storm only asks whether an answer is one the ABI allows. The
+differential storm asks whether it is the right one. `jos_core::spec` is an
+executable specification of one thread's non-blocking calls in its own
+capability space: slots, rights, badges, the mint tree and the count a revoke
+returns, retype out of an untyped region, and the non-blocking halves of
+endpoints (one message deep) and notifications (coalescing bits). It is
+written as plainly as possible (a flat array of slots, a parent index each, a
+linear scan for every question) and shares none of the kernel's structure.
+
+With bit 62 of its argument set, the fuzzer makes only the calls the spec
+answers (`add`, `retype`, `mint`, `revoke`, `ipc_send`, `ipc_recv`, `invoke`,
+`signal`, and `wait` with no wait), each on the kernel and on the spec, with
+arguments drawn from what the spec knows of the space, and stops at the first
+answer that differs, printing both. A `fuzz` sweep runs every seed through
+both storms (`fuzz_seed_N` and `spec_seed_N`), the first-light checks run
+differential seed 1, and `check.sh fuzz` runs 64 seeds of each.
+
+A spec is only useful if it fails when the kernel is wrong. Dropping the badge
+a plain mint inherits, or ignoring the rights mask a mint attenuates by, each
+fails the differential storm within a few hundred calls while every
+robustness seed still passes. Its first sweep found a real precedence bug: a
+retype of a CNode at an unsupported size answered `BadAlign` instead of
+`BadType`, because the kernel checked the region's alignment before whether
+the type could be made at all.

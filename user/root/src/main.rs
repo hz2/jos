@@ -38,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 31] = [
+const CHECKS: [(&str, Check); 32] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -70,6 +70,7 @@ const CHECKS: [(&str, Check); 31] = [
     ("a_timed_wait_runs_out", a_timed_wait_runs_out),
     ("revoking_a_notification_ends_its_waits", revoking_a_notification_ends_its_waits),
     ("the_kernel_answers_a_syscall_storm", the_kernel_answers_a_syscall_storm),
+    ("the_kernel_answers_as_its_spec_does", the_kernel_answers_as_its_spec_does),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -1117,6 +1118,10 @@ fn revoking_a_notification_ends_its_waits(_: &BootInfo) -> Result<(), &'static s
 /// The slot the fuzzer finds its untyped region in (`fuzz::UNTYPED`).
 const FUZZ_UNTYPED: u64 = 4;
 
+/// The bit of the fuzzer's argument that picks its differential storm
+/// (`fuzz::DIFFERENTIAL`).
+const FUZZ_DIFFERENTIAL: u64 = 1 << 62;
+
 /// How long a fuzzer run may take.
 const FUZZ_TIMEOUT_MS: u64 = 60_000;
 
@@ -1128,30 +1133,36 @@ fn run_fuzz(seed: u64) -> Result<((u64, u64), [u64; 4]), &'static str> {
     run_module_with(b"fuzz", seed, &[grant], FUZZ_TIMEOUT_MS)
 }
 
-/// Runs the fuzzer once per seed from `first`, `count` seeds in all, and
-/// reports each as a KTAP test; returns how many failed.
+/// Runs the fuzzer twice per seed from `first`, `count` seeds in all, its
+/// robustness storm and its differential one, and reports each run as a
+/// KTAP test; returns how many failed.
 fn fuzz_seeds(first: u64, count: u64) -> u64 {
-    ktap::header(usize::try_from(count).unwrap_or(0));
+    ktap::header(usize::try_from(count.saturating_mul(2)).unwrap_or(0));
     let mut failed = 0;
-    for (n, seed) in (first..first.saturating_add(count)).enumerate() {
-        println!("# run fuzz_seed_{}", seed);
-        let passed = match run_fuzz(seed) {
-            Ok(((0, PROCESS_BADGE), _)) => true,
-            Ok(((undocumented, PROCESS_BADGE), _)) => {
-                println!("# fuzz_seed_{}: {} undocumented answers", seed, undocumented);
-                false
-            }
-            Ok(((vector, _), [_, address, rip, _])) => {
-                println!("# fuzz_seed_{}: the fuzzer faulted: vector {} at rip {:#x}, address {:#x}", seed, vector, rip, address);
-                false
-            }
-            Err(why) => {
-                println!("# fuzz_seed_{}: {}", seed, why);
-                false
-            }
-        };
-        failed += u64::from(!passed);
-        println!("{} {} fuzz_seed_{}", if passed { "ok" } else { "not ok" }, n + 1, seed);
+    let mut n = 0;
+    for seed in first..first.saturating_add(count) {
+        for (name, arg) in [("fuzz_seed", seed), ("spec_seed", seed | FUZZ_DIFFERENTIAL)] {
+            n += 1;
+            println!("# run {}_{}", name, seed);
+            let passed = match run_fuzz(arg) {
+                Ok(((0, PROCESS_BADGE), _)) => true,
+                Ok(((code, PROCESS_BADGE), _)) => {
+                    let what = if arg == seed { "undocumented answers" } else { "divergence from the spec" };
+                    println!("# {}_{}: {} {}", name, seed, code, what);
+                    false
+                }
+                Ok(((vector, _), [_, address, rip, _])) => {
+                    println!("# {}_{}: the fuzzer faulted: vector {} at rip {:#x}, address {:#x}", name, seed, vector, rip, address);
+                    false
+                }
+                Err(why) => {
+                    println!("# {}_{}: {}", name, seed, why);
+                    false
+                }
+            };
+            failed += u64::from(!passed);
+            println!("{} {} {}_{}", if passed { "ok" } else { "not ok" }, n, name, seed);
+        }
     }
     failed
 }
@@ -1164,4 +1175,12 @@ fn the_kernel_answers_a_syscall_storm(_: &BootInfo) -> Result<(), &'static str> 
     let ((undocumented, badge), _) = run_fuzz(1)?;
     ensure(badge == PROCESS_BADGE, "the fuzzer faulted")?;
     ensure(undocumented == 0, "the kernel gave answers the ABI does not document")
+}
+
+/// Seed 1 of the fuzzer's differential storm: thousands of calls made on the
+/// kernel and on `jos_core::spec` alike, every answer the same.
+fn the_kernel_answers_as_its_spec_does(_: &BootInfo) -> Result<(), &'static str> {
+    let ((divergences, badge), _) = run_fuzz(1 | FUZZ_DIFFERENTIAL)?;
+    ensure(badge == PROCESS_BADGE, "the fuzzer faulted")?;
+    ensure(divergences == 0, "the kernel and the spec answered a call differently")
 }

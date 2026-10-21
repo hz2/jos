@@ -92,7 +92,7 @@ speak IPC.
 - [x] `jig`, the host-side harness: parallel QEMU boots read as KTAP, JUnit,
       reproduce commands, a machine matrix
 - [x] a syscall robustness fuzzer run as a sandboxed process
-- [ ] differential testing against an executable spec
+- [x] differential testing against an executable spec (non-blocking calls)
 
 ### M3. Hardware foundation
 

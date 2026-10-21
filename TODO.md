@@ -90,8 +90,8 @@ Check items off in the same commit that finishes them.
       its waits
 - [ ] console input, and later device interrupts, delivered as notification
       signals (the `IrqHandler` object of M4)
-- [ ] gate the ambient `exit` probe (1) behind a test feature now that the
-      Machine capability exists
+- [x] the ambient `exit` probe (1) answers `ENOSYS` once a root task runs, so
+      only the machine capability stops the machine; the fuzzer calls it
 
 ## Done: real IPC (M1), and what is left of it
 

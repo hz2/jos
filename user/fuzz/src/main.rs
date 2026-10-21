@@ -66,13 +66,13 @@ enum Answer {
 }
 
 /// Returns what `nr`'s answer may be, or `None` for a call this program does
-/// not make: one that ends the machine or this process, blocks with no way
-/// to be woken, or moves its own IPC buffer out from under it.
+/// not make: one that ends this process, blocks with no way to be woken, or
+/// moves its own IPC buffer out from under it. (The ambient `exit`, which
+/// would end the machine, is gone once a root task runs, so it is made.)
 fn answer(nr: u64) -> Option<Answer> {
     let Some(call) = Syscall::from_u64(nr) else { return Some(Answer::Unknown) };
     Some(match call {
-        Syscall::Exit
-        | Syscall::IpcSendBlocking
+        Syscall::IpcSendBlocking
         | Syscall::IpcRecvBlocking
         | Syscall::Call
         | Syscall::RecvReply
@@ -80,6 +80,8 @@ fn answer(nr: u64) -> Option<Answer> {
         | Syscall::SetIpcBuffer
         | Syscall::ThreadExit => return None,
         Syscall::Add => Answer::Any,
+        // a process under a root task has no ambient way to stop the machine.
+        Syscall::Exit => Answer::Unknown,
         Syscall::Retype => Answer::Retype,
         Syscall::Mint => Answer::Mint,
         Syscall::Invoke => Answer::Invoke,

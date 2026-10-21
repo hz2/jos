@@ -225,6 +225,10 @@ impl From<u64> for SyscallRet {
 extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> SyscallRet {
     let result: SyscallRet = match Syscall::from_u64(nr) {
         Some(Syscall::Add) => arg0.wrapping_add(arg1).into(),
+        // the ambient exit is a probe for the hand-assembled kernel tests, which
+        // start no root task; once one runs, only the machine capability can
+        // stop the machine, so no thread holding nothing can.
+        Some(Syscall::Exit) if !crate::rootserver::root_tcb().is_null() => ENOSYS.into(),
         Some(Syscall::Exit) => {
             // Exit never returns, so record it BEFORE diverging: the trace must
             // capture the final syscall too. its "result" is the exit code it

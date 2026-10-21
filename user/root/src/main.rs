@@ -38,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 32] = [
+const CHECKS: [(&str, Check); 33] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -71,6 +71,7 @@ const CHECKS: [(&str, Check); 32] = [
     ("revoking_a_notification_ends_its_waits", revoking_a_notification_ends_its_waits),
     ("the_kernel_answers_a_syscall_storm", the_kernel_answers_a_syscall_storm),
     ("the_kernel_answers_as_its_spec_does", the_kernel_answers_as_its_spec_does),
+    ("the_ambient_exit_is_gone", the_ambient_exit_is_gone),
 ];
 
 /// What a thread sends to say it is about to block.
@@ -1183,4 +1184,14 @@ fn the_kernel_answers_as_its_spec_does(_: &BootInfo) -> Result<(), &'static str>
     let ((divergences, badge), _) = run_fuzz(1 | FUZZ_DIFFERENTIAL)?;
     ensure(badge == PROCESS_BADGE, "the fuzzer faulted")?;
     ensure(divergences == 0, "the kernel and the spec answered a call differently")
+}
+
+/// Once a root task runs, the ambient `exit` probe the kernel tests use is
+/// gone: only the machine capability can stop the machine, so a process
+/// holding nothing cannot.
+fn the_ambient_exit_is_gone(_: &BootInfo) -> Result<(), &'static str> {
+    // a failure code, so a probe that still works fails the run instead of
+    // ending it as a pass.
+    let (rax, _) = libjos::syscall::syscall1(libjos::abi::Syscall::Exit as u64, 0x11);
+    ensure(rax == libjos::abi::ENOSYS, "the ambient exit probe still answers")
 }

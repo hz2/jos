@@ -50,15 +50,6 @@ pub fn add(a: u64, b: u64) -> u64 {
     syscall2(Syscall::Add as u64, a, b).0
 }
 
-/// `exit(code)`: the test probe that ends a qemu run (`0x10` passes). Prefer
-/// [`machine_halt`], which needs a capability.
-pub fn exit(code: u64) -> ! {
-    let _ = syscall1(Syscall::Exit as u64, code);
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
 /// `ipc_send(ep, word)`: sends without blocking.
 ///
 /// # Errors

@@ -29,7 +29,7 @@ below mark the first kind with "flagged".
 | nr | name | arguments | returns |
 |---|---|---|---|
 | 0 | `add` | `a`, `b` | `a + b` (wrapping) |
-| 1 | `exit` | `code` | does not return; `0x10` ends a QEMU test with success |
+| 1 | `exit` | `code` | does not return; `0x10` ends a QEMU test with success. Only in a kernel running no root task (the kernel tests); once one runs it answers `ENOSYS`, and only the machine capability stops the machine |
 
 ### Objects and capabilities
 

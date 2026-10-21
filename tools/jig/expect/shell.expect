@@ -42,6 +42,9 @@
 < hello faulted: PageFault
 > run nosuch
 < run: no such boot module
+# after all of that, the kernel still holds its own invariants.
+> selfcheck
+< all 7 kernel invariants hold
 > nosuchcommand
 < unknown command nosuchcommand; try help
 > halt 0

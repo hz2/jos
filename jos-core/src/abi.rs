@@ -195,11 +195,17 @@ pub enum Syscall {
     /// [`Syscall::ConsoleRead`] does: not at all for `ms` 0, `ms` milliseconds,
     /// or for as long as it takes for [`NO_TIMEOUT`]. Needs `READ`.
     Wait = 29,
+    /// `selfcheck(machine_slot) -> failed | errno`: checks the kernel-wide
+    /// invariants of [`invariant`] and returns the bits of those that do not
+    /// hold, so 0 means all do. A test runs it after each step, so a kernel
+    /// left inconsistent fails the step that left it so. Needs `READ` on the
+    /// Machine capability.
+    SelfCheck = 30,
 }
 
 impl Syscall {
     /// Every syscall, in number order; the numbers are dense from 0.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Add,
         Self::Exit,
         Self::IpcSend,
@@ -230,6 +236,7 @@ impl Syscall {
         Self::ConsoleRead,
         Self::Signal,
         Self::Wait,
+        Self::SelfCheck,
     ];
 
     /// Maps a raw syscall number to its enum form, or `None` if it is unknown.
@@ -248,6 +255,41 @@ pub const NO_REPLY: u64 = u64::MAX;
 
 /// The `ms` of a wait with no deadline, as for [`Syscall::ConsoleRead`].
 pub const NO_TIMEOUT: u64 = u64::MAX;
+
+/// The kernel-wide invariants [`Syscall::SelfCheck`] checks, one bit each in
+/// its answer.
+pub mod invariant {
+    /// Every registered capability space carries the id of its own entry, and
+    /// no space is registered twice.
+    pub const REGISTRY: u64 = 1 << 0;
+    /// Every derivation link names a live capability to the same object, and
+    /// every chain of them ends.
+    pub const LINKS: u64 = 1 << 1;
+    /// Every capability to a `CNode` names one that is registered.
+    pub const CNODES: u64 = 1 << 2;
+    /// Every registered thread was started and is not retired, and runs in a
+    /// registered capability space.
+    pub const THREADS: u64 = 1 << 3;
+    /// The ready set holds only registered threads, and never the running one.
+    pub const READY: u64 = 1 << 4;
+    /// Every thread parked in a blocking call is registered, parked once, and
+    /// neither ready nor running.
+    pub const WAITS: u64 = 1 << 5;
+    /// Every mapping the kernel recorded is in its address space's page
+    /// tables, pointing at the recorded object.
+    pub const MAPPINGS: u64 = 1 << 6;
+
+    /// Every invariant with its name, in bit order.
+    pub const ALL: [(u64, &str); 7] = [
+        (REGISTRY, "registry"),
+        (LINKS, "links"),
+        (CNODES, "cnodes"),
+        (THREADS, "threads"),
+        (READY, "ready"),
+        (WAITS, "waits"),
+        (MAPPINGS, "mappings"),
+    ];
+}
 
 /// Bit OR-ed into the result of a call that returns data, to mark it an error
 /// rather than a value. The high bit, so any real result below `1 << 63` is

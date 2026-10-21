@@ -270,6 +270,22 @@ fn clear(mapping: &Mapping) {
     }
 }
 
+/// Returns `true` if every recorded mapping is in its address space's page
+/// tables, a present entry at its level pointing at the recorded object, for
+/// [`crate::selfcheck`].
+#[must_use]
+pub fn check_mappings() -> bool {
+    let mappings = MAPPINGS.lock();
+    let mut held = true;
+    mappings.for_each(|m| {
+        // SAFETY: as in clear: the mapping was recorded against a live VSpace,
+        // and the registry lock serializes every walk.
+        let entry = unsafe { walk(m.vspace, m.vaddr, depth_of(m.level)) };
+        held &= entry.is_ok_and(|e| pte::is_present(*e) && pte::frame_addr(*e) == m.object);
+    });
+    held
+}
+
 /// Returns the physical address `vaddr` translates to in the address space
 /// `root`, if a frame is mapped there. Used by tests to observe mappings.
 #[must_use]

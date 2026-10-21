@@ -339,6 +339,17 @@ pub fn wait(ntfn: Slot, ms: u64) -> Result<u64, IpcSyscallError> {
     flagged(syscall2(Syscall::Wait as u64, ntfn, ms).0)
 }
 
+/// `selfcheck(machine)`: checks the kernel-wide invariants
+/// ([`invariant`](crate::abi::invariant)) and returns the bits of those that
+/// do not hold, 0 if all do.
+///
+/// # Errors
+///
+/// Why the capability was refused: it needs `READ` on the Machine.
+pub fn selfcheck(machine: Slot) -> Result<u64, IpcSyscallError> {
+    flagged(syscall1(Syscall::SelfCheck as u64, machine).0)
+}
+
 /// `machine_halt(machine, code)`: stops the machine; code 0 reports success.
 /// Returns only if the capability is refused, with the reason.
 ///

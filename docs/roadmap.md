@@ -96,6 +96,8 @@ speak IPC.
       reproduce commands, a machine matrix
 - [x] a syscall robustness fuzzer run as a sandboxed process
 - [x] differential testing against an executable spec (non-blocking calls)
+- [x] the kernel checks its own invariants (`selfcheck`) after every check and
+      every fuzzer run
 - [x] CNodes nothing can reach are released and their registry entries reused
       under new ids, so processes can come and go; revocation stays exact
       across released spaces (CAP-3)

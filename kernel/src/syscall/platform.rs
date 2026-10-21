@@ -77,6 +77,15 @@ pub(super) fn sys_console_read(console_slot: u64, max: u64, ms: u64) -> SyscallR
     ipc::park_console_reader(max, deadline)
 }
 
+/// Implements [`Syscall::SelfCheck`]: the bits of the kernel-wide invariants
+/// that do not hold, or a flagged error for a refused capability.
+pub(super) fn sys_selfcheck(machine_slot: u64) -> u64 {
+    if let Err(e) = resolve_object(machine_slot, ObjectKind::Machine, Rights::READ, IpcSyscallError::NotMachine) {
+        return e as u64 | IPC_ERR_FLAG;
+    }
+    crate::selfcheck::check()
+}
+
 /// Implements [`Syscall::MachineHalt`]. Returns only when the capability is
 /// refused.
 pub(super) fn sys_machine_halt(machine_slot: u64, code: u64) -> u64 {

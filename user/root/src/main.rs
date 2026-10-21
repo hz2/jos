@@ -22,7 +22,7 @@
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use libjos::abi::{BootInfo, FaultKind, IpcSyscallError, layout, map_flags, root_slot};
+use libjos::abi::{BootInfo, FaultKind, IpcSyscallError, invariant, layout, map_flags, root_slot};
 use libjos::jos_core::cap_rights::Rights;
 use libjos::jos_core::line::LineEditor;
 use libjos::jos_core::untyped::ObjectType;
@@ -38,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 35] = [
+const CHECKS: [(&str, Check); 36] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -49,6 +49,7 @@ const CHECKS: [(&str, Check); 35] = [
     ("writable_and_executable_is_refused", writable_and_executable_is_refused),
     ("console_without_write_is_refused", console_without_write_is_refused),
     ("machine_without_write_is_refused", machine_without_write_is_refused),
+    ("machine_without_read_cannot_selfcheck", machine_without_read_cannot_selfcheck),
     ("threads_run_and_report_back", threads_run_and_report_back),
     ("thread_ids_are_reused", thread_ids_are_reused),
     ("stale_reply_reaches_no_new_thread", stale_reply_reaches_no_new_thread),
@@ -149,6 +150,7 @@ commands:
   modules          the boot modules
   run name [arg]   start a boot module as a process, and wait for it
   fuzz [seed] [n]  throw n seeds of random syscalls at the kernel from a process
+  selfcheck        check the kernel's own invariants
   echo text        print text
   halt [code]      stop the machine; code 0 reports success";
 
@@ -214,6 +216,11 @@ fn run_command(boot: &BootInfo, line: &str) {
             let count = numbers.next().flatten().unwrap_or(1);
             let failed = fuzz_seeds(first, count);
             println!("{}", if failed == 0 { "the kernel answered every call as documented" } else { "some seeds failed" });
+        }
+        "selfcheck" => {
+            if kernel_consistent("selfcheck") {
+                println!("all {} kernel invariants hold", invariant::ALL.len());
+            }
         }
         "echo" => println!("{}", rest),
         "halt" => rt::halt(rest.parse().unwrap_or(0)),
@@ -320,6 +327,26 @@ fn run_checks(filter: &[u8]) -> usize {
     failed
 }
 
+/// Asks the kernel to check its own invariants and names each one that does
+/// not hold, as found `after` a step; returns whether all hold.
+fn kernel_consistent(after: &str) -> bool {
+    match sys::selfcheck(root_slot::MACHINE) {
+        Ok(0) => true,
+        Ok(failed) => {
+            for (bit, name) in invariant::ALL {
+                if failed & bit != 0 {
+                    println!("# {}: the kernel broke an invariant: {}", after, name);
+                }
+            }
+            false
+        }
+        Err(e) => {
+            println!("# {}: selfcheck refused: {:?}", after, e);
+            false
+        }
+    }
+}
+
 /// Returns whether `needle` occurs in `haystack`; the empty needle always does.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     needle.is_empty() || haystack.windows(needle.len()).any(|window| window == needle)
@@ -408,7 +435,8 @@ impl Runner {
             let _ = sys::reply(self.reply, 0);
         }
         while sys::recv(self.inbox).is_ok() {}
-        passed
+        // whatever the check did, it must leave the kernel consistent.
+        kernel_consistent(name) && passed
     }
 
     /// Frees the runner's objects, the copies before the endpoint, so their
@@ -576,6 +604,14 @@ fn machine_without_write_is_refused(_: &BootInfo) -> Result<(), &'static str> {
     let refused = sys::machine_halt(read_only, 0);
     sys::revoke(read_only).map_err(|_| "revoke")?;
     ensure(refused == IpcSyscallError::Denied, "read-only machine halted")
+}
+
+/// A machine capability without `READ` cannot ask the kernel to check itself.
+fn machine_without_read_cannot_selfcheck(_: &BootInfo) -> Result<(), &'static str> {
+    let write_only = sys::mint(root_slot::MACHINE, Rights::WRITE, 0).map_err(|_| "mint")?;
+    let refused = sys::selfcheck(write_only);
+    sys::revoke(write_only).map_err(|_| "revoke")?;
+    ensure(refused == Err(IpcSyscallError::Denied), "a write-only machine ran selfcheck")
 }
 
 /// Sends twice the value in field 2 on the endpoint in field 0.
@@ -1189,6 +1225,8 @@ fn fuzz_seeds(first: u64, count: u64) -> u64 {
                     false
                 }
             };
+            // the run and its teardown must leave the kernel consistent.
+            let passed = kernel_consistent(name) && passed;
             failed += u64::from(!passed);
             println!("{} {} {}_{}", if passed { "ok" } else { "not ok" }, n, name, seed);
         }

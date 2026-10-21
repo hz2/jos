@@ -83,8 +83,8 @@ mod thread;
 mod vm;
 
 pub use ipc::{
-    abort_call, cancel_waits_on, console_input_arrived, deliver_fault, expire_timed_waits, fault_endpoint,
-    forget_ipc_buffer, retire_threads, signal_notification,
+    abort_call, cancel_waits_on, check_waits, console_input_arrived, deliver_fault, expire_timed_waits,
+    fault_endpoint, forget_ipc_buffer, retire_threads, signal_notification,
 };
 
 pub use jos_core::abi::{
@@ -300,6 +300,7 @@ extern "C" fn dispatch_syscall(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> Sysc
         Some(Syscall::Signal) => ipc::sys_signal(arg0).into(),
         // wait(ntfn_slot = arg0, ms = arg1) -> bits.
         Some(Syscall::Wait) => ipc::sys_wait(arg0, arg1),
+        Some(Syscall::SelfCheck) => platform::sys_selfcheck(arg0).into(),
         None => ENOSYS.into(),
     };
     // tap the chokepoint: every returning syscall is recorded with the value it

@@ -189,6 +189,70 @@ unsafe fn still_named(object: ObjectId, local: Option<&KernelCapSpace>) -> bool 
     }
 }
 
+/// Returns `true` if `space` is registered under the id it carries.
+///
+/// # Safety
+///
+/// `space` must be null or point to a live capability space; single-CPU.
+pub(crate) unsafe fn is_registered(space: *mut KernelCapSpace) -> bool {
+    // SAFETY: per this function's contract.
+    !space.is_null() && unsafe { registered((*space).id()) }.is_some_and(|s| core::ptr::eq(s, space))
+}
+
+/// Checks the capability-space invariants for [`crate::selfcheck`] and
+/// returns the bits of `REGISTRY`, `LINKS`, and `CNODES`
+/// ([`jos_core::abi::invariant`]) that do not hold.
+///
+/// # Safety
+///
+/// Single-CPU with interrupts disabled, and no exclusive reference into a
+/// registered space may be live.
+pub(crate) unsafe fn check_spaces() -> u64 {
+    use jos_core::abi::invariant::{CNODES, LINKS, REGISTRY};
+    let mut failed = 0;
+    // SAFETY: per this function's contract; the registry and every space in it
+    // are only read.
+    unsafe {
+        let all = &*core::ptr::addr_of!(CSPACES);
+        for (entry, &space) in all.iter().enumerate() {
+            if space.is_null() {
+                if CSPACE_IS_CNODE[entry] {
+                    failed |= REGISTRY;
+                }
+                continue;
+            }
+            let own_id = SpaceId::new(entry, CSPACE_GENERATIONS[entry]);
+            if Some((*space).id()) != own_id || all[..entry].iter().any(|&s| core::ptr::eq(s, space)) {
+                failed |= REGISTRY;
+            }
+            (*space).for_each(|cap_ref, cap| {
+                // a derivation keeps the object, and so does a relink.
+                if let Some(parent) = cap.parent {
+                    let resolved = registered(parent.space).and_then(|s| (*s).lookup(parent.cap));
+                    if resolved.is_none_or(|p| p.object != cap.object) {
+                        failed |= LINKS;
+                    }
+                }
+                // every chain ends before it could have visited every slot.
+                let mut link = Some(CapLink { space: (*space).id(), cap: cap_ref });
+                for _ in 0..=MAX_CSPACES * CSPACE_SLOTS {
+                    let Some(at) = link else { break };
+                    link = registered(at.space).and_then(|s| (*s).lookup(at.cap)).and_then(|c| c.parent);
+                }
+                if link.is_some() {
+                    failed |= LINKS;
+                }
+                if cap.object.kind() == ObjectKind::CNode
+                    && !is_registered(core::ptr::with_exposed_provenance_mut(cap.object.addr))
+                {
+                    failed |= CNODES;
+                }
+            });
+        }
+    }
+    failed
+}
+
 /// Releases every `CNode` that nothing can reach any more, and returns how
 /// many it released.
 ///

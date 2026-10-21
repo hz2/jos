@@ -83,6 +83,12 @@ Check items off in the same commit that finishes them.
       differential storm; it found a `BadAlign` that should be `BadType`
 - [ ] grow the spec: other capability spaces (`cnode_copy`), mapping, threads,
       and blocking IPC, so the differential storm covers them too
+- [x] `selfcheck` (30): the kernel checks its own invariants (registry, links,
+      CNodes, threads, ready set, blocking tables, mappings) on demand; the
+      root task's runner fails any check that leaves one broken, and so does
+      the fuzz sweep for each run
+- [ ] the fuzzer calls `selfcheck` every few hundred steps (it needs a
+      read-only Machine copy), so a broken invariant points at a step, not a run
 - [x] console input: COM1 interrupts (IRQ4) fill a kernel buffer that
       `console_read` (27) takes from, waiting with an optional deadline; a
       verified line editor (LINE-1) in jos-core

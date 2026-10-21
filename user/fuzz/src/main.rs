@@ -85,9 +85,12 @@ fn answer(nr: u64) -> Option<Answer> {
         Syscall::Retype => Answer::Retype,
         Syscall::Mint => Answer::Mint,
         Syscall::Invoke => Answer::Invoke,
-        Syscall::IpcRecv | Syscall::Revoke | Syscall::RecvTimeout | Syscall::ConsoleRead | Syscall::Wait => {
-            Answer::Flagged
-        }
+        Syscall::IpcRecv
+        | Syscall::Revoke
+        | Syscall::RecvTimeout
+        | Syscall::ConsoleRead
+        | Syscall::Wait
+        | Syscall::SelfCheck => Answer::Flagged,
         _ => Answer::Status,
     })
 }

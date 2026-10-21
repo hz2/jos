@@ -746,6 +746,30 @@ pub fn retire_threads(mut doomed: impl FnMut(&Tcb) -> bool) {
     }
 }
 
+/// Checks the blocking tables for [`crate::selfcheck`]: returns
+/// [`jos_core::abi::invariant::WAITS`] if a parked thread is not registered,
+/// is parked twice, or is ready or running, and 0 otherwise.
+pub fn check_waits() -> u64 {
+    let mut parked = [false; MAX_THREADS];
+    let mut bad = false;
+    let current = crate::sched::current_thread_id();
+    let mut visit = |thread: usize| {
+        // SAFETY: thread_table_entry reads one entry, and an out-of-range id
+        // reads as null.
+        let registered = !unsafe { crate::sched::thread_table_entry(thread) }.is_null();
+        if !registered || parked[thread] || thread == current || crate::sched::is_ready(thread) {
+            bad = true;
+        } else {
+            parked[thread] = true;
+        }
+    };
+    BLOCKED_SENDS.lock().for_each(|w| visit(w.thread));
+    BLOCKED_RECVS.lock().for_each(|w| visit(w.thread));
+    CONSOLE_READERS.lock().for_each(|w| visit(w.thread));
+    NTFN_WAITERS.lock().for_each(|w| visit(w.thread));
+    if bad { jos_core::abi::invariant::WAITS } else { 0 }
+}
+
 /// Parks the current thread: saves its user context for a later [`resume`] and
 /// tells the syscall stub to yield instead of returning to user mode.
 fn park_current() {

@@ -248,6 +248,12 @@ pub unsafe fn try_register_thread(tcb: *mut Tcb) -> Option<usize> {
     Some(unsafe { register_thread(tcb) })
 }
 
+/// Returns `true` if thread `id` is in the ready set.
+#[must_use]
+pub fn is_ready(id: usize) -> bool {
+    POLICY.lock().is_ready(id)
+}
+
 /// Add a registered thread to the ready set so the scheduler can pick it.
 ///
 /// Call after [`register_thread`] for every thread that is not the initial

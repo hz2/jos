@@ -197,6 +197,7 @@ A thread with no usable fault endpoint is stopped by its fault, and only it.
 | 22 | `console_write` | console slot, length | `0` or an error |
 | 23 | `machine_halt` | machine slot, code | does not return; an error if refused |
 | 27 | `console_read` | console slot, max, milliseconds or `NO_TIMEOUT` | byte count; flagged errors |
+| 30 | `selfcheck` | machine slot | the bits of the invariants that do not hold; flagged errors |
 
 The console and the machine are singleton objects, not carved from untyped
 memory; only the root task is handed capabilities to them, and it can pass on
@@ -213,6 +214,19 @@ Input typed with no reader waiting is kept in a 256-byte buffer in the kernel
 all for `ms` 0 (`WouldBlock`), `ms` milliseconds in whole timer ticks
 (`TimedOut`), or until input comes for `NO_TIMEOUT` (`u64::MAX`). Readers are
 served oldest first, each with what it asked for.
+
+`selfcheck` needs `READ` on the machine. It checks the kernel-wide invariants
+and returns one bit for each that does not hold, so `0` means all do
+(`abi::invariant` names them): every registered capability space carries its
+entry's id (`registry`, bit 0); every derivation link names a live capability
+to the same object and every chain of them ends (`links`, 1); every capability
+to a CNode names a registered one (`cnodes`, 2); every registered thread was
+started, is not retired, and runs in a registered space (`threads`, 3); the
+ready set holds only registered threads, never the running one (`ready`, 4);
+every parked thread is registered, parked once, and neither ready nor running
+(`waits`, 5); and every recorded mapping is in its page tables, pointing at its
+object (`mappings`, 6). The root task runs it after each of its checks and each
+fuzzer run.
 
 ## Error codes
 

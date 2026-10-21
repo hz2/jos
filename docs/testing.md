@@ -16,6 +16,7 @@
 | interactive | the root task's shell over the serial console, typed at by `jig expect` scripts (`tools/jig/expect/*.expect`) | `check.sh shell` | pre-push to main, CI |
 | robustness fuzzing | `user/fuzz`, a process holding almost nothing, throws seeded random syscalls at the kernel; every answer must be one the ABI documents | `check.sh fuzz` (64 seeds) | pre-push to main, CI |
 | differential fuzzing | the same storm made on the kernel and on `jos_core::spec`, every answer compared | `check.sh fuzz` (64 seeds) | pre-push to main, CI |
+| kernel invariants | `selfcheck` (30) checks the live kernel's parts against each other; the root task runs it after every check and every fuzzer run, so a step that leaves the kernel inconsistent fails itself | `check.sh boot`, `matrix`, `fuzz`, `shell` | wherever those run |
 
 QEMU runs with `-cpu max` so SMEP/SMAP are enforced in every kernel test, under
 a 120 s timeout (`JOS_QEMU_TIMEOUT`); a fatal page fault exits with failure
@@ -94,6 +95,24 @@ starts the thread with a `call` that the thread answers and parks on in the same
 `reply_recv`, so the call returns only once the thread is parked.
 `nonblocking_send_reaches_a_parked_receiver` failed one machine of the matrix
 before it waited this way.
+
+## Kernel invariants after every step
+
+The pure core proves its parts one at a time; `selfcheck` (syscall 30, in
+`kernel/src/selfcheck.rs`) checks that the live kernel's parts agree: the
+registry of capability spaces with the spaces in it, every derivation link with
+the capability it names, the threads with the scheduler and the blocking
+tables, and the mapping registry with the page tables (`docs/syscalls.md` lists
+the seven invariants). The root task's runner asks after every check, and the
+fuzz sweep after every run, and reports a check `not ok` with the name of each
+invariant it left broken, even when its own assertions passed. The shell has a
+`selfcheck` command, which `shell.expect` types after its processes have run.
+
+`kernel/tests/selfcheck.rs` breaks each invariant on purpose, the way a bug
+would, and expects exactly its bit. End to end, an `unmap` that cleared the
+page-table entry but kept the mapping record failed every check of the suite
+with `the kernel broke an invariant: mappings`, while every check's own
+assertions still passed.
 
 ## Background notes (blog_os era)
 

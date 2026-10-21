@@ -101,6 +101,11 @@ impl<T: Copy, const N: usize> WaitTable<T, N> {
         self.len() == 0
     }
 
+    /// Calls `f` with every parked waiter, in no particular order.
+    pub fn for_each(&self, f: impl FnMut(&Waiter<T>)) {
+        self.entries.iter().flatten().for_each(f);
+    }
+
     /// Takes the waiter on `endpoint` that parked first, if there is one.
     #[must_use = "a taken waiter must be woken"]
     pub fn take_oldest(&mut self, endpoint: u64) -> Option<Waiter<T>> {

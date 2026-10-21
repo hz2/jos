@@ -145,6 +145,11 @@ impl<const N: usize> MappingTable<N> {
         }
     }
 
+    /// Calls `f` with every recorded mapping, in no particular order.
+    pub fn for_each(&self, f: impl FnMut(&Mapping)) {
+        self.entries.iter().flatten().for_each(f);
+    }
+
     /// Returns the number of recorded mappings.
     #[must_use]
     pub fn len(&self) -> usize {

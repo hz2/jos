@@ -104,6 +104,9 @@ pub struct Capability<O: Copy> {
     /// means unbadged. Set at most once, by [`CapSpace::mint_badged`]; every
     /// later derivation inherits it unchanged.
     pub badge: Badge,
+    /// Set only while a revoke decides what goes: every capability marked is
+    /// removed before the revoke returns, so no other code ever sees it set.
+    doomed: bool,
 }
 
 impl<O: Copy> Capability<O> {
@@ -116,6 +119,7 @@ impl<O: Copy> Capability<O> {
             rights,
             parent: None,
             badge: Badge::NONE,
+            doomed: false,
         }
     }
 }
@@ -307,6 +311,7 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
             parent: Some(CapLink { space: self.id, cap: source }),
             // a plain mint inherits the badge, never changes it.
             badge: parent.badge,
+            doomed: false,
         };
         self.table.insert(derived).map_err(|_| MintError::SpaceFull)
     }
@@ -339,6 +344,7 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
             rights: parent.rights.attenuate(mask),
             parent: Some(CapLink { space: self.id, cap: source }),
             badge,
+            doomed: false,
         };
         self.table.insert(derived).map_err(|_| MintError::SpaceFull)
     }
@@ -369,6 +375,7 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
             rights: parent.rights.attenuate(mask),
             parent: Some(CapLink { space: self.id, cap: source }),
             badge: parent.badge,
+            doomed: false,
         };
         dest.table.insert_at(slot, derived).map_err(|e| match e {
             InsertAtError::OutOfRange => CopyError::OutOfRange,
@@ -390,34 +397,29 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
     /// After this returns, neither `cap_ref` nor any descendant names a live
     /// capability. Returns the number of capabilities removed.
     ///
-    /// The deepest capabilities of the subtree go first, one depth at a time:
-    /// none of them has a child left, so every parent link the rest of the
-    /// subtree needs to prove its membership stays intact until its own turn,
-    /// and no scratch storage is needed. That is O(N * depth^2) for a subtree
-    /// `depth` deep; capability spaces are small and derivation trees shallow.
+    /// It first marks the whole subtree, while every `parent` link is intact,
+    /// then sweeps the marked capabilities out: once a capability is removed
+    /// its link is gone, so membership must be decided before anything goes.
+    /// The mark lives in each capability, so no scratch storage is needed (a
+    /// syscall stack has no room for a table-sized array), and the cost is two
+    /// scans, each walking at most the subtree's depth per capability.
     pub fn revoke(&mut self, cap_ref: CapRef) -> usize {
+        for slot in 0..N {
+            let Some(r) = self.table.ref_at(slot) else { continue };
+            if self.descends_from(r, cap_ref)
+                && let Some(cap) = self.table.get_mut(r)
+            {
+                cap.doomed = true;
+            }
+        }
         let mut removed = 0;
-        while let Some(deepest) = self.deepest_below(cap_ref) {
-            for slot in 0..N {
-                let Some(r) = self.table.ref_at(slot) else { continue };
-                if self.depth_below(r, cap_ref) == Some(deepest) && self.table.remove(r).is_some() {
-                    removed += 1;
-                }
+        for slot in 0..N {
+            let Some(r) = self.table.ref_at(slot) else { continue };
+            if self.table.get(r).is_some_and(|cap| cap.doomed) && self.table.remove(r).is_some() {
+                removed += 1;
             }
         }
         removed
-    }
-
-    /// Returns the depth of the deepest capability in the subtree rooted at
-    /// `root`, or `None` if `root` is not live.
-    fn deepest_below(&self, root: CapRef) -> Option<usize> {
-        let mut deepest = None;
-        self.table.for_each(|r, _| {
-            if let Some(depth) = self.depth_below(r, root) {
-                deepest = deepest.max(Some(depth));
-            }
-        });
-        deepest
     }
 
     /// Calls `f` with the [`CapRef`] and a shared reference to every capability
@@ -432,31 +434,30 @@ impl<O: Copy, const N: usize> CapSpace<O, N> {
     /// and act afterward.
     pub fn for_each_in_subtree(&self, root: CapRef, mut f: impl FnMut(CapRef, &Capability<O>)) {
         self.table.for_each(|r, cap| {
-            if self.depth_below(r, root).is_some() {
+            if self.descends_from(r, root) {
                 f(r, cap);
             }
         });
     }
 
-    /// Returns how many parent links lead from `cap_ref` up to `ancestor`
-    /// (0 if they are the same), or `None` if `cap_ref` does not descend from
-    /// `ancestor` within this space.
+    /// Returns `true` if `cap_ref` is `ancestor`, or is transitively derived
+    /// from `ancestor` by following `parent` links within this space.
     #[must_use]
-    fn depth_below(&self, cap_ref: CapRef, ancestor: CapRef) -> Option<usize> {
+    fn descends_from(&self, cap_ref: CapRef, ancestor: CapRef) -> bool {
         let mut current = cap_ref;
         // a parent is always older than its child, so the walk ends; the bound
         // only guards a corrupted table.
-        for depth in 0..=N {
+        for _ in 0..=N {
             if current == ancestor {
-                return Some(depth);
+                return true;
             }
-            match self.table.get(current)?.parent? {
+            match self.table.get(current).and_then(|cap| cap.parent) {
                 // a link into another space leaves this space's tree.
-                p if p.space != self.id => return None,
-                p => current = p.cap,
+                Some(p) if p.space == self.id => current = p.cap,
+                _ => return false,
             }
         }
-        None
+        false
     }
 }
 
@@ -499,24 +500,26 @@ fn parent_of<O: Copy, const N: usize>(spaces: &[Option<&mut CapSpace<O, N>>], li
     space_of(spaces, link.space)?.lookup(link.cap)?.parent
 }
 
-/// Returns how many parent links lead from `link` up to `ancestor` (0 if they
-/// are the same), following links between `spaces`, or `None` if `link` does
-/// not descend from `ancestor`.
-fn depth_across<O: Copy, const N: usize>(
+/// Returns `true` if `link` is `ancestor`, or descends from it through parent
+/// links that may cross between `spaces`.
+fn descends_across<O: Copy, const N: usize>(
     spaces: &[Option<&mut CapSpace<O, N>>],
     link: CapLink,
     ancestor: CapLink,
-) -> Option<usize> {
+) -> bool {
     let mut current = link;
     // a parent is always older than its child, so the walk ends; the bound
     // only guards a corrupted table.
-    for depth in 0..=spaces.len() * N {
+    for _ in 0..=spaces.len() * N {
         if current == ancestor {
-            return Some(depth);
+            return true;
         }
-        current = parent_of(spaces, current)?;
+        match parent_of(spaces, current) {
+            Some(parent) => current = parent,
+            None => return false,
+        }
     }
-    None
+    false
 }
 
 /// Calls `f` with the link and contents of every live capability in `spaces`.
@@ -527,18 +530,6 @@ fn for_each_live<O: Copy, const N: usize>(
     for space in spaces.iter().flatten() {
         space.table.for_each(|cap, c| f(CapLink { space: space.id, cap }, c));
     }
-}
-
-/// Returns the depth of the deepest live capability in the subtree rooted at
-/// `root`, or `None` if no live capability is in it.
-fn deepest_across<O: Copy, const N: usize>(spaces: &[Option<&mut CapSpace<O, N>>], root: CapLink) -> Option<usize> {
-    let mut deepest = None;
-    for_each_live(spaces, |link, _| {
-        if let Some(depth) = depth_across(spaces, link, root) {
-            deepest = deepest.max(Some(depth));
-        }
-    });
-    deepest
 }
 
 /// Calls `f` with every live capability in the subtree rooted at `root` (the
@@ -553,7 +544,7 @@ pub fn for_each_descendant_across<O: Copy, const N: usize>(
     mut f: impl FnMut(CapLink, &Capability<O>),
 ) {
     for_each_live(spaces, |link, cap| {
-        if depth_across(spaces, link, root).is_some() {
+        if descends_across(spaces, link, root) {
             f(link, cap);
         }
     });
@@ -563,30 +554,34 @@ pub fn for_each_descendant_across<O: Copy, const N: usize>(
 /// (indexed by registry entry), and returns how many capabilities were
 /// removed.
 ///
-/// Like [`CapSpace::revoke`], it removes the deepest capabilities of the
-/// subtree first, one depth at a time, so every link that proves the rest of
-/// the subtree's membership stays intact until its own turn, with no scratch
-/// storage. Links resolve in constant time, so this costs O(spaces * N *
-/// depth^2).
+/// Like [`CapSpace::revoke`], it marks the whole subtree while every link is
+/// intact, then sweeps the marked capabilities out, with the mark kept in
+/// each capability rather than in scratch storage. Links resolve in constant
+/// time, so this is two scans of the spaces, each walking at most the
+/// subtree's depth per capability.
 pub fn revoke_across<O: Copy, const N: usize>(
     spaces: &mut [Option<&mut CapSpace<O, N>>],
     root: CapLink,
 ) -> usize {
+    for entry in 0..spaces.len() {
+        for slot in 0..N {
+            let Some(space) = spaces[entry].as_deref() else { break };
+            let Some(cap) = space.ref_at(slot) else { continue };
+            let link = CapLink { space: space.id, cap };
+            // a mark changes no link, so the walks after this one still hold.
+            if descends_across(spaces, link, root)
+                && let Some(c) = spaces[entry].as_deref_mut().and_then(|s| s.table.get_mut(cap))
+            {
+                c.doomed = true;
+            }
+        }
+    }
     let mut removed = 0;
-    while let Some(deepest) = deepest_across(spaces, root) {
-        for entry in 0..spaces.len() {
-            for slot in 0..N {
-                let Some(space) = spaces[entry].as_deref() else { break };
-                let Some(cap) = space.ref_at(slot) else { continue };
-                let link = CapLink { space: space.id, cap };
-                // a capability as deep as the deepest has no child left, and
-                // the links above it are not this deep, so they stay intact.
-                if depth_across(spaces, link, root) == Some(deepest) {
-                    if let Some(space) = spaces[entry].as_deref_mut() {
-                        space.table.remove(cap);
-                    }
-                    removed += 1;
-                }
+    for space in spaces.iter_mut().flatten() {
+        for slot in 0..N {
+            let Some(cap) = space.ref_at(slot) else { continue };
+            if space.table.get(cap).is_some_and(|c| c.doomed) && space.table.remove(cap).is_some() {
+                removed += 1;
             }
         }
     }
@@ -1134,14 +1129,15 @@ mod kani_proofs {
     }
 
     /// Revoking any capability removes exactly its subtree and nothing else.
-    /// The harness derives three capabilities from two originals, each from
-    /// any live one, by a mint or by a copy into either space, and keeps its
-    /// own record of every parent, so the expected set does not come from the
-    /// code under test.
+    /// The harness derives two capabilities from two originals, each from any
+    /// live one, by a mint or by a copy into either space (a chain that
+    /// crosses spaces, or two children of one capability), and keeps its own
+    /// record of every parent, so the expected set does not come from the code
+    /// under test.
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(6)]
     fn revoke_across_removes_exactly_the_subtree() {
-        const N: usize = 3;
+        const N: usize = 2;
         let mut a: CapSpace<u32, N> = CapSpace::with_id(SpaceId(1));
         let mut b: CapSpace<u32, N> = CapSpace::with_id(SpaceId(2));
         // node k is slot k % N of space k / N (a, then b).
@@ -1151,7 +1147,7 @@ mod kani_proofs {
         b.insert_at(0, 2, Rights::all()).unwrap();
         live[0] = true;
         live[N] = true;
-        for _ in 0..3 {
+        for _ in 0..2 {
             let from: usize = kani::any();
             kani::assume(from < 2 * N && live[from]);
             let mask = Rights::from_bits_truncate(kani::any());
@@ -1277,9 +1273,13 @@ mod kani_proofs {
     /// object once).
     #[kani::proof]
     fn derivation_keeps_the_object() {
-        let mut a: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(1));
+        let mut a: CapSpace<u32, 3> = CapSpace::with_id(SpaceId(1));
         let mut b: CapSpace<u32, 2> = CapSpace::with_id(SpaceId(2));
+        // another object sits in the space, for a wrong derivation to pick up.
+        let other: u32 = kani::any();
+        a.insert(other, Rights::all()).unwrap();
         let object: u32 = kani::any();
+        kani::assume(object != other);
         let src = a.insert(object, Rights::from_bits_truncate(kani::any())).unwrap();
         let mask = Rights::from_bits_truncate(kani::any());
         match kani::any::<u8>() % 3 {

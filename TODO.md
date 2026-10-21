@@ -138,8 +138,8 @@ Check items off in the same commit that finishes them.
 - [ ] capability transfer on `Reply` (replies carry words only today)
 - [x] `Revoke` (21): revoke a capability and everything derived from it,
       in every capability space, from userspace
-- [x] `revoke_across` resolves a link in constant time and scans the spaces once
-      per depth of the subtree, no longer once per removed capability
+- [x] `revoke_across` resolves a link in constant time and scans the spaces
+      twice (mark, then sweep), no longer once per removed capability
 - [ ] JPC-1 Verus proof (rendezvous deadlock-freedom)
 
 ## Hardening (small, do alongside)

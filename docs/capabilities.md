@@ -98,12 +98,13 @@ Every `CapRef` minted before that removal becomes permanently stale: slot
 reuse does not let old tokens reach the new occupant. This is O(1) revocation
 -- no CDT walk, no broadcast to holders.
 
-`CapSpace::revoke` extends this to subtrees. It removes the deepest
-capabilities of the subtree first, one depth at a time: none of them has a
-child left, and the links above them are not that deep, so every `parent` link
-the rest of the subtree needs to prove its membership stays intact until its
-own turn. No scratch storage is needed, which matters on a 12 KiB syscall
-stack, and the cost is O(N * depth^2) for a subtree `depth` deep.
+`CapSpace::revoke` extends this to subtrees. It first marks the whole
+subtree, following `parent` links while they are all intact, then sweeps the
+marked capabilities out: removing a capability destroys its link, so
+membership has to be decided before anything goes. The mark is a flag in each
+capability, set and cleared within the one call, so no scratch storage is
+needed (a 12 KiB syscall stack has no room for a table-sized array), and the
+cost is two scans, each walking at most the subtree's depth per capability.
 
 `CapSpace::ref_at(slot)` reconstructs a live `CapRef` from a plain slot index
 against the current generation. This is how the syscall boundary works: user
@@ -117,8 +118,8 @@ derivation link can point into it and a revoke can reach it. A space's
 `SpaceId` names its registry entry and that entry's generation, so a link
 resolves in constant time, and once a space is released and its entry reused,
 a link left behind to the old space reaches nothing. `revoke_across` works on
-the whole registry, lent as a slice indexed by entry, at O(entries * N *
-depth^2) per revoke.
+the whole registry, lent as a slice indexed by entry, in two scans of it per
+revoke.
 
 A `CNode` is released once nothing can reach it (`cap::collect_cnodes`). The
 roots are the kernel's own spaces and the space of every registered thread; a
@@ -260,11 +261,11 @@ jos intentionally departs from seL4 in three places:
   from its source, and revoking the source removes it. Unlike seL4, the links
   live in the capabilities themselves rather than a separate structure, and
   removing one capability is O(1): its slot's generation bumps, so every
-  outstanding ref to it goes stale at once. A subtree revoke removes the
-  deepest capabilities first across every registered space; userspace asks
-  for it with the `Revoke` syscall. A `CNode` is released when nothing can
-  reach it, where seL4 deletes one with its last capability, so a cycle of
-  `CNode`s goes too.
+  outstanding ref to it goes stale at once. A subtree revoke marks the
+  subtree across every registered space, then removes what it marked;
+  userspace asks for it with the `Revoke` syscall. A `CNode` is released
+  when nothing can reach it, where seL4 deletes one with its last
+  capability, so a cycle of `CNode`s goes too.
   A thread stops for good when its TCB, or the CNode or VSpace it runs in,
   loses its last capability: it leaves the run queue and any IPC wait. Because
   a TCB does not hold capabilities to its own CNode and VSpace (seL4 TCBs do),

@@ -38,7 +38,7 @@ libjos::root_entry!(main);
 type Check = fn(&BootInfo) -> Result<(), &'static str>;
 
 /// Every first-light check, in order.
-const CHECKS: [(&str, Check); 36] = [
+const CHECKS: [(&str, Check); 38] = [
     ("boot_info_is_consistent", boot_info_is_consistent),
     ("add_probe_round_trips", add_probe_round_trips),
     ("endpoint_carries_a_word", endpoint_carries_a_word),
@@ -55,6 +55,8 @@ const CHECKS: [(&str, Check); 36] = [
     ("stale_reply_reaches_no_new_thread", stale_reply_reaches_no_new_thread),
     ("nonblocking_send_reaches_a_parked_receiver", nonblocking_send_reaches_a_parked_receiver),
     ("nonblocking_recv_takes_a_parked_sender", nonblocking_recv_takes_a_parked_sender),
+    ("reaping_a_parked_receiver_takes_it_out_of_the_wait", reaping_a_parked_receiver_takes_it_out_of_the_wait),
+    ("reaping_a_ready_thread_takes_it_off_the_scheduler", reaping_a_ready_thread_takes_it_off_the_scheduler),
     ("page_fault_reaches_its_handler", page_fault_reaches_its_handler),
     ("invalid_opcode_reaches_its_handler", invalid_opcode_reaches_its_handler),
     ("fault_without_a_handler_stops_only_that_thread", fault_without_a_handler_stops_only_that_thread),
@@ -756,6 +758,48 @@ fn nonblocking_send_reaches_a_parked_receiver(_: &BootInfo) -> Result<(), &'stat
     ensure(sent.is_ok(), "the send was refused")?;
     ensure(stranded == Err(IpcSyscallError::WouldBlock), "the message stayed in the endpoint")?;
     ensure(got == Ok((77, 0)), "the parked receiver did not get the message")
+}
+
+/// Reaping a thread parked in a receive takes it out of the wait: a later
+/// send stays in the endpoint for whoever receives next, instead of going to
+/// the thread that is gone.
+fn reaping_a_parked_receiver_takes_it_out_of_the_wait(_: &BootInfo) -> Result<(), &'static str> {
+    let inbox = object(ObjectType::Endpoint)?;
+    let report = object(ObjectType::Endpoint)?;
+    let reply = object(ObjectType::Reply)?;
+    let waiter = spawn_parked(receive_and_report, pack(inbox, report, reply), report)?;
+    waiter.reap();
+    let after = sys::selfcheck(root_slot::MACHINE);
+    let sent = sys::send(inbox, 88);
+    let kept = sys::recv(inbox);
+    release(&[inbox, report, reply])?;
+    ensure(after.is_ok_and(|failed| failed & invariant::WAITS == 0), "the reaped thread stayed parked")?;
+    ensure(sent.is_ok(), "the send was refused")?;
+    ensure(kept == Ok((88, 0)), "the message went to the thread that was reaped")
+}
+
+/// Reaping a thread while it is ready to run takes it off the scheduler, and
+/// the next thread started still runs.
+fn reaping_a_ready_thread_takes_it_off_the_scheduler(_: &BootInfo) -> Result<(), &'static str> {
+    let spinner = Thread::spawn(spin_forever, 0, 1).map_err(|_| "spawn")?;
+    // let it run, so it is in the ready set when this thread reaps it.
+    spin_past_a_tick();
+    spinner.reap();
+    let after = sys::selfcheck(root_slot::MACHINE);
+    let report = object(ObjectType::Endpoint)?;
+    let next = Thread::spawn(double_and_report, pack(report, 0, 21), 1).map_err(|_| "spawn")?;
+    let got = sys::recv_timeout(report, None, 2000);
+    next.reap();
+    release(&[report])?;
+    ensure(after.is_ok_and(|failed| failed & invariant::READY == 0), "the reaped thread stayed in the ready set")?;
+    ensure(got == Ok((42, 0)), "the next thread did not run")
+}
+
+/// Spins until it is stopped.
+extern "C" fn spin_forever(_: u64) {
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 /// A non-blocking receive takes the message in the endpoint's slot first (it

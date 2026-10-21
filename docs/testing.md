@@ -119,6 +119,13 @@ CNode was reported as `spec: step 249 broke a kernel invariant: registry`. That
 mutation first hung the kernel, the sweep releasing the same empty entry
 forever, so the sweep now releases only entries that hold a space.
 
+Two planted bugs passed the whole suite, selfcheck included: a reaped thread
+left parked in a receive, and one left in the ready set. No check reaped a
+thread in either state, and the next step cleaned up after both before the
+runner looked. `reaping_a_parked_receiver_takes_it_out_of_the_wait` and
+`reaping_a_ready_thread_takes_it_off_the_scheduler` now reap in those states and
+ask selfcheck at once, and fail under each bug.
+
 ## Background notes (blog_os era)
 
 
